@@ -1,0 +1,525 @@
+<template>
+	<XnResizablePanel direction="row" :initial-size="300" :min-size="200" :max-size="500" :md="0">
+		<template #left>
+			<div ref="treeContainerRef" style="height: 100%; display: flex; flex-direction: column">
+				<a-input-search
+					v-model:value="treeSearchKey"
+					placeholder="搜索机构"
+					allow-clear
+					style="margin-bottom: 8px; flex-shrink: 0"
+					@search="onTreeSearch"
+				/>
+				<div style="flex: 1; overflow: hidden">
+					<xn-tree-skeleton v-if="treeLoading && treeData.length === 0" />
+					<a-spin v-else-if="treeData.length > 0" :spinning="treeLoading">
+						<a-tree
+							v-model:expandedKeys="defaultExpandedKeys"
+							v-model:loadedKeys="treeLoadedKeys"
+							:show-line="{ showLeafIcon: false }"
+							:tree-data="treeData"
+							:field-names="treeFieldNames"
+							:load-data="searchMode ? undefined : onLoadData"
+							:height="treeHeight"
+							@select="treeSelect"
+						/>
+					</a-spin>
+					<a-empty v-else :image="Empty.PRESENTED_IMAGE_SIMPLE" />
+				</div>
+			</div>
+		</template>
+		<template #right>
+			<a-form ref="searchFormRef" :model="searchFormState">
+				<a-row :gutter="10">
+					<a-col :xs="24" :sm="8" :md="8" :lg="0" :xl="0">
+						<a-form-item label="所属机构" name="orgId">
+							<a-tree-select
+								v-model:value="searchFormState.orgId"
+								class="xn-wd"
+								:dropdown-style="{ maxHeight: '400px', overflow: 'auto' }"
+								placeholder="请选择所属机构"
+								allow-clear
+								:tree-data="treeData"
+								:field-names="treeSelectFieldNames"
+								tree-line
+								:load-data="onLoadData"
+							/>
+						</a-form-item>
+					</a-col>
+					<a-col :xs="24" :sm="8" :md="8" :lg="8" :xl="8">
+						<a-form-item name="searchKey" label="关键词">
+							<a-input v-model:value="searchFormState.searchKey" placeholder="请输入姓名或关键词" />
+						</a-form-item>
+					</a-col>
+					<a-col :xs="24" :sm="8" :md="8" :lg="8" :xl="8">
+						<a-form-item name="userStatus" label="人员状态">
+							<a-select
+								v-model:value="searchFormState.userStatus"
+								placeholder="请选择人员状态"
+								:getPopupContainer="(trigger) => trigger.parentNode"
+							>
+								<a-select-option v-for="item in statusData" :key="item.value" :value="item.value">{{
+									item.label
+								}}</a-select-option>
+							</a-select>
+						</a-form-item>
+					</a-col>
+					<a-col :xs="24" :sm="8" :md="8" :lg="8" :xl="8">
+						<a-form-item>
+							<a-space>
+								<a-button type="primary" @click="tableRef.refresh(true)">
+									<template #icon><SearchOutlined /></template>
+									查询
+								</a-button>
+								<a-button @click="reset">
+									<template #icon><redo-outlined /></template>
+									重置
+								</a-button>
+							</a-space>
+						</a-form-item>
+					</a-col>
+				</a-row>
+			</a-form>
+			<s-table
+				ref="tableRef"
+				:columns="columns"
+				:data="loadData"
+				:expand-row-by-click="true"
+				bordered
+				:alert="options.alert.show"
+				:tool-config="toolConfig"
+				:row-key="(record) => record.id"
+				:row-selection="options.rowSelection"
+				:scroll="{ x: 'max-content' }"
+			>
+				<template #operator>
+					<a-space>
+						<a-button
+							type="primary"
+							@click="formRef.onOpen(undefined, searchFormState.orgId)"
+							v-if="hasPerm('bizUserAdd')"
+						>
+							<template #icon><plus-outlined /></template>
+							<span>增加</span>
+						</a-button>
+						<a-button @click="exportBatchUserVerify" v-if="hasPerm('bizUserBatchExport')">
+							<template #icon><export-outlined /></template>
+							批量导出
+						</a-button>
+						<xn-batch-button
+							v-if="hasPerm('bizUserBatchDelete')"
+							buttonName="批量删除"
+							icon="DeleteOutlined"
+							buttonDanger
+							:selectedRowKeys="selectedRowKeys"
+							@batchCallBack="deleteBatchUser"
+						/>
+					</a-space>
+				</template>
+				<template #bodyCell="{ column, record }">
+					<template v-if="column.dataIndex === 'avatar'">
+						<a-avatar :src="record.avatar" style="margin-bottom: -5px; margin-top: -5px" />
+					</template>
+					<template v-if="column.dataIndex === 'gender'">
+						<a-tag :color="$TOOL.dictTypeColor('GENDER', record.gender)">{{ $TOOL.dictTypeData('GENDER', record.gender) }}</a-tag>
+					</template>
+					<template v-if="column.dataIndex === 'userStatus'">
+						<a-switch
+							:loading="loading"
+							:checked="record.userStatus === 'ENABLE'"
+							@change="editStatus(record)"
+							v-if="hasPerm('bizUserUpdataStatus')"
+						/>
+						<a-tag v-else :color="$TOOL.dictTypeColor('COMMON_STATUS', record.userStatus)">{{ $TOOL.dictTypeData('COMMON_STATUS', record.userStatus) }}</a-tag>
+					</template>
+					<template v-if="column.dataIndex === 'action'">
+						<a @click="formRef.onOpen(record)" v-if="hasPerm('bizUserEdit')">编辑</a>
+						<a-divider type="vertical" v-if="hasPerm(['bizUserEdit', 'bizUserDelete'], 'and')" />
+						<a-popconfirm title="确定要删除吗？" @confirm="removeUser(record)">
+							<a-button type="link" danger size="small" v-if="hasPerm('bizUserDelete')"> 删除 </a-button>
+						</a-popconfirm>
+						<a-divider
+							type="vertical"
+							v-if="hasPerm(['bizUserGrantRole', 'bizUserPwdReset', 'bizUserExportUserInfo', 'bizUserTransfer'])"
+						/>
+						<a-dropdown v-if="hasPerm(['bizUserGrantRole', 'bizUserPwdReset', 'bizUserExportUserInfo', 'bizUserTransfer'])">
+							<a class="ant-dropdown-link">
+								更多
+								<DownOutlined />
+							</a>
+							<template #overlay>
+								<a-menu>
+									<a-menu-item v-if="hasPerm('bizUserPwdReset')">
+										<a-popconfirm title="确定要重置吗？" placement="topRight" @confirm="resetPassword(record)">
+											<a>重置密码</a>
+										</a-popconfirm>
+									</a-menu-item>
+									<a-menu-item v-if="hasPerm('bizUserGrantRole')">
+										<a @click="selectRole(record)">授权角色</a>
+									</a-menu-item>
+									<a-menu-item v-if="hasPerm('bizUserExportUserInfo')">
+										<a @click="exportUserInfo(record)">导出信息</a>
+									</a-menu-item>
+									<a-menu-item v-if="hasPerm('bizUserTransfer')">
+										<a @click="transferRef.onOpen(record)">权限调整</a>
+									</a-menu-item>
+								</a-menu>
+							</template>
+						</a-dropdown>
+					</template>
+				</template>
+			</s-table>
+		</template>
+	</XnResizablePanel>
+	<Form ref="formRef" @successful="tableRef.refresh()" />
+	<Transfer ref="transferRef" @successful="tableRef.refresh()" />
+	<xn-role-selector
+		ref="RoleSelectorPlusRef"
+		:org-tree-api="selectorApiFunction.orgTreeApi"
+		:role-page-api="selectorApiFunction.rolePageApi"
+		:add-show="false"
+		:role-global="true"
+		@onBack="roleBack"
+	/>
+</template>
+<script setup name="bizUser">
+	import { message, Empty } from 'ant-design-vue'
+	import { triggerRef, onMounted, onActivated, onUnmounted } from 'vue'
+	import tool from '@/utils/tool'
+	import downloadUtil from '@/utils/downloadUtil'
+	import bizUserApi from '@/api/biz/bizUserApi'
+	import bizOrgApi from '@/api/biz/bizOrgApi'
+	import Form from './form.vue'
+	import Transfer from './transfer.vue'
+
+	const columns = [
+		{
+			title: '头像',
+			dataIndex: 'avatar',
+			align: 'center'
+		},
+		{
+			title: '账号',
+			dataIndex: 'account',
+			ellipsis: true
+		},
+		{
+			title: '姓名',
+			dataIndex: 'name'
+		},
+		{
+			title: '性别',
+			dataIndex: 'gender'
+		},
+		{
+			title: '手机',
+			dataIndex: 'phone',
+			ellipsis: true
+		},
+		{
+			title: '机构',
+			dataIndex: 'orgName',
+			ellipsis: true
+		},
+		{
+			title: '职位',
+			dataIndex: 'positionName',
+			ellipsis: true
+		},
+		{
+			title: '状态',
+			dataIndex: 'userStatus'
+		}
+	]
+	if (hasPerm(['bizUserEdit', 'bizUserGrantRole', 'bizUserPwdReset', 'bizUserExportUserInfo', 'bizUserTransfer', 'bizUserDelete'])) {
+		columns.push({
+			title: '操作',
+			dataIndex: 'action',
+			align: 'center',
+			fixed: 'right'
+		})
+	}
+	const toolConfig = { refresh: true, height: true, columnSetting: true }
+	const statusData = tool.dictList('COMMON_STATUS')
+	const searchFormRef = ref()
+	const defaultExpandedKeys = ref([])
+	const searchFormState = ref({})
+	const tableRef = ref(null)
+	const treeData = ref([])
+	const selectedRowKeys = ref([])
+	const treeFieldNames = { children: 'children', title: 'name', key: 'id' }
+	const treeSelectFieldNames = { children: 'children', label: 'name', value: 'id' }
+	const formRef = ref(null)
+	const transferRef = ref(null)
+	const RoleSelectorPlusRef = ref()
+	const selectedRecord = ref({})
+	const loading = ref(false)
+	// 树容器高度自适应
+	const treeContainerRef = ref(null)
+	const treeHeight = ref(0)
+	let resizeObserver = null
+	const calcTreeHeight = () => {
+		if (treeContainerRef.value) {
+			treeHeight.value = treeContainerRef.value.clientHeight - 40
+		}
+	}
+	onMounted(() => {
+		calcTreeHeight()
+		if (treeContainerRef.value) {
+			resizeObserver = new ResizeObserver(calcTreeHeight)
+			resizeObserver.observe(treeContainerRef.value)
+		}
+	})
+	onActivated(calcTreeHeight)
+	onUnmounted(() => {
+		if (resizeObserver) {
+			resizeObserver.disconnect()
+		}
+	})
+	// 表格查询 返回 Promise 对象
+	const loadData = (parameter) => {
+		return bizUserApi.userPage(Object.assign(parameter, searchFormState.value)).then((res) => {
+			return res
+		})
+	}
+	// 重置
+	const reset = () => {
+		searchFormRef.value.resetFields()
+		tableRef.value.refresh(true)
+	}
+	const treeLoading = ref(true)
+	const treeSearchKey = ref('')
+	const searchMode = ref(false)
+	const treeLoadedKeys = ref([])
+	const collectTreeKeys = (nodes) => {
+		const keys = []
+		const traverse = (list) => {
+			if (!list) return
+			list.forEach((node) => {
+				keys.push(node.id)
+				if (node.children) traverse(node.children)
+			})
+		}
+		traverse(nodes)
+		return keys
+	}
+	const onTreeSearch = (value) => {
+		if (!value || !value.trim()) {
+			// 先清空树数据和展开状态，再切换模式，避免懒加载风暴导致卡死
+			treeData.value = []
+			defaultExpandedKeys.value = []
+			treeLoadedKeys.value = []
+			searchMode.value = false
+			loadTreeData()
+			return
+		}
+		treeLoading.value = true
+		searchMode.value = true
+		bizOrgApi
+			.orgTree({ searchKey: value.trim() })
+			.then((res) => {
+				if (res !== null) {
+					treeData.value = res
+					defaultExpandedKeys.value = collectTreeKeys(res)
+				} else {
+					treeData.value = []
+				}
+			})
+			.finally(() => {
+				treeLoading.value = false
+			})
+	}
+	// 加载左侧树
+	const loadTreeData = () => {
+		treeLoading.value = true
+		bizOrgApi
+			.orgTree()
+			.then((res) => {
+				if (res !== null) {
+					treeLoadedKeys.value = []
+					defaultExpandedKeys.value = []
+					treeData.value = res.map((item) => {
+						return {
+							...item,
+							isLeaf: item.isLeaf === undefined ? false : item.isLeaf
+						}
+					})
+					// 只有一个根节点时才自动展开
+					if (treeData.value.length === 1) {
+						defaultExpandedKeys.value = [treeData.value[0].id]
+					}
+				}
+			})
+			.finally(() => {
+				treeLoading.value = false
+			})
+	}
+	loadTreeData()
+	// 懒加载子节点
+	const onLoadData = (treeNode) => {
+		return new Promise((resolve) => {
+			if (treeNode.dataRef.children || treeNode.dataRef.isLeaf) {
+				resolve()
+				return
+			}
+			bizOrgApi
+				.orgTree({ parentId: treeNode.dataRef.id })
+				.then((res) => {
+					treeNode.dataRef.children = res.map((item) => {
+						return {
+							...item,
+							isLeaf: item.isLeaf === undefined ? false : item.isLeaf
+						}
+					})
+					triggerRef(treeData)
+					resolve()
+				})
+				.catch(() => {
+					resolve()
+				})
+		})
+	}
+	// 列表选择配置
+	const options = {
+		alert: {
+			show: false,
+			clear: () => {
+				selectedRowKeys.value = ref([])
+			}
+		},
+		rowSelection: {
+			onChange: (selectedRowKey, selectedRows) => {
+				selectedRowKeys.value = selectedRowKey
+			}
+		}
+	}
+	// 左侧树查询
+	const treeSelect = (selectedKeys) => {
+		if (selectedKeys.length > 0) {
+			searchFormState.value.orgId = selectedKeys.toString()
+		} else {
+			delete searchFormState.value.orgId
+		}
+		tableRef.value.refresh(true)
+	}
+	// 修改状态
+	const editStatus = (record) => {
+		loading.value = true
+		if (record.userStatus === 'ENABLE') {
+			bizUserApi
+				.userDisableUser(record)
+				.then(() => {
+					tableRef.value.refresh()
+				})
+				.finally(() => {
+					loading.value = false
+				})
+		} else {
+			bizUserApi
+				.userEnableUser(record)
+				.then(() => {
+					tableRef.value.refresh()
+				})
+				.finally(() => {
+					loading.value = false
+				})
+		}
+	}
+	// 删除人员
+	const removeUser = (record) => {
+		let params = [
+			{
+				id: record.id
+			}
+		]
+		bizUserApi.userDelete(params).then(() => {
+			tableRef.value.refresh()
+		})
+	}
+	// 批量导出校验并加参数
+	const exportBatchUserVerify = () => {
+		if ((selectedRowKeys.value.length < 1) & !searchFormState.value.searchKey & !searchFormState.value.userStatus) {
+			message.warning('请输入查询条件或勾选要导出的信息')
+		}
+		if (selectedRowKeys.value.length > 0) {
+			const params = {
+				userIds: selectedRowKeys.value
+					.map((m) => {
+						return m
+					})
+					.join()
+			}
+			exportBatchUser(params)
+			return
+		}
+		if (searchFormState.value.searchKey || searchFormState.value.userStatus) {
+			const params = {
+				searchKey: searchFormState.value.searchKey,
+				userStatus: searchFormState.value.userStatus
+			}
+			exportBatchUser(params)
+		}
+	}
+	// 批量导出
+	const exportBatchUser = (params) => {
+		bizUserApi.userExport(params).then((res) => {
+			downloadUtil.resultDownload(res)
+			tableRef.value.clearSelected()
+		})
+	}
+	// 批量删除
+	const deleteBatchUser = (params) => {
+		bizUserApi.userDelete(params).then(() => {
+			tableRef.value.clearRefreshSelected()
+		})
+	}
+	// 打开角色选择器
+	const selectRole = (record) => {
+		selectedRecord.value = record
+		// 查询到已有角色，并转为ids的格式，给角色选择器
+		const param = {
+			id: record.id
+		}
+		bizUserApi.userOwnRole(param).then((data) => {
+			RoleSelectorPlusRef.value.showModel(data)
+		})
+	}
+	// 角色选择回调
+	const roleBack = (value) => {
+		let params = {
+			id: selectedRecord.value.id,
+			roleIdList: []
+		}
+		if (value.length > 0) {
+			value.forEach((item) => {
+				params.roleIdList.push(item)
+			})
+		}
+		bizUserApi.grantRole(params).then(() => {})
+	}
+	// 重置人员密码
+	const resetPassword = (record) => {
+		bizUserApi.userResetPassword(record).then(() => {})
+	}
+	// 导出用户信息
+	const exportUserInfo = (record) => {
+		const params = {
+			id: record.id
+		}
+		bizUserApi.userExportUserInfo(params).then((res) => {
+			downloadUtil.resultDownload(res)
+		})
+	}
+	// 传递设计器需要的API
+	const selectorApiFunction = {
+		orgTreeApi: (param) => {
+			return bizUserApi.userOrgTreeSelector(param).then((orgTree) => {
+				return Promise.resolve(orgTree)
+			})
+		},
+		rolePageApi: (param) => {
+			return bizUserApi.userRoleSelector(param).then((data) => {
+				return Promise.resolve(data)
+			})
+		}
+	}
+</script>

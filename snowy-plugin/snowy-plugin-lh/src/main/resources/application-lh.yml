@@ -1,0 +1,61 @@
+# 湖仓外部组件默认值（application.properties 的 lh.* 优先生效）
+# 凭证：运行时从 vault-path → ig_secret_store 读取；yml 明文仅作首次 bootstrap 种子
+lh:
+  vault:
+    aes-key: ""
+  trino:
+    url: https://127.0.0.1:18080
+    vault-path: platform/trino/query
+    user: admin
+    password: ""
+    insecure-ssl: true
+  ds:
+    url: http://127.0.0.1:12345/dolphinscheduler
+    vault-path: platform/dolphinscheduler/api
+    user: admin
+    password: ""
+    # token:  # 在 DS UI 创建后填入，或写入 Vault
+  flink:
+    url: http://127.0.0.1:8081
+    vault-path: platform/flink/ui
+    user: admin
+    password: ""
+  clickhouse:
+    url: http://127.0.0.1:8123
+    vault-path: platform/clickhouse/default
+    user: default
+    password: ""
+  sqlrest:
+    manager-url: http://127.0.0.1:18090
+  apisix:
+    admin-url: http://127.0.0.1:9180
+    vault-path: platform/apisix/admin
+    api-key: 
+  openmetadata:
+    url: http://127.0.0.1:8585
+    vault-path: platform/openmetadata/bot
+    # token:  # 在 OM 创建 Bot 后填入，启动自动种子；或调用 /lh/engine/om/rotateBotToken
+    email: admin@open-metadata.org
+    lake-service: lakehouse
+    lake-database: default
+  gravitino:
+    url: http://127.0.0.1:8090
+    vault-path: platform/gravitino/api
+    user: admin
+    password: ""
+    metalake: lakehouse
+    catalog: iceberg
+  schema-sync:
+    enabled: true
+    schemas: ""
+  superset:
+    url: http://127.0.0.1:8088
+    vault-path: platform/superset/api
+    user: admin
+    password: ""
+  minio:
+    url: http://127.0.0.1:9009
+    vault-path: platform/minio/s3
+    # access-key / secret-key 建议只写 Vault，此处可留空
+  etl:
+    default-engine: flink

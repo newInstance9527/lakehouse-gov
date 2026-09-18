@@ -1,0 +1,47 @@
+*.class
+
+# Package Files #
+*.jar
+*.war
+*.ear
+target/
+
+# eclipse
+.settings/
+.classpath
+.project
+logs/
+
+# idea
+.idea/
+*.iml
+.murphy.yml
+
+*velocity.log*
+
+### STS ###
+.apt_generated
+.factorypath
+.springBeans
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.ipr
+*.log
+
+# 临时排查/运维脚本统一归档目录（勿提交内容）
+# 约定：一次性探测、连库检查、手工 curl 封装等一律放 tmp/scripts/
+tmp/
+
+# 误落在仓库根目录的临时脚本（兜底忽略）
+/_check_*.py
+/_check_*.sh
+/_check_*.ps1
+/_tmp_*.*
+/_scratch_*.*
+/adhoc_*.*
+!**/src/main/resources/lib/*.jar
+!**/allatori/**
+.cursor/
+

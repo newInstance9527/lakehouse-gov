@@ -1,0 +1,96 @@
+-- 数据源管理域表（ig_*）
+-- MySQL 8.x：InnoDB + utf8mb4；对齐 doc/平台业务库表结构草案.md · doc/数据源管理.md
+
+CREATE TABLE IF NOT EXISTS `ig_secret_store` (
+  `vault_path`    varchar(512)  NOT NULL COMMENT 'Vault路径',
+  `secret_cipher` text          NOT NULL COMMENT '密文',
+  `delete_flag`   varchar(32)   DEFAULT 'NOT_DELETE' COMMENT '删除标志',
+  `create_time`   datetime      DEFAULT NULL COMMENT '创建时间',
+  `create_user`   varchar(20)   DEFAULT NULL COMMENT '创建用户',
+  `update_time`   datetime      DEFAULT NULL COMMENT '修改时间',
+  `update_user`   varchar(20)   DEFAULT NULL COMMENT '修改用户',
+  PRIMARY KEY (`vault_path`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='密钥库';
+
+CREATE TABLE IF NOT EXISTS `ig_datasource` (
+  `id`             varchar(20)   NOT NULL COMMENT '主键',
+  `revision`       int           NOT NULL DEFAULT 1 COMMENT '乐观锁版本',
+  `ws`             varchar(64)   DEFAULT 'default' COMMENT '工作空间',
+  `ds_code`        varchar(64)   DEFAULT NULL COMMENT '对外稳定编码',
+  `name`           varchar(128)  NOT NULL COMMENT '数据源名称',
+  `type`           varchar(32)   NOT NULL COMMENT '类型(mysql/postgresql/kafka/s3/trino/...)',
+  `category`       varchar(32)   DEFAULT NULL COMMENT '分类(rdb/dw/mq/nosql/search/storage/api/dashboard/pipeline/outbound)',
+  `conn_masked`    text          COMMENT '脱敏连接信息JSON',
+  `endpoint_host`  varchar(256)  DEFAULT NULL COMMENT '连接主机/端点',
+  `endpoint_port`  varchar(16)   DEFAULT NULL COMMENT '端口',
+  `database_name`  varchar(256)  DEFAULT NULL COMMENT '库名/路径/namespace 归一化',
+  `access_mode`    varchar(128)  DEFAULT NULL COMMENT '接入方式(CDC/批抽取等)',
+  `schema_summary` text          COMMENT '表/Topic/路径清单摘要串',
+  `lag_desc`       varchar(128)  DEFAULT NULL COMMENT '延迟/接入文案',
+  `health_score`   int           DEFAULT NULL COMMENT '健康分',
+  `asset_name`     varchar(256)  DEFAULT NULL COMMENT '关联湖内资产名',
+  `ver`            varchar(32)   DEFAULT 'v1.0' COMMENT '配置版本',
+  `vault_path`     varchar(512)  DEFAULT NULL COMMENT '密钥Vault路径',
+  `status`         varchar(32)   DEFAULT 'online' COMMENT '状态(online/warn/paused/revoked)',
+  `purposes`       text          COMMENT '用途JSON(ingest/meta_collect/query_gateway/export)',
+  `owner`          varchar(64)   DEFAULT NULL COMMENT '负责人',
+  `level`          varchar(64)   DEFAULT NULL COMMENT '密级/层级',
+  `last_ok_at`     datetime      DEFAULT NULL COMMENT '最近连通成功时间',
+  `content_hash`   varchar(128)  DEFAULT NULL COMMENT '内容哈希',
+  `remark`         varchar(512)  DEFAULT NULL COMMENT '备注',
+  `delete_flag`    varchar(32)   DEFAULT 'NOT_DELETE' COMMENT '删除标志',
+  `create_time`    datetime      DEFAULT NULL COMMENT '创建时间',
+  `create_user`    varchar(20)   DEFAULT NULL COMMENT '创建用户',
+  `update_time`    datetime      DEFAULT NULL COMMENT '修改时间',
+  `update_user`    varchar(20)   DEFAULT NULL COMMENT '修改用户',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uq_ig_ds_code` (`ds_code`) USING BTREE,
+  KEY `idx_ig_ds_type` (`type`) USING BTREE,
+  KEY `idx_ig_ds_ws` (`ws`) USING BTREE,
+  KEY `idx_ig_ds_category` (`category`) USING BTREE,
+  KEY `idx_ig_ds_status` (`status`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='数据源SoT';
+
+CREATE TABLE IF NOT EXISTS `ig_consumer_binding` (
+  `id`            bigint       NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `revision`      int          NOT NULL DEFAULT 1 COMMENT '乐观锁版本',
+  `ds_id`         varchar(20)  NOT NULL COMMENT '数据源ID',
+  `consumer_type` varchar(64)  NOT NULL COMMENT '消费方类型(flink/ds/trino/superset/sqlrest)',
+  `consumer_id`   varchar(128) DEFAULT NULL COMMENT '消费方实例ID',
+  `projection`    text         COMMENT '投影配置JSON',
+  `status`        varchar(32)  DEFAULT 'ENABLE' COMMENT '启用状态',
+  `sync_state`    varchar(32)  DEFAULT 'synced' COMMENT '投影同步状态(synced/stale/revoked/error)',
+  `last_sync_at`  datetime     DEFAULT NULL COMMENT '最近同步时间',
+  `last_error`    varchar(512) DEFAULT NULL COMMENT '最近同步错误',
+  `delete_flag`   varchar(32)  DEFAULT 'NOT_DELETE' COMMENT '删除标志',
+  `create_time`   datetime     DEFAULT NULL COMMENT '创建时间',
+  `create_user`   varchar(20)  DEFAULT NULL COMMENT '创建用户',
+  `update_time`   datetime     DEFAULT NULL COMMENT '修改时间',
+  `update_user`   varchar(20)  DEFAULT NULL COMMENT '修改用户',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uq_ig_cb_ds_consumer` (`ds_id`, `consumer_type`, `consumer_id`) USING BTREE,
+  KEY `idx_ig_cb_ds` (`ds_id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='数据源消费绑定';
+
+CREATE TABLE IF NOT EXISTS `ig_ds_table` (
+  `id`          varchar(20)   NOT NULL COMMENT '主键',
+  `revision`    int           NOT NULL DEFAULT 1 COMMENT '乐观锁版本',
+  `ds_id`       varchar(20)   NOT NULL COMMENT '数据源ID(ig_datasource.id)',
+  `table_name`  varchar(256)  NOT NULL COMMENT '源端对象名(表/Topic/路径/集合等)',
+  `cn_name`     varchar(128)  DEFAULT NULL COMMENT '中文名',
+  `comment_txt` varchar(512)  DEFAULT NULL COMMENT '业务注释',
+  `encoding`    varchar(64)   DEFAULT NULL COMMENT '编码',
+  `engine`      varchar(64)   DEFAULT NULL COMMENT '引擎(如InnoDB)',
+  `row_count`   bigint        DEFAULT NULL COMMENT '行数/消息量估算',
+  `synced_at`   datetime      DEFAULT NULL COMMENT '最近同步时间',
+  `status`      varchar(32)   DEFAULT 'ENABLE' COMMENT '状态',
+  `remark`      varchar(512)  DEFAULT NULL COMMENT '备注',
+  `delete_flag` varchar(32)   DEFAULT 'NOT_DELETE' COMMENT '删除标志',
+  `create_time` datetime      DEFAULT NULL COMMENT '创建时间',
+  `create_user` varchar(20)   DEFAULT NULL COMMENT '创建用户',
+  `update_time` datetime      DEFAULT NULL COMMENT '修改时间',
+  `update_user` varchar(20)   DEFAULT NULL COMMENT '修改用户',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uq_ig_ds_table` (`ds_id`, `table_name`) USING BTREE,
+  KEY `idx_ig_ds_table_ds` (`ds_id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='数据源表清单(表/Topic/路径)';
