@@ -138,8 +138,8 @@ public class LhProperties {
     @Getter
     @Setter
     public static class Sqlrest {
-        /** Manager UI / Admin API 根，如 http://host:18090 */
-        private String managerUrl;
+        /** Manager UI / Admin API 根，如 http://host:18090（对齐部署台账） */
+        private String managerUrl = "http://127.0.0.1:18090";
         private String username = "admin";
         private String password = "123456";
         /** 默认授权分组 / 模块（SQLREST） */

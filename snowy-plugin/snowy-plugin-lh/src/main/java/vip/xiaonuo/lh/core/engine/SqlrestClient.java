@@ -47,7 +47,8 @@ public class SqlrestClient {
     private final AtomicReference<CachedToken> tokenRef = new AtomicReference<>();
 
     public String embedUrl() {
-        return trim(lhProperties.getSqlrest().getManagerUrl());
+        return StrUtil.blankToDefault(trim(lhProperties.getSqlrest().getManagerUrl()),
+                "http://127.0.0.1:18090");
     }
 
     public Long defaultDatasourceId() {
