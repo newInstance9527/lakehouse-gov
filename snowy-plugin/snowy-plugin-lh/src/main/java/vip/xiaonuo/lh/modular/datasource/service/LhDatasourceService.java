@@ -56,6 +56,12 @@ public interface LhDatasourceService extends IService<LhDatasource> {
 
     List<LhDatasourceVo> supersetProjection();
 
+    /** SQLREST 可投影/可选的查询类数据源 */
+    List<Map<String, Object>> listForSqlrest();
+
+    /** 将指定 / 全部可投影数据源同步到 SQLREST Manager */
+    Map<String, Object> projectToSqlrest(List<LhDatasourceIdParam> ids);
+
     Map<String, Object> resolveDs(String dsId, String mode);
 
     void batchImport(LhDatasourceBatchImportParam param);

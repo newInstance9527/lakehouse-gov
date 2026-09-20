@@ -41,4 +41,13 @@ public interface DataapiService {
     List<Map<String, Object>> keys(String ws);
 
     Map<String, Object> embedUrl();
+
+    /** SQLREST 工作台聚合：外链 + 计数 + 趋势 + 接口列表 + 客户端 */
+    Map<String, Object> workbench();
+
+    /** 从 SQLREST assignment/list 同步/刷新绑定投影 */
+    Map<String, Object> syncFromSqlrest(String ws);
+
+    /** 登记已有 SQLREST 接口为门户绑定（不写 SQL） */
+    Map<String, Object> register(DataapiBindingParam param);
 }

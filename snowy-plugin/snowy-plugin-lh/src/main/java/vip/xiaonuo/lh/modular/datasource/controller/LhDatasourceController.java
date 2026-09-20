@@ -125,6 +125,20 @@ public class LhDatasourceController {
         return CommonResult.data(datasourceService.supersetProjection());
     }
 
+    @Operation(summary = "SQLREST 可选/可投影数据源")
+    @GetMapping("/lh/datasource/listForSqlrest")
+    public CommonResult<List<Map<String, Object>>> listForSqlrest() {
+        return CommonResult.data(datasourceService.listForSqlrest());
+    }
+
+    @Operation(summary = "投影到 SQLREST Manager")
+    @CommonLog("投影数据源到 SQLREST")
+    @PostMapping("/lh/datasource/projectToSqlrest")
+    public CommonResult<Map<String, Object>> projectToSqlrest(
+            @RequestBody(required = false) List<LhDatasourceIdParam> ids) {
+        return CommonResult.data(datasourceService.projectToSqlrest(ids));
+    }
+
     @Operation(summary = "批量导入")
     @CommonLog("批量导入数据源")
     @PostMapping("/lh/datasource/batchImport")

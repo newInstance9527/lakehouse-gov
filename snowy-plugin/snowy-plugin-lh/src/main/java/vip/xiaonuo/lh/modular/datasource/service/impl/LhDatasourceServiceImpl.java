@@ -50,6 +50,7 @@ import vip.xiaonuo.lh.modular.datasource.param.*;
 import vip.xiaonuo.lh.modular.datasource.result.LhDatasourceVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhDsTableVo;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
+import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourcePostRegisterBridge;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceService;
 import vip.xiaonuo.lh.modular.datasource.service.LhPortalInventoryOmBridge;
@@ -90,6 +91,8 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     private LhDatasourcePostRegisterBridge postRegisterBridge;
     @Resource
     private LhDatasourceGravitinoProjector gravitinoProjector;
+    @Resource
+    private LhDatasourceSqlrestProjector sqlrestProjector;
     @Resource
     private LhPortalInventoryOmBridge portalInventoryOmBridge;
     @Resource
@@ -1382,6 +1385,93 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         out.put("skipped", skipped);
         out.put("errors", errors);
         out.put("details", details);
+        return out;
+    }
+
+    @Override
+    public List<Map<String, Object>> listForSqlrest() {
+        List<LhDatasource> all = this.list(new QueryWrapper<LhDatasource>().lambda()
+                .eq(LhDatasource::getStatus, LhDatasourceStatusEnum.ONLINE.getValue()));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (LhDatasource ds : all) {
+            boolean projectable = LhDatasourceSqlrestProjector.isProjectable(ds.getType());
+            if (!projectable && !"trino".equalsIgnoreCase(ds.getType())) {
+                continue;
+            }
+            LhConsumerBinding bind = bindingMapper.selectOne(new QueryWrapper<LhConsumerBinding>().lambda()
+                    .eq(LhConsumerBinding::getDsId, ds.getId())
+                    .eq(LhConsumerBinding::getConsumerType, LhDatasourceSqlrestProjector.CONSUMER_TYPE)
+                    .last("LIMIT 1"));
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", ds.getId());
+            row.put("dsCode", ds.getDsCode());
+            row.put("name", ds.getName());
+            row.put("type", ds.getType());
+            row.put("endpoint", StrUtil.blankToDefault(ds.getEndpointHost(), "")
+                    + (StrUtil.isNotBlank(ds.getEndpointPort()) ? ":" + ds.getEndpointPort() : ""));
+            row.put("database", ds.getDatabaseName());
+            row.put("projectable", projectable);
+            row.put("recommended", "trino".equalsIgnoreCase(ds.getType())
+                    || (ds.getPurposes() != null && ds.getPurposes().contains("query_gateway")));
+            if (bind != null) {
+                row.put("syncState", bind.getSyncState());
+                row.put("lastError", bind.getLastError());
+                if (StrUtil.isNotBlank(bind.getProjection())) {
+                    cn.hutool.json.JSONObject p = JSONUtil.parseObj(bind.getProjection());
+                    row.put("sqlrestDatasourceId", p.get("sqlrestDatasourceId"));
+                    row.put("sqlrestName", p.get("sqlrestName"));
+                    row.put("sqlrestType", p.get("sqlrestType"));
+                }
+            } else {
+                row.put("syncState", projectable ? "never" : "unsupported");
+            }
+            out.add(row);
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> projectToSqlrest(List<LhDatasourceIdParam> ids) {
+        List<LhDatasource> list;
+        if (ids == null || ids.isEmpty()) {
+            list = this.list(new QueryWrapper<LhDatasource>().lambda()
+                    .eq(LhDatasource::getStatus, LhDatasourceStatusEnum.ONLINE.getValue()));
+        } else {
+            list = new ArrayList<>();
+            for (LhDatasourceIdParam p : ids) {
+                list.add(queryEntity(p.getId()));
+            }
+        }
+        int projected = 0;
+        int skipped = 0;
+        int errors = 0;
+        List<Map<String, Object>> details = new ArrayList<>();
+        for (LhDatasource ds : list) {
+            if (!LhDatasourceSqlrestProjector.isProjectable(ds.getType())) {
+                if (ids != null && !ids.isEmpty()) {
+                    Map<String, Object> one = sqlrestProjector.project(ds);
+                    details.add(one);
+                    skipped++;
+                }
+                continue;
+            }
+            Map<String, Object> one = sqlrestProjector.project(ds);
+            details.add(one);
+            if (Boolean.TRUE.equals(one.get("skipped"))) {
+                skipped++;
+            } else if (Boolean.TRUE.equals(one.get("ok"))) {
+                projected++;
+            } else {
+                errors++;
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total", details.size());
+        out.put("projected", projected);
+        out.put("skipped", skipped);
+        out.put("errors", errors);
+        out.put("details", details);
+        out.put("ok", errors == 0);
         return out;
     }
 

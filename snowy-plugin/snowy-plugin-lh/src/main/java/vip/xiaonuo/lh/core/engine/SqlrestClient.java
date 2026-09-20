@@ -58,6 +58,30 @@ public class SqlrestClient {
         return StrUtil.blankToDefault(lhProperties.getSqlrest().getExecutorUpstream(), "127.0.0.1:18091");
     }
 
+    /** gateway | apisix | both；默认 gateway */
+    public String edgeMode() {
+        String m = StrUtil.blankToDefault(lhProperties.getSqlrest().getEdgeMode(), "gateway").trim().toLowerCase();
+        if (!"gateway".equals(m) && !"apisix".equals(m) && !"both".equals(m)) {
+            return "gateway";
+        }
+        return m;
+    }
+
+    public boolean useSqlrestGateway() {
+        String m = edgeMode();
+        return "gateway".equals(m) || "both".equals(m);
+    }
+
+    public boolean useApisixEdge() {
+        String m = edgeMode();
+        return "apisix".equals(m) || "both".equals(m);
+    }
+
+    public String gatewayUrl() {
+        return trim(StrUtil.blankToDefault(lhProperties.getSqlrest().getGatewayUrl(),
+                "http://127.0.0.1:18091"));
+    }
+
     /**
      * 将门户 {{param}} 转为 SQLREST MyBatis #{param}
      */
@@ -163,9 +187,57 @@ public class SqlrestClient {
         return postJson("/sqlrest/manager/api/v1/assignment/list", body);
     }
 
+    public Map<String, Object> listDatasources(String searchText, int page, int size) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("searchText", StrUtil.nullToDefault(searchText, ""));
+        body.put("page", page);
+        body.put("size", size);
+        return postJson("/sqlrest/manager/api/v1/datasource/list", body);
+    }
+
+    public Map<String, Object> listDatasourceNames() {
+        return getJson("/sqlrest/manager/api/v1/datasource/list/name");
+    }
+
+    public Map<String, Object> listDrivers(String sqlrestType) {
+        return getJson("/sqlrest/manager/api/v1/datasource/" + sqlrestType + "/drivers");
+    }
+
+    public Map<String, Object> createDatasource(Map<String, Object> body) {
+        return postJson("/sqlrest/manager/api/v1/datasource/create", body);
+    }
+
+    public Map<String, Object> updateDatasource(Map<String, Object> body) {
+        return postJson("/sqlrest/manager/api/v1/datasource/update", body);
+    }
+
+    public Map<String, Object> deleteDatasource(long id) {
+        return deleteJson("/sqlrest/manager/api/v1/datasource/delete/" + id);
+    }
+
+    public Map<String, Object> overviewCounter() {
+        return getJson("/sqlrest/manager/api/v1/overview/counter");
+    }
+
+    public Map<String, Object> overviewTrend(int days) {
+        return getJson("/sqlrest/manager/api/v1/overview/trend/" + Math.max(1, days));
+    }
+
+    public Map<String, Object> overviewTopPath(int days, int n) {
+        return getJson("/sqlrest/manager/api/v1/overview/top/path/" + Math.max(1, days) + "?n=" + Math.max(1, n));
+    }
+
+    public Map<String, Object> listClients() {
+        return postJson("/sqlrest/manager/api/v1/client/list", Map.of());
+    }
+
+    public Map<String, Object> listAuthGroups() {
+        return postJson("/sqlrest/manager/api/v1/group/listAll", Map.of());
+    }
+
     public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
                                             String sql, List<Map<String, Object>> params,
-                                            Long existingId, String contentType) {
+                                            Long existingId, String contentType, Long datasourceId) {
         LhProperties.Sqlrest cfg = lhProperties.getSqlrest();
         Map<String, Object> body = new LinkedHashMap<>();
         if (existingId != null) {
@@ -173,7 +245,7 @@ public class SqlrestClient {
         }
         body.put("groupId", cfg.getDefaultGroupId());
         body.put("moduleId", cfg.getDefaultModuleId());
-        body.put("datasourceId", cfg.getDatasourceId());
+        body.put("datasourceId", datasourceId != null ? datasourceId : cfg.getDatasourceId());
         body.put("name", name);
         body.put("description", StrUtil.blankToDefault(description, name));
         body.put("method", StrUtil.blankToDefault(method, "GET").toUpperCase());
@@ -196,6 +268,13 @@ public class SqlrestClient {
         body.put("params", params != null ? params : List.of());
         body.put("outputs", List.of());
         return body;
+    }
+
+    /** @deprecated 使用带 datasourceId 的重载 */
+    public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
+                                            String sql, List<Map<String, Object>> params,
+                                            Long existingId, String contentType) {
+        return buildSaveBody(name, description, method, publicPath, sql, params, existingId, contentType, null);
     }
 
     public List<Map<String, Object>> toSqlrestParams(List<Map<String, Object>> portalParams, String method) {
@@ -302,6 +381,19 @@ public class SqlrestClient {
                     .header("Content-Type", "application/json")
                     .body(JSONUtil.toJsonStr(payload == null ? Map.of() : payload))
                     .timeout(20000)
+                    .execute()
+                    .body();
+            return wrapResp(body);
+        } catch (Exception e) {
+            return degraded(e.getMessage());
+        }
+    }
+
+    private Map<String, Object> deleteJson(String path) {
+        try {
+            String body = HttpRequest.delete(url(path))
+                    .header("Authorization", "Bearer " + accessToken())
+                    .timeout(12000)
                     .execute()
                     .body();
             return wrapResp(body);

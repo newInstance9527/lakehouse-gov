@@ -24,6 +24,10 @@ public class DataapiBindingParam {
     private String sqlrestApiId;
     private String sourceKind = "sql";
     private String sourceRef;
+    /** 门户数据源 id（构建/试跑前会投影到 SQLREST） */
+    private String portalDsId;
+    private String dsId;
+    private String sqlrestDatasourceId;
     private String authMode = "Token";
     private Integer qpsLimit = 100;
     private Integer burstLimit = 200;

@@ -126,9 +126,29 @@ public class DataapiController {
         return CommonResult.data(dataapiService.keys(ws));
     }
 
-    @Operation(summary = "外链")
+    @Operation(summary = "外链 / 深链")
     @GetMapping("/lh/dataapi/embedUrl")
     public CommonResult<Map<String, Object>> embedUrl() {
         return CommonResult.data(dataapiService.embedUrl());
+    }
+
+    @Operation(summary = "SQLREST 工作台聚合（接口/调用/客户端概览）")
+    @GetMapping("/lh/dataapi/workbench")
+    public CommonResult<Map<String, Object>> workbench() {
+        return CommonResult.data(dataapiService.workbench());
+    }
+
+    @Operation(summary = "从 SQLREST 同步接口目录")
+    @CommonLog("数据服务同步 SQLREST 目录")
+    @PostMapping("/lh/dataapi/syncFromSqlrest")
+    public CommonResult<Map<String, Object>> syncFromSqlrest(@RequestParam(required = false) String ws) {
+        return CommonResult.data(dataapiService.syncFromSqlrest(ws));
+    }
+
+    @Operation(summary = "登记已有 SQLREST 接口为绑定")
+    @CommonLog("数据服务登记绑定")
+    @PostMapping("/lh/dataapi/register")
+    public CommonResult<Map<String, Object>> register(@RequestBody @Valid DataapiBindingParam param) {
+        return CommonResult.data(dataapiService.register(param));
     }
 }

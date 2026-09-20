@@ -29,6 +29,10 @@ public class DataapiApiBinding extends CommonEntity {
     private Integer sqlrestVersion;
     private String sourceKind;
     private String sourceRef;
+    /** 门户 ig_datasource.id */
+    private String portalDsId;
+    /** SQLREST datasource id（投影后） */
+    private String sqlrestDatasourceId;
     private String state;
     private String apisixRouteId;
     private String authMode;

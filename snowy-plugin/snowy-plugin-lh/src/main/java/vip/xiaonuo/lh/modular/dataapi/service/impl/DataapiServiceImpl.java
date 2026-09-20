@@ -21,6 +21,9 @@ import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
+import vip.xiaonuo.lh.modular.datasource.param.LhDatasourceIdParam;
+import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceService;
+import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
 
 import java.util.ArrayList;
 import java.util.Date;
@@ -42,6 +45,10 @@ public class DataapiServiceImpl implements DataapiService {
     private SqlrestClient sqlrestClient;
     @Resource
     private ApisixClient apisixClient;
+    @Resource
+    private LhDatasourceSqlrestProjector sqlrestProjector;
+    @Resource
+    private LhDatasourceService datasourceService;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -64,7 +71,14 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("pendingSubscribers", pendingKeys);
         m.put("calls24h", null);
         m.put("avgLatencyMs", null);
-        m.put("callsNote", "调用量待接 APISIX 审计");
+        m.put("callsNote", "调用量见 SQLREST overview / APISIX 审计");
+        Map<String, Object> counter = sqlrestClient.overviewCounter();
+        if (Boolean.TRUE.equals(counter.get("ok")) && counter.get("data") instanceof Map<?, ?> c) {
+            m.put("sqlrestTotal", c.get("totalCount"));
+            m.put("sqlrestOnline", c.get("publishCount"));
+            m.put("sqlrestOpen", c.get("openCount"));
+            m.put("sqlrestDatasourceCount", c.get("datasourceCount"));
+        }
         return m;
     }
 
@@ -106,10 +120,15 @@ public class DataapiServiceImpl implements DataapiService {
             vo.put("sqlrest", sr);
             if (Boolean.TRUE.equals(sr.get("ok")) && sr.get("data") != null) {
                 cn.hutool.json.JSONObject data = JSONUtil.parseObj(sr.get("data"));
+                vo.put("engine", data.getStr("engine"));
                 cn.hutool.json.JSONArray sqlList = data.getJSONArray("sqlList");
                 if (sqlList != null && !sqlList.isEmpty()) {
                     vo.put("sql", sqlList.getJSONObject(0).getStr("sqlText"));
                 }
+                if (StrUtil.isNotBlank(data.getStr("script"))) {
+                    vo.put("script", data.getStr("script"));
+                }
+                vo.put("managerDeepLink", sqlrestClient.embedUrl() + "/#/interface/detail?id=" + b.getSqlrestApiId());
             }
         }
         return vo;
@@ -172,9 +191,10 @@ public class DataapiServiceImpl implements DataapiService {
             }
         }
         if (StrUtil.isBlank(sql)) {
-            throw new CommonException("构建需要 SQL 模板");
+            throw new CommonException("简易草稿需要 SQL；Groovy / 复杂逻辑请在 SQLREST Manager 构建");
         }
 
+        Long srDsId = resolveSqlrestDatasourceId(param, binding);
         List<Map<String, Object>> srParams = sqlrestClient.toSqlrestParams(param.getParams(), binding.getMethod());
         Map<String, Object> body = sqlrestClient.buildSaveBody(
                 binding.getName(),
@@ -184,7 +204,8 @@ public class DataapiServiceImpl implements DataapiService {
                 sql,
                 srParams,
                 sqlrestId,
-                binding.getContentType());
+                binding.getContentType(),
+                srDsId);
 
         Map<String, Object> srResp = sqlrestId == null
                 ? sqlrestClient.createAssignment(body)
@@ -291,13 +312,19 @@ public class DataapiServiceImpl implements DataapiService {
         String routeId = StrUtil.blankToDefault(b.getApisixRouteId(), "lh-dataapi-" + b.getId());
         int qps = b.getQpsLimit() == null ? 100 : b.getQpsLimit();
         int burst = b.getBurstLimit() == null ? qps * 2 : b.getBurstLimit();
-        Map<String, Object> apisix = apisixClient.upsertRoute(
-                routeId, b.getPublicPath(), b.getMethod(), sqlrestClient.executorUpstream(), qps, burst);
-        if (!Boolean.TRUE.equals(apisix.get("ok"))) {
-            degraded = true;
+        Map<String, Object> apisix = Map.of("ok", true, "skipped", true, "edgeMode", sqlrestClient.edgeMode());
+        if (sqlrestClient.useApisixEdge()) {
+            apisix = apisixClient.upsertRoute(
+                    routeId, b.getPublicPath(), b.getMethod(), sqlrestClient.executorUpstream(), qps, burst);
+            if (!Boolean.TRUE.equals(apisix.get("ok"))) {
+                degraded = true;
+            }
+            b.setApisixRouteId(routeId);
+        } else {
+            // gateway 模式：不写 APISIX；对外入口 = SQLREST Gateway
+            b.setApisixRouteId(null);
         }
 
-        b.setApisixRouteId(routeId);
         if (commitId != null) {
             b.setSqlrestCommitId(String.valueOf(commitId));
         }
@@ -326,6 +353,8 @@ public class DataapiServiceImpl implements DataapiService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", !degraded);
         result.put("degraded", degraded);
+        result.put("edgeMode", sqlrestClient.edgeMode());
+        result.put("gatewayUrl", sqlrestClient.gatewayUrl());
         result.put("binding", toPortalCard(b, true));
         result.put("sqlrestPublish", pub);
         result.put("sqlrestDeploy", deploy);
@@ -341,8 +370,8 @@ public class DataapiServiceImpl implements DataapiService {
         if (StrUtil.isNotBlank(b.getSqlrestApiId())) {
             sr = sqlrestClient.retire(Long.parseLong(b.getSqlrestApiId()));
         }
-        Map<String, Object> ax = Map.of("ok", true, "skipped", true);
-        if (StrUtil.isNotBlank(b.getApisixRouteId())) {
+        Map<String, Object> ax = Map.of("ok", true, "skipped", true, "edgeMode", sqlrestClient.edgeMode());
+        if (sqlrestClient.useApisixEdge() && StrUtil.isNotBlank(b.getApisixRouteId())) {
             ax = apisixClient.deleteRoute(b.getApisixRouteId());
         }
         b.setState("retired");
@@ -371,33 +400,60 @@ public class DataapiServiceImpl implements DataapiService {
     @Override
     @SuppressWarnings("unchecked")
     public Map<String, Object> routes() {
-        Map<String, Object> live = apisixClient.listRoutes();
+        String edge = sqlrestClient.edgeMode();
         List<Map<String, Object>> fromBinding = new ArrayList<>();
         List<DataapiApiBinding> published = bindingMapper.selectList(
                 baseQw(WS_DEFAULT).eq("state", "published"));
+        String gw = sqlrestClient.gatewayUrl();
         for (DataapiApiBinding b : published) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("path", b.getPublicPath());
-            row.put("upstream", "APISIX → " + sqlrestClient.executorUpstream() + " → SQLREST → Trino");
+            if (sqlrestClient.useApisixEdge()) {
+                row.put("upstream", "APISIX → " + sqlrestClient.executorUpstream() + " → SQLREST");
+                row.put("status", StrUtil.isNotBlank(b.getApisixRouteId()) ? "ok" : "warn");
+                row.put("note", b.getApisixRouteId());
+            } else {
+                row.put("upstream", "SQLREST Gateway → JDBC 源");
+                row.put("status", "ok");
+                row.put("note", gw + StrUtil.blankToDefault(b.getPublicPath(), ""));
+            }
             row.put("auth", StrUtil.blankToDefault(b.getAuthMode(), "Token"));
             row.put("rate", (b.getQpsLimit() == null ? 100 : b.getQpsLimit()) + "/s");
             row.put("breaker", "✓");
             row.put("meter", "✓");
-            row.put("status", StrUtil.isNotBlank(b.getApisixRouteId()) ? "ok" : "warn");
-            row.put("note", b.getApisixRouteId());
+            row.put("edgeMode", edge);
             fromBinding.add(row);
         }
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("ok", live.get("ok"));
-        m.put("degraded", live.get("degraded"));
-        m.put("message", live.get("message"));
-        m.put("apisix", live.get("list"));
+        m.put("edgeMode", edge);
+        m.put("gatewayUrl", gw);
         m.put("bindings", fromBinding);
+        if (sqlrestClient.useApisixEdge()) {
+            Map<String, Object> live = apisixClient.listRoutes();
+            m.put("ok", live.get("ok"));
+            m.put("degraded", live.get("degraded"));
+            m.put("message", live.get("message"));
+            m.put("apisix", live.get("list"));
+        } else {
+            m.put("ok", true);
+            m.put("apisix", List.of());
+            m.put("message", "edge-mode=gateway：对外入口为 SQLREST Gateway，未同步 APISIX");
+        }
         return m;
     }
 
     @Override
     public Map<String, Object> syncApisix(String ws) {
+        if (!sqlrestClient.useApisixEdge()) {
+            Map<String, Object> skip = new LinkedHashMap<>();
+            skip.put("ok", true);
+            skip.put("skipped", true);
+            skip.put("synced", 0);
+            skip.put("failed", 0);
+            skip.put("edgeMode", sqlrestClient.edgeMode());
+            skip.put("message", "edge-mode=gateway：无需同步 APISIX；请在 SQLREST Manager 发版/上线");
+            return skip;
+        }
         String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
         List<DataapiApiBinding> list = bindingMapper.selectList(baseQw(workspace).eq("state", "published"));
         int ok = 0;
@@ -449,10 +505,197 @@ public class DataapiServiceImpl implements DataapiService {
 
     @Override
     public Map<String, Object> embedUrl() {
+        String root = sqlrestClient.embedUrl();
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("sqlrest", sqlrestClient.embedUrl());
+        m.put("sqlrest", root);
+        m.put("interfaceList", root + "/#/interface/list");
+        m.put("interfaceCreate", root + "/#/interface/create");
+        m.put("datasource", root + "/#/datasource");
+        m.put("client", root + "/#/setting/client");
+        m.put("online", root + "/#/service/search");
+        m.put("gateway", sqlrestClient.gatewayUrl());
+        m.put("edgeMode", sqlrestClient.edgeMode());
         m.put("superset", null);
         return m;
+    }
+
+    @Override
+    public Map<String, Object> workbench() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("embed", embedUrl());
+        m.put("edgeMode", sqlrestClient.edgeMode());
+        m.put("gatewayUrl", sqlrestClient.gatewayUrl());
+        m.put("counter", sqlrestClient.overviewCounter());
+        m.put("trend", sqlrestClient.overviewTrend(7));
+        m.put("topPath", sqlrestClient.overviewTopPath(7, 10));
+        m.put("assignments", sqlrestClient.listAssignments("", 1, 50));
+        m.put("clients", sqlrestClient.listClients());
+        m.put("authGroups", sqlrestClient.listAuthGroups());
+        m.put("hint", "SQL / Groovy 构建、认证、流量控制请在 SQLREST Manager 完成；"
+                + ("gateway".equals(sqlrestClient.edgeMode())
+                ? "对外边缘默认 SQLREST Gateway，APISIX 可选"
+                : "当前边缘模式=" + sqlrestClient.edgeMode()));
+        return m;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> syncFromSqlrest(String ws) {
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        Map<String, Object> listResp = sqlrestClient.listAssignments("", 1, 200);
+        int upserted = 0;
+        int skipped = 0;
+        List<Map<String, Object>> details = new ArrayList<>();
+        if (Boolean.TRUE.equals(listResp.get("ok")) && listResp.get("data") instanceof List<?> rows) {
+            for (Object row : rows) {
+                cn.hutool.json.JSONObject o = JSONUtil.parseObj(row);
+                String apiId = String.valueOf(o.get("id"));
+                DataapiApiBinding exist = bindingMapper.selectOne(baseQw(workspace)
+                        .eq("sqlrest_api_id", apiId).last("LIMIT 1"));
+                String path = normalizePublicFromSqlrest(o.getStr("path"));
+                String method = StrUtil.blankToDefault(o.getStr("method"), "GET").toUpperCase();
+                boolean online = Boolean.TRUE.equals(o.getBool("status"));
+                if (exist == null) {
+                    DataapiApiBinding b = new DataapiApiBinding();
+                    b.setId(IdUtil.getSnowflakeNextIdStr());
+                    b.setRevision(1);
+                    b.setStatus("active");
+                    b.setWs(workspace);
+                    b.setDeleteFlag(NOT_DELETE);
+                    b.setName(StrUtil.blankToDefault(o.getStr("name"), path));
+                    b.setPublicPath(path);
+                    b.setMethod(method);
+                    b.setSqlrestApiId(apiId);
+                    if (o.get("datasourceId") != null) {
+                        b.setSqlrestDatasourceId(String.valueOf(o.get("datasourceId")));
+                    }
+                    b.setSourceKind("sql");
+                    b.setState(online ? "published" : "draft");
+                    b.setAuthMode("Token");
+                    b.setQpsLimit(100);
+                    b.setBurstLimit(200);
+                    b.setPublishEnv("stg");
+                    b.setRemark(o.getStr("description"));
+                    bindingMapper.insert(b);
+                    upserted++;
+                    details.add(Map.of("action", "insert", "sqlrestApiId", apiId, "path", path));
+                } else {
+                    exist.setName(StrUtil.blankToDefault(o.getStr("name"), exist.getName()));
+                    exist.setPublicPath(path);
+                    exist.setMethod(method);
+                    if (online && !"published".equals(exist.getState())) {
+                        exist.setState("draft");
+                    }
+                    if (!online && "published".equals(exist.getState())) {
+                        /* keep published until retire via portal */
+                    }
+                    if (o.get("datasourceId") != null) {
+                        exist.setSqlrestDatasourceId(String.valueOf(o.get("datasourceId")));
+                    }
+                    exist.setRevision(exist.getRevision() == null ? 1 : exist.getRevision() + 1);
+                    bindingMapper.updateById(exist);
+                    upserted++;
+                    details.add(Map.of("action", "update", "id", exist.getId(), "sqlrestApiId", apiId));
+                }
+            }
+        } else {
+            skipped++;
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ok", Boolean.TRUE.equals(listResp.get("ok")));
+        m.put("degraded", listResp.get("degraded"));
+        m.put("message", listResp.get("message"));
+        m.put("upserted", upserted);
+        m.put("skipped", skipped);
+        m.put("details", details);
+        m.put("sqlrest", listResp);
+        return m;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> register(DataapiBindingParam param) {
+        if (StrUtil.isBlank(param.getSqlrestApiId())) {
+            throw new CommonException("请提供 sqlrestApiId（在 SQLREST Manager 构建后登记）");
+        }
+        Map<String, Object> detail = sqlrestClient.detail(param.getSqlrestApiId());
+        if (!Boolean.TRUE.equals(detail.get("ok")) || detail.get("data") == null) {
+            throw new CommonException("无法读取 SQLREST 接口: " + detail.get("message"));
+        }
+        cn.hutool.json.JSONObject data = JSONUtil.parseObj(detail.get("data"));
+        if (StrUtil.isBlank(param.getPublicPath())) {
+            param.setPublicPath(normalizePublicFromSqlrest(data.getStr("path")));
+        }
+        if (StrUtil.isBlank(param.getName())) {
+            param.setName(StrUtil.blankToDefault(data.getStr("name"), param.getPublicPath()));
+        }
+        if (StrUtil.isBlank(param.getMethod())) {
+            param.setMethod(data.getStr("method"));
+        }
+        if (data.get("datasourceId") != null) {
+            param.setSqlrestDatasourceId(String.valueOf(data.get("datasourceId")));
+        }
+        DataapiApiBinding exist = bindingMapper.selectOne(baseQw(StrUtil.blankToDefault(param.getWs(), WS_DEFAULT))
+                .eq("sqlrest_api_id", param.getSqlrestApiId()).last("LIMIT 1"));
+        DataapiApiBinding b;
+        if (exist != null) {
+            applyParam(exist, param);
+            exist.setRevision(exist.getRevision() == null ? 1 : exist.getRevision() + 1);
+            bindingMapper.updateById(exist);
+            b = exist;
+        } else {
+            b = newBinding(param);
+            bindingMapper.insert(b);
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ok", true);
+        m.put("binding", toPortalCard(b, true));
+        m.put("engine", data.getStr("engine"));
+        m.put("hint", "SQL/Groovy 继续在 Manager 编辑；此处只做绑定与 APISIX 发布");
+        return m;
+    }
+
+    private Long resolveSqlrestDatasourceId(DataapiBindingParam param, DataapiApiBinding binding) {
+        String portalDsId = StrUtil.blankToDefault(param.getPortalDsId(), param.getDsId());
+        if (StrUtil.isBlank(portalDsId)) {
+            portalDsId = binding.getPortalDsId();
+        }
+        Long srDsId = null;
+        if (StrUtil.isNotBlank(portalDsId)) {
+            binding.setPortalDsId(portalDsId);
+            srDsId = sqlrestProjector.resolveSqlrestDatasourceId(portalDsId);
+            if (srDsId == null) {
+                LhDatasourceIdParam idp = new LhDatasourceIdParam();
+                idp.setId(portalDsId);
+                datasourceService.projectToSqlrest(List.of(idp));
+                srDsId = sqlrestProjector.resolveSqlrestDatasourceId(portalDsId);
+            }
+            if (srDsId != null) {
+                binding.setSqlrestDatasourceId(String.valueOf(srDsId));
+            }
+        }
+        if (srDsId == null && StrUtil.isNotBlank(param.getSqlrestDatasourceId())) {
+            srDsId = parseLong(param.getSqlrestDatasourceId());
+            binding.setSqlrestDatasourceId(param.getSqlrestDatasourceId());
+        }
+        if (srDsId == null && StrUtil.isNotBlank(binding.getSqlrestDatasourceId())) {
+            srDsId = parseLong(binding.getSqlrestDatasourceId());
+        }
+        return srDsId;
+    }
+
+    private static String normalizePublicFromSqlrest(String path) {
+        String p = StrUtil.blankToDefault(path, "").trim();
+        if (p.isEmpty()) {
+            return "/api/unnamed";
+        }
+        if (p.startsWith("/")) {
+            return p;
+        }
+        if (p.startsWith("api/")) {
+            return "/" + p;
+        }
+        return "/api/" + p;
     }
 
     private Map<String, Object> enrichTrial(Map<String, Object> sr) {
@@ -490,6 +733,13 @@ public class DataapiServiceImpl implements DataapiService {
         }
         b.setSourceKind(StrUtil.blankToDefault(param.getSourceKind(), "sql"));
         b.setSourceRef(param.getSourceRef());
+        String portalDsId = StrUtil.blankToDefault(param.getPortalDsId(), param.getDsId());
+        if (StrUtil.isNotBlank(portalDsId)) {
+            b.setPortalDsId(portalDsId);
+        }
+        if (StrUtil.isNotBlank(param.getSqlrestDatasourceId())) {
+            b.setSqlrestDatasourceId(param.getSqlrestDatasourceId());
+        }
         b.setAuthMode(StrUtil.blankToDefault(param.getAuthMode(), "Token"));
         if (param.getQpsLimit() != null) {
             b.setQpsLimit(param.getQpsLimit());
@@ -534,6 +784,8 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("apisixRouteId", b.getApisixRouteId());
         m.put("sourceKind", b.getSourceKind());
         m.put("sourceRef", b.getSourceRef());
+        m.put("portalDsId", b.getPortalDsId());
+        m.put("sqlrestDatasourceId", b.getSqlrestDatasourceId());
         m.put("asset", "asset".equals(b.getSourceKind()) ? bare(b.getSourceRef()) : "-");
         m.put("metric", "metric".equals(b.getSourceKind()) ? b.getSourceRef() : "-");
         m.put("desc", StrUtil.blankToDefault(b.getRemark(), b.getName()));

@@ -48,7 +48,10 @@ lh:
     default-module-id: 1
     # 正式 MUST 为 Trino JDBC；当前环境未登记 Trino 时可临时用已有 DS
     datasource-id: 1
-    # APISIX upstream host:port；生产改 Executor，联调可用 Gateway :18091
+    # 数据 API 边缘：gateway（默认，用 SQLREST Gateway）| apisix | both
+    edge-mode: gateway
+    gateway-url: http://127.0.0.1:18091
+    # 仅 edge-mode=apisix|both 时作为 APISIX upstream
     executor-upstream: "127.0.0.1:18091"
   apisix:
     admin-url: http://127.0.0.1:9180
