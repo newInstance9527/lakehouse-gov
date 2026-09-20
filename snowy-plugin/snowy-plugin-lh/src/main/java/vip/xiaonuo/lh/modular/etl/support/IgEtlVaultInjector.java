@@ -358,9 +358,11 @@ public class IgEtlVaultInjector {
                     }
                 } else if (StrUtil.isNotBlank(readerDsId) && readerDs == null) {
                     notes.add(nodeKey + ": 上游 readerDsId 不存在 " + readerDsId);
-                } else {
-                    // 无独立上游 ds 时，读端与写端同库
+                } else if (!sinkSide) {
                     putJdbcAliases(env, secret, vaultPath, "LH_READER_JDBC", localParams);
+                } else {
+                    // sink 无上游 ds：禁止把写端 Vault 填到 LH_READER（mysqlreader + postgres URL → No suitable driver）
+                    notes.add(nodeKey + ": sink 缺少上游 readerDsId/_lhUpstreamDsId，未注入 LH_READER_*");
                 }
             } else if (StrUtil.isNotBlank(writerDsId)) {
                 // 源节点另配写端

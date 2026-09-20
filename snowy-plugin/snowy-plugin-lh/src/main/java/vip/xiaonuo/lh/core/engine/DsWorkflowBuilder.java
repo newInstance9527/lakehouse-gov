@@ -231,7 +231,15 @@ public final class DsWorkflowBuilder {
             if (StrUtil.isBlank(upstreamTable)) {
                 upstreamTable = resolveUpstreamTable(n.getNodeKey(), preKeys, byKey);
             }
-            String upstreamDsId = resolveUpstreamDsId(preKeys, byKey);
+            String upstreamDsId = resolveUpstreamDsId(preKeys, byKey, preds);
+            if (StrUtil.isNotBlank(upstreamDsId)) {
+                conf.set("_lhUpstreamDsId", upstreamDsId);
+                // clean/transform ?????? sink ????? conf
+                if ("clean".equals(type) || "transform".equals(type) || "mapping".equals(type)
+                        || type.startsWith("sink_")) {
+                    n.setConfJson(conf.toString());
+                }
+            }
             Map<String, Object> taskParams = DsTaskScriptBuilder.buildTaskParams(n, engine, dsTaskType, upstreamTable);
             if (StrUtil.isNotBlank(upstreamDsId)) {
                 taskParams.put("lhUpstreamDsId", upstreamDsId);
@@ -398,17 +406,42 @@ public final class DsWorkflowBuilder {
         return "lh_clean_t".equals(b) || "lh_clean_staging".equals(b) || "t".equals(b);
     }
 
-    private static String resolveUpstreamDsId(List<String> preKeys, Map<String, IgEtlNode> byKey) {
-        for (String pk : preKeys) {
-            IgEtlNode p = byKey.get(pk);
+    private static String resolveUpstreamDsId(List<String> preKeys, Map<String, IgEtlNode> byKey,
+                                              Map<String, List<String>> preds) {
+        // sink?clean?source?clean ?? dsId?????????????? DataX ??????? Vault?
+        java.util.ArrayDeque<String> q = new java.util.ArrayDeque<>();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        if (preKeys != null) {
+            for (String pk : preKeys) {
+                if (StrUtil.isNotBlank(pk)) {
+                    q.add(pk.trim());
+                }
+            }
+        }
+        while (!q.isEmpty()) {
+            String k = q.poll();
+            if (!seen.add(k)) {
+                continue;
+            }
+            IgEtlNode p = byKey.get(k);
             if (p == null) {
                 continue;
             }
             cn.hutool.json.JSONObject conf = cn.hutool.json.JSONUtil.parseObj(
                     StrUtil.blankToDefault(p.getConfJson(), "{}"));
-            String dsId = firstNonBlank(conf.getStr("dsId"), conf.getStr("readerDsId"));
+            String dsId = firstNonBlank(
+                    conf.getStr("dsId"),
+                    conf.getStr("readerDsId"),
+                    conf.getStr("srcDsId"),
+                    conf.getStr("_lhUpstreamDsId"));
             if (StrUtil.isNotBlank(dsId)) {
                 return dsId;
+            }
+            List<String> ups = preds != null ? preds.getOrDefault(k, List.of()) : List.of();
+            for (String u : ups) {
+                if (StrUtil.isNotBlank(u) && !seen.contains(u)) {
+                    q.add(u.trim());
+                }
             }
         }
         return null;

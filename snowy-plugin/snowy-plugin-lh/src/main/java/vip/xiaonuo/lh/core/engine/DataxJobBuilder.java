@@ -69,7 +69,13 @@ public final class DataxJobBuilder {
         writerParam.put("connection", List.of(Map.of(
                 "table", List.of(StrUtil.blankToDefault(writerTable, "lh_sync_target")),
                 "jdbcUrl", List.of("${LH_WRITER_JDBC_URL}"))));
-        writerParam.put("writeMode", StrUtil.blankToDefault(conf.getStr("writeMode"), "insert"));
+        String writeMode = StrUtil.blankToDefault(conf.getStr("writeMode"), "insert");
+        // DataX postgresqlwriter 仅支持 insert；upsert/update 会直接失败
+        if ("postgresqlwriter".equalsIgnoreCase(writerType)
+                && !"insert".equalsIgnoreCase(writeMode)) {
+            writeMode = "insert";
+        }
+        writerParam.put("writeMode", writeMode);
         if (StrUtil.isNotBlank(conf.getStr("preSql"))) {
             writerParam.put("preSql", List.of(conf.getStr("preSql")));
         }
