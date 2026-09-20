@@ -68,6 +68,13 @@ public class IgEtlController {
         return CommonResult.data(igEtlService.editDag(param));
     }
 
+    @Operation(summary = "删除 DAG（软删）")
+    @CommonLog("删除ETL DAG")
+    @PostMapping("/lh/etl/dags/delete")
+    public CommonResult<Map<String, Object>> deleteDag(@RequestBody @Valid IgEtlIdParam param) {
+        return CommonResult.data(igEtlService.deleteDag(param));
+    }
+
     @Operation(summary = "读取 DAG 图")
     @GetMapping("/lh/etl/dags/graph")
     public CommonResult<Map<String, Object>> graph(@RequestParam String id) {
@@ -127,6 +134,16 @@ public class IgEtlController {
     @GetMapping("/lh/etl/dags/runs/detail")
     public CommonResult<Map<String, Object>> runDetail(@RequestParam String runId) {
         return CommonResult.data(igEtlService.runDetail(runId));
+    }
+
+    @Operation(summary = "单节点执行日志（拉 DS task instance log，可续拉）")
+    @GetMapping("/lh/etl/dags/runs/node-log")
+    public CommonResult<Map<String, Object>> runNodeLog(
+            @RequestParam String runId,
+            @RequestParam String nodeKey,
+            @RequestParam(required = false) Integer skipLineNum,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(igEtlService.runNodeLog(runId, nodeKey, skipLineNum, limit));
     }
 
     @Operation(summary = "运行态回调（DS/Worker 回写）")

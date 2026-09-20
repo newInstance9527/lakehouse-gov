@@ -25,6 +25,7 @@ import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.GravitinoClient;
 import vip.xiaonuo.lh.core.engine.LhOmCatalogClassifier;
 import vip.xiaonuo.lh.core.engine.OpenMetadataClient;
@@ -51,6 +52,7 @@ import vip.xiaonuo.lh.modular.catalog.support.GovAssetSourceReconcile;
 import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryObjectKinds;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDsTable;
+import vip.xiaonuo.lh.modular.datasource.enums.LhDatasourceTypeEnum;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDsTableMapper;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
@@ -111,6 +113,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     private GovAssetSourceReconcile govAssetSourceReconcile;
     @Resource
     private GovAssetPreviewRouter previewRouter;
+    @Resource
+    private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
 
     @Override
     public Page<GovAssetVo> page(GovAssetPageParam param) {
@@ -182,6 +186,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         for (GovAssetVo vo : vos) {
             vo.setQualityScore(scores.get(vo.getId()));
         }
+        userNameResolver.fillAssets(vos);
         out.setRecords(vos);
         return out;
     }
@@ -207,6 +212,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
                 "available", true,
                 "api", "POST /lh/catalog/assets/meta"));
         vo.setExtras(extras);
+        userNameResolver.fillAsset(vo);
         return vo;
     }
 
@@ -225,6 +231,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> updateMeta(GovAssetMetaParam param) {
         GovAsset asset = requireAsset(param.getId());
+        secAuthGrantService.assertCanEditAsset(asset);
         if (StrUtil.isBlank(asset.getOmFqn())) {
             throw new CommonException("资产尚未对齐 OM（无 omFqn），请先 refresh");
         }
@@ -339,14 +346,13 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         }
 
         String assetKind = StrUtil.blankToDefault(param.getAssetKind(), objectKind).toLowerCase(Locale.ROOT);
-        String assetCode = StrUtil.blankToDefault(param.getAssetCode(),
-                buildAssetCode(param.getLayer(), domain, objectName));
-        assetCode = sanitizeCode(assetCode);
-        Long dupCode = this.count(new QueryWrapper<GovAsset>().lambda()
-                .eq(GovAsset::getWs, ws)
-                .eq(GovAsset::getAssetCode, assetCode)
-                .eq(GovAsset::getDeleteFlag, NOT_DELETE));
-        if (dupCode != null && dupCode > 0) {
+        boolean autoCode = StrUtil.isBlank(param.getAssetCode());
+        String assetCode = autoCode
+                ? buildAssetCode(param.getLayer(), domain, objectName, ds)
+                : sanitizeCode(param.getAssetCode());
+        if (autoCode) {
+            assetCode = allocateUniqueAssetCode(ws, assetCode);
+        } else if (assetCodeExists(ws, assetCode)) {
             throw new CommonException("资产编码已存在: {}", assetCode);
         }
 
@@ -373,8 +379,10 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         asset.setLayer(param.getLayer().trim().toLowerCase(Locale.ROOT));
         asset.setDomainCode(domain);
         asset.setSensitivity(StrUtil.blankToDefault(param.getSensitivity(), "internal"));
-        asset.setTechOwner(param.getTechOwner());
+        String userId = LhLoginUsers.requireUserId();
+        asset.setTechOwner(StrUtil.blankToDefault(param.getTechOwner(), userId));
         asset.setBizOwner(param.getBizOwner());
+        asset.setCreateUser(userId);
         asset.setEngine(engine);
         asset.setIsGold(0);
         asset.setLastSyncStatus("never");
@@ -421,6 +429,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     @Transactional(rollbackFor = Exception.class)
     public GovAssetVo edit(GovAssetEditParam param) {
         GovAsset asset = requireAsset(param.getId());
+        secAuthGrantService.assertCanEditAsset(asset);
         if (param.getRevision() != null && !param.getRevision().equals(asset.getRevision())) {
             throw new CommonException("资产已被他人修改，请刷新后重试");
         }
@@ -472,6 +481,35 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> delete(GovAssetIdParam param) {
+        GovAsset asset = requireAsset(param.getId());
+        secAuthGrantService.assertCanDeleteAsset(asset);
+        List<GovAssetSourceLink> links = linkMapper.selectList(new QueryWrapper<GovAssetSourceLink>().lambda()
+                .eq(GovAssetSourceLink::getAssetId, asset.getId())
+                .eq(GovAssetSourceLink::getDeleteFlag, NOT_DELETE));
+        for (GovAssetSourceLink link : links) {
+            linkMapper.deleteById(link.getId());
+        }
+        // 释放唯一键，便于同编码重建
+        String code = StrUtil.blankToDefault(asset.getAssetCode(), asset.getId());
+        String freed = code + "__del_" + asset.getId();
+        if (freed.length() > 128) {
+            freed = freed.substring(0, 128);
+        }
+        asset.setAssetCode(freed);
+        asset.setStatus(GovAssetStatusEnum.ARCHIVED.getValue());
+        asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
+        this.updateById(asset);
+        this.removeById(asset.getId());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", asset.getId());
+        out.put("deleted", true);
+        out.put("linkCount", links.size());
+        return out;
+    }
+
+    @Override
     public List<GovAssetSourceVo> sources(GovAssetIdParam param) {
         GovAsset asset = requireAsset(param.getId());
         List<GovAssetSourceLink> links = linkMapper.selectList(new QueryWrapper<GovAssetSourceLink>().lambda()
@@ -485,6 +523,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     @Override
     public Map<String, Object> refresh(GovAssetIdParam param) {
         GovAsset asset = requireAsset(param.getId());
+        secAuthGrantService.assertCanEditAsset(asset);
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("assetId", asset.getId());
         r.put("assetCode", asset.getAssetCode());
@@ -566,7 +605,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         if (!authorized) {
             base.put("ok", false);
             base.put("source", "denied");
-            base.put("message", "看见≠能查：当前账号无表级读权限，请走申请中心；目录接口不代查生产数据");
+            base.put("message", "看见≠能查：非资产拥有者且无表级读授权，请走申请中心；目录接口不代查生产数据");
+            base.put("needApply", true);
             base.put("columns", List.of());
             base.put("rows", List.of());
             base.put("rowCount", 0);
@@ -1461,6 +1501,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         vo.setStatus(a.getStatus());
         vo.setTechOwner(a.getTechOwner());
         vo.setBizOwner(a.getBizOwner());
+        vo.setCreateUser(a.getCreateUser());
         vo.setEngine(a.getEngine());
         vo.setIsGold(a.getIsGold() != null && a.getIsGold() == 1);
         vo.setOmFqn(a.getOmFqn());
@@ -1482,12 +1523,18 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             LhDatasource ds = dsMap.get(primary.getDsId());
             if (ds != null) {
                 vo.setPrimaryDsName(ds.getName());
+                vo.setPrimaryDsType(dsTypeLabel(ds.getType()));
+                vo.setPrimaryDsCode(ds.getDsCode());
             }
         }
         List<String> names = safeLinks.stream()
                 .map(l -> {
                     LhDatasource ds = dsMap.get(l.getDsId());
-                    return ds != null ? ds.getName() : l.getDsCode();
+                    if (ds == null) {
+                        return l.getDsCode();
+                    }
+                    String type = dsTypeLabel(ds.getType());
+                    return StrUtil.isBlank(type) ? ds.getName() : type + " · " + ds.getName();
                 })
                 .filter(StrUtil::isNotBlank)
                 .distinct()
@@ -1524,15 +1571,74 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         return v;
     }
 
-    private static String buildAssetCode(String layer, String domain, String objectName) {
+    /**
+     * 默认资产编码：layer_dsSeg_shortName。
+     * dsSeg 优先 dsCode，其次源名，再次源 id 尾段，避免同表名跨源冲突。
+     */
+    private static String buildAssetCode(String layer, String domain, String objectName, LhDatasource ds) {
         String shortN = shortName(objectName);
-        return sanitizeCode(layer + "_" + domain + "_" + shortN);
+        String dsSeg = compactSeg(ds != null ? ds.getDsCode() : null, 24);
+        if (StrUtil.isBlank(dsSeg)) {
+            dsSeg = compactSeg(ds != null ? ds.getName() : null, 24);
+        }
+        if (StrUtil.isBlank(dsSeg)) {
+            String id = ds != null ? ds.getId() : null;
+            dsSeg = StrUtil.isNotBlank(id) && id.length() > 8
+                    ? compactSeg(id.substring(id.length() - 8), 10)
+                    : compactSeg(id, 10);
+        }
+        if (StrUtil.isBlank(dsSeg)) {
+            dsSeg = compactSeg(domain, 24);
+        }
+        if (StrUtil.isBlank(dsSeg)) {
+            dsSeg = "src";
+        }
+        return sanitizeCode(layer + "_" + dsSeg + "_" + shortN);
+    }
+
+    private boolean assetCodeExists(String ws, String assetCode) {
+        Long dupCode = this.count(new QueryWrapper<GovAsset>().lambda()
+                .eq(GovAsset::getWs, ws)
+                .eq(GovAsset::getAssetCode, assetCode)
+                .eq(GovAsset::getDeleteFlag, NOT_DELETE));
+        return dupCode != null && dupCode > 0;
+    }
+
+    /** 自动生成编码时追加 _2/_3… 直至唯一 */
+    private String allocateUniqueAssetCode(String ws, String base) {
+        String code = sanitizeCode(base);
+        if (!assetCodeExists(ws, code)) {
+            return code;
+        }
+        for (int i = 2; i <= 99; i++) {
+            String suffix = "_" + i;
+            int maxBase = Math.max(1, 128 - suffix.length());
+            String candidate = sanitizeCode(StrUtil.sub(code, 0, maxBase) + suffix);
+            if (!assetCodeExists(ws, candidate)) {
+                return candidate;
+            }
+        }
+        throw new CommonException("资产编码冲突过多，请手动指定: {}", code);
     }
 
     private static String shortName(String objectName) {
         String raw = StrUtil.blankToDefault(objectName, "object");
         String[] parts = raw.split("[./]");
         return parts[parts.length - 1];
+    }
+
+    private static String compactSeg(String raw, int max) {
+        String s = StrUtil.blankToDefault(raw, "").toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("^_+|_+$", "")
+                .replaceAll("_+", "_");
+        if (StrUtil.isBlank(s)) {
+            return "";
+        }
+        if (s.length() > max) {
+            s = s.substring(0, max).replaceAll("_+$", "");
+        }
+        return s;
     }
 
     private static String sanitizeCode(String code) {
@@ -1543,6 +1649,15 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             s = "a" + s;
         }
         return StrUtil.sub(s, 0, 128);
+    }
+
+    private static String dsTypeLabel(String typeCode) {
+        if (StrUtil.isBlank(typeCode)) {
+            return "";
+        }
+        return LhDatasourceTypeEnum.of(typeCode)
+                .map(LhDatasourceTypeEnum::getLabel)
+                .orElse(typeCode);
     }
 
     private static String sanitizeOmSegment(String name) {

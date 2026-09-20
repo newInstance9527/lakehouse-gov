@@ -31,6 +31,9 @@ public interface IgEtlService {
 
     Map<String, Object> editDag(IgEtlDagEditParam param);
 
+    /** 软删 DAG（级联节点/边；运行中拦截；运行记录保留） */
+    Map<String, Object> deleteDag(IgEtlIdParam param);
+
     Map<String, Object> graph(String id);
 
     Map<String, Object> saveGraph(IgEtlGraphSaveParam param);
@@ -49,6 +52,13 @@ public interface IgEtlService {
     Page<Map<String, Object>> pageRuns(String dagId, String ws);
 
     Map<String, Object> runDetail(String runId);
+
+    /**
+     * 单节点执行日志（对齐 DS 任务实例日志；可分页/续拉）。
+     * @param skipLineNum 已读行数（续拉用）
+     * @param limit 本次最多行数
+     */
+    Map<String, Object> runNodeLog(String runId, String nodeKey, Integer skipLineNum, Integer limit);
 
     /** DS/Worker 回调回写运行态 */
     Map<String, Object> applyRunCallback(Map<String, Object> body);

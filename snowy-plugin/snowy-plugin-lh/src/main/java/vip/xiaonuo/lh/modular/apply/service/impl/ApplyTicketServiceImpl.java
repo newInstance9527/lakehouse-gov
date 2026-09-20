@@ -36,6 +36,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     private static final String NOT_DELETE = "NOT_DELETE";
     public static final String TYPE_TABLE_READ = "table_read";
     public static final String TYPE_LAKE_EXPORT = "lake_export";
+    public static final String TYPE_RESOURCE_MANAGE = "resource_manage";
 
     @Resource
     private ApplyTicketMapper ticketMapper;
@@ -54,7 +55,61 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (TYPE_LAKE_EXPORT.equals(type)) {
             return createExport(param, userId);
         }
+        if (TYPE_RESOURCE_MANAGE.equals(type)) {
+            return createResourceManage(param, userId);
+        }
         return createTableRead(param, userId, type);
+    }
+
+    private ApplyTicket createResourceManage(ApplyTicketCreateParam param, String userId) {
+        vip.xiaonuo.lh.modular.sec.enums.LhOpsResourceTypeEnum typeEnum =
+                vip.xiaonuo.lh.modular.sec.enums.LhOpsResourceTypeEnum.requireEnabled(
+                        StrUtil.blankToDefault(param.getResourceType(), "asset"));
+        String resourceType = typeEnum.getValue();
+        String resourceId = StrUtil.blankToDefault(param.getResourceId(), param.getAssetId()).trim();
+        if (StrUtil.isBlank(resourceId)) {
+            throw new CommonException("操作权限申请须指定 resourceId（或 assetId）");
+        }
+        String ws = "default";
+        String gravAssetId = null;
+        String omFqn = null;
+        String assetId = null;
+        String resourceName = StrUtil.blankToDefault(param.getTitle(), resourceId);
+        if (typeEnum == vip.xiaonuo.lh.modular.sec.enums.LhOpsResourceTypeEnum.ASSET) {
+            GovAsset asset = resolveAsset(resourceId);
+            assetId = asset.getId();
+            resourceId = asset.getId();
+            ws = asset.getWs();
+            gravAssetId = asset.getGravAssetId();
+            omFqn = asset.getOmFqn();
+            resourceName = StrUtil.blankToDefault(asset.getAssetCode(), asset.getName());
+        }
+        String privilege = vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum
+                .requireOps(StrUtil.blankToDefault(param.getPrivilege(), "MANAGE"))
+                .getValue();
+        ApplyTicket t = newTicketShell(userId, TYPE_RESOURCE_MANAGE, param, ws);
+        t.setTicketNo("OP" + t.getId());
+        JSONObject payload = new JSONObject();
+        payload.set("resourceType", resourceType);
+        payload.set("resourceId", resourceId);
+        payload.set("resourceName", resourceName);
+        if (assetId != null) {
+            payload.set("assetId", assetId);
+        }
+        payload.set("privilege", privilege);
+        payload.set("expireLabel", param.getExpireLabel());
+        t.setPayload(payload.toString());
+        t.setExpiresAt(parseExpire(param.getExpireLabel()));
+        ticketMapper.insert(t);
+
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAssetId(assetId);
+        item.setGravAssetId(gravAssetId);
+        item.setOmFqn(omFqn);
+        item.setAction(privilege);
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
     }
 
     private ApplyTicket createTableRead(ApplyTicketCreateParam param, String userId, String type) {
@@ -200,14 +255,27 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
             return r;
         }
 
-        String privilege = item.getAction();
         JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(t.getPayload(), "{}"));
+        String privilege = item.getAction();
         if (StrUtil.isNotBlank(payload.getStr("privilege"))) {
             privilege = payload.getStr("privilege");
+        }
+        if (TYPE_RESOURCE_MANAGE.equals(t.getTicketType())) {
+            privilege = vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum
+                    .requireOps(StrUtil.blankToDefault(privilege, "MANAGE"))
+                    .getValue();
+        }
+        String resourceType = StrUtil.blankToDefault(payload.getStr("resourceType"),
+                StrUtil.isNotBlank(item.getAssetId()) ? "asset" : "");
+        String resourceId = StrUtil.blankToDefault(payload.getStr("resourceId"), item.getAssetId());
+        if (TYPE_RESOURCE_MANAGE.equals(t.getTicketType()) && StrUtil.isBlank(resourceId)) {
+            throw new CommonException("操作权限申请缺少 resourceId");
         }
         SecAuthGrant grant = secAuthGrantService.createFromApproval(
                 t.getId(),
                 t.getApplicant(),
+                TYPE_RESOURCE_MANAGE.equals(t.getTicketType()) ? resourceType : "asset",
+                TYPE_RESOURCE_MANAGE.equals(t.getTicketType()) ? resourceId : item.getAssetId(),
                 item.getAssetId(),
                 item.getGravAssetId(),
                 privilege,
@@ -320,7 +388,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     }
 
     /**
-     * 前端 tab：perm→table_read，export→lake_export
+     * 前端 tab：perm→table_read，export→lake_export，manage→resource_manage
      */
     static String normalizeTicketType(String raw) {
         String t = StrUtil.blankToDefault(raw, TYPE_TABLE_READ).trim().toLowerCase(Locale.ROOT);
@@ -329,6 +397,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
         if ("export".equals(t) || "lake_export".equals(t) || "outbound".equals(t)) {
             return TYPE_LAKE_EXPORT;
+        }
+        if ("manage".equals(t) || "resource_manage".equals(t) || "owner".equals(t)) {
+            return TYPE_RESOURCE_MANAGE;
         }
         return t;
     }

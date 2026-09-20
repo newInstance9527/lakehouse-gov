@@ -64,11 +64,23 @@ public class GovAssetVo {
     @Schema(description = "状态")
     private String status;
 
-    @Schema(description = "技术负责人")
+    @Schema(description = "技术负责人（存 user_id）")
     private String techOwner;
 
-    @Schema(description = "业务负责人")
+    @Schema(description = "技术负责人显示名（sys_user.name）")
+    private String techOwnerName;
+
+    @Schema(description = "业务负责人（存 user_id）")
     private String bizOwner;
+
+    @Schema(description = "业务负责人显示名（sys_user.name）")
+    private String bizOwnerName;
+
+    @Schema(description = "登记人（create_user，存 user_id）")
+    private String createUser;
+
+    @Schema(description = "登记人显示名（sys_user.name）")
+    private String createUserName;
 
     @Schema(description = "引擎")
     private String engine;
@@ -105,6 +117,12 @@ public class GovAssetVo {
 
     @Schema(description = "主源名称")
     private String primaryDsName;
+
+    @Schema(description = "主源类型（MySQL / Kafka / …）")
+    private String primaryDsType;
+
+    @Schema(description = "主源编码")
+    private String primaryDsCode;
 
     @Schema(description = "主源绑定状态 active/stale/detached")
     private String linkStatus;

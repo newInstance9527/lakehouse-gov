@@ -56,6 +56,11 @@ public interface GovAssetService extends IService<GovAsset> {
     GovAssetVo edit(GovAssetEditParam param);
 
     /**
+     * 软删资产（级联软删源绑定；释放 assetCode 便于重建）
+     */
+    Map<String, Object> delete(GovAssetIdParam param);
+
+    /**
      * 关联数据源列表
      */
     List<GovAssetSourceVo> sources(GovAssetIdParam param);

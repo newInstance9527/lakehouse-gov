@@ -62,6 +62,8 @@ public class GovDqServiceImpl implements GovDqService {
     private OpenMetadataClient openMetadataClient;
     @Resource
     private vip.xiaonuo.lh.modular.catalog.support.GovAssetQualityGateReactor qualityGateReactor;
+    @Resource
+    private vip.xiaonuo.lh.modular.standard.service.GovStdService govStdService;
 
     @Override
     public Map<String, Object> overview(String ws, String range) {
@@ -327,6 +329,27 @@ public class GovDqServiceImpl implements GovDqService {
         run.setCreateTime(new Date());
         runMapper.insert(run);
         Map<String, Object> result = runToMap(run);
+        // 回写标准落地检测流水（门户「落地检测」Tab 消费）
+        try {
+            String st = pass ? "ok" : (blocked ? "fail" : "warn");
+            String checkType = StrUtil.blankToDefault(rule.getRuleType(), "质量规则");
+            String stdRef = StrUtil.blankToDefault(rule.getFieldName(), rule.getRuleCode());
+            govStdService.recordDetectResult(
+                    run.getWs(),
+                    rule.getTableName(),
+                    StrUtil.blankToDefault(rule.getFieldName(), "_"),
+                    stdRef,
+                    checkType,
+                    StrUtil.blankToDefault(param.getMessage(),
+                            pass ? "质量规则通过" : "质量规则未通过"),
+                    st,
+                    rule.getAssetId(),
+                    run.getId());
+            result.put("stdDetectWritten", true);
+        } catch (Exception e) {
+            result.put("stdDetectWritten", false);
+            result.put("stdDetectMessage", e.getMessage());
+        }
         if (blocked) {
             Map<String, Object> catalogFx = qualityGateReactor.onBlockedRun(rule, run);
             result.put("catalogEffect", catalogFx);

@@ -1207,6 +1207,85 @@ public class DsClient {
     }
 
     /**
+     * 拉取任务实例日志（对齐 DS UI「查看日志」）。
+     * 优先 {@code GET /log/detail?taskInstanceId&skipLineNum&limit}；soft-fail。
+     */
+    public Map<String, Object> queryTaskInstanceLog(String taskInstanceId, int skipLineNum, int limit) {
+        String id = StrUtil.blankToDefault(taskInstanceId, "").trim();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("engine", "dolphinscheduler");
+        out.put("taskInstanceId", id);
+        out.put("skipLineNum", Math.max(0, skipLineNum));
+        out.put("limit", limit <= 0 ? 1000 : Math.min(limit, 5000));
+        if (StrUtil.isBlank(id)) {
+            out.put("ok", false);
+            out.put("degraded", true);
+            out.put("message", "无 taskInstanceId");
+            return out;
+        }
+        String base = trim(lhProperties.getDs().getUrl());
+        if (StrUtil.isBlank(base)) {
+            out.put("ok", false);
+            out.put("degraded", true);
+            out.put("message", "lh.ds.url 未配置");
+            return out;
+        }
+        int skip = Math.max(0, skipLineNum);
+        int lim = (int) out.get("limit");
+        try {
+            String url = base + "/log/detail?taskInstanceId=" + java.net.URLEncoder.encode(id, java.nio.charset.StandardCharsets.UTF_8)
+                    + "&skipLineNum=" + skip + "&limit=" + lim;
+            String body = executeWithAuth(() -> HttpRequest.get(url).timeout(20000));
+            out.put("ok", true);
+            out.put("degraded", false);
+            JSONObject jo = JSONUtil.parseObj(body);
+            int code = jo.getInt("code", -1);
+            if (code != 0 && code != 200) {
+                out.put("ok", false);
+                out.put("degraded", true);
+                out.put("message", firstNonBlank(jo.getStr("msg"), jo.getStr("message"), "DS log code=" + code));
+                out.put("resp", truncate(body, 1500));
+                return out;
+            }
+            Object data = jo.get("data");
+            String message = null;
+            Integer lineNum = null;
+            if (data instanceof JSONObject dataObj) {
+                message = firstNonBlank(dataObj.getStr("message"), dataObj.getStr("log"), dataObj.getStr("content"));
+                lineNum = dataObj.getInt("lineNum");
+                if (lineNum == null) {
+                    lineNum = dataObj.getInt("lineNumber");
+                }
+            } else if (data instanceof String s) {
+                message = s;
+            }
+            out.put("message", StrUtil.blankToDefault(message, ""));
+            out.put("lineNum", lineNum != null ? lineNum : skip + countLines(message));
+            out.put("content", StrUtil.blankToDefault(message, ""));
+            return out;
+        } catch (Exception e) {
+            log.warn("DS queryTaskInstanceLog soft-fail id={}: {}", id, e.getMessage());
+            out.put("ok", false);
+            out.put("degraded", true);
+            out.put("message", e.getMessage());
+            return out;
+        }
+    }
+
+    private static int countLines(String text) {
+        if (StrUtil.isBlank(text)) {
+            return 0;
+        }
+        int n = 1;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
      * 解析租户：优先配置 {@code lh.ds.tenant-code}；否则读登录用户绑定租户。
      * <p>本环境 admin 绑定 {@code root}。勿对 admin 使用 {@code default}，
      * 否则 UI/启动会报「未指定当前登录用户的租户」。</p>

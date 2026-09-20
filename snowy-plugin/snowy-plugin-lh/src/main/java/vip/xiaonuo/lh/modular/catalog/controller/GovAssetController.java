@@ -74,6 +74,13 @@ public class GovAssetController {
         return CommonResult.data(govAssetService.edit(param));
     }
 
+    @Operation(summary = "删除资产（软删）")
+    @CommonLog("删除资产")
+    @PostMapping("/lh/catalog/assets/delete")
+    public CommonResult<Map<String, Object>> delete(@RequestBody @Valid GovAssetIdParam param) {
+        return CommonResult.data(govAssetService.delete(param));
+    }
+
     @Operation(summary = "资产关联数据源")
     @GetMapping("/lh/catalog/assets/sources")
     public CommonResult<List<GovAssetSourceVo>> sources(@Valid GovAssetIdParam param) {

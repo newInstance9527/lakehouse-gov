@@ -53,6 +53,9 @@ public class LhDatasourceVo {
     @Schema(description = "名称")
     private String name;
 
+    @Schema(description = "数据源编码（稳定业务码）")
+    private String dsCode;
+
     @Schema(description = "主机")
     private String host;
 
@@ -92,8 +95,17 @@ public class LhDatasourceVo {
     @Schema(description = "关联资产列表（SoT: gov_asset_source_link）")
     private java.util.List<java.util.Map<String, Object>> linkedAssets;
 
-    @Schema(description = "负责人")
+    @Schema(description = "负责人（存 user_id）")
     private String owner;
+
+    @Schema(description = "负责人显示名（sys_user.name）")
+    private String ownerName;
+
+    @Schema(description = "登记人/创建人（存 user_id）")
+    private String createUser;
+
+    @Schema(description = "登记人显示名（sys_user.name）")
+    private String createUserName;
 
     @Schema(description = "版本")
     private String ver;

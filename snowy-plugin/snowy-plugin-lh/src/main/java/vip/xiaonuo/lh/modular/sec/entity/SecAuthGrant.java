@@ -21,6 +21,10 @@ public class SecAuthGrant {
     private String ticketId;
     private String subjectType;
     private String subjectId;
+    /** asset / datasource / etl / … */
+    private String resourceType;
+    private String resourceId;
+    /** 兼容旧字段：resource_type=asset 时与 resource_id 同值 */
     private String assetId;
     private String gravAssetId;
     private String privilege;

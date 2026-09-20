@@ -37,28 +37,32 @@ import java.util.*;
 public class LhDatasourceViewAssembler {
 
     private static final Map<String, String[]> TYPE_VISUAL = Map.ofEntries(
-            Map.entry("mysql", new String[]{"🐬", "#e6f7ff", "#08979c"}),
-            Map.entry("postgresql", new String[]{"🐘", "#e6f7ff", "#08979c"}),
-            Map.entry("pg", new String[]{"🐘", "#e6f7ff", "#08979c"}),
-            Map.entry("oracle", new String[]{"🔶", "#fff2e8", "#fa541c"}),
-            Map.entry("sqlserver", new String[]{"🟦", "#e6f7ff", "#096dd9"}),
-            Map.entry("clickhouse", new String[]{"🟡", "#fffbe6", "#d48806"}),
-            Map.entry("doris", new String[]{"🟠", "#fff7e6", "#d46b08"}),
-            Map.entry("hive", new String[]{"🐝", "#fff7e6", "#d48806"}),
-            Map.entry("iceberg", new String[]{"🧊", "#e6f4ff", "#1677ff"}),
-            Map.entry("hbase", new String[]{"📦", "#f6ffed", "#389e0d"}),
-            Map.entry("kafka", new String[]{"📨", "#f9f0ff", "#722ed1"}),
-            Map.entry("rabbitmq", new String[]{"🐰", "#f9f0ff", "#722ed1"}),
-            Map.entry("pulsar", new String[]{"⚡", "#f9f0ff", "#722ed1"}),
-            Map.entry("mongodb", new String[]{"🍃", "#f6ffed", "#52c41a"}),
-            Map.entry("redis", new String[]{"🔴", "#fff1f0", "#cf1322"}),
-            Map.entry("elasticsearch", new String[]{"🔍", "#fff1f0", "#f5222d"}),
-            Map.entry("hdfs", new String[]{"📁", "#fafafa", "#595959"}),
-            Map.entry("s3", new String[]{"☁️", "#e6f4ff", "#1677ff"}),
-            Map.entry("file", new String[]{"📄", "#fafafa", "#595959"}),
-            Map.entry("ftp", new String[]{"📄", "#fafafa", "#595959"}),
-            Map.entry("http_api", new String[]{"🌐", "#f9f0ff", "#722ed1"}),
-            Map.entry("trino", new String[]{"🔺", "#e6f4ff", "#1677ff"})
+            // icon 字段留空：前端用官方 SVG（DsTypeIcon）；此处仅维护 bg / color
+            Map.entry("mysql", new String[]{"", "#e6f7ff", "#08979c"}),
+            Map.entry("postgresql", new String[]{"", "#e6f7ff", "#08979c"}),
+            Map.entry("pg", new String[]{"", "#e6f7ff", "#08979c"}),
+            Map.entry("oracle", new String[]{"", "#fff2e8", "#fa541c"}),
+            Map.entry("sqlserver", new String[]{"", "#e6f7ff", "#096dd9"}),
+            Map.entry("clickhouse", new String[]{"", "#fffbe6", "#d48806"}),
+            Map.entry("doris", new String[]{"", "#fff7e6", "#d46b08"}),
+            Map.entry("hive", new String[]{"", "#fff7e6", "#d48806"}),
+            Map.entry("iceberg", new String[]{"", "#e6f4ff", "#1677ff"}),
+            Map.entry("hbase", new String[]{"", "#f6ffed", "#389e0d"}),
+            Map.entry("kafka", new String[]{"", "#f9f0ff", "#722ed1"}),
+            Map.entry("rabbitmq", new String[]{"", "#f9f0ff", "#722ed1"}),
+            Map.entry("pulsar", new String[]{"", "#f9f0ff", "#722ed1"}),
+            Map.entry("mongodb", new String[]{"", "#f6ffed", "#52c41a"}),
+            Map.entry("redis", new String[]{"", "#fff1f0", "#cf1322"}),
+            Map.entry("elasticsearch", new String[]{"", "#fff1f0", "#f5222d"}),
+            Map.entry("hdfs", new String[]{"", "#fafafa", "#595959"}),
+            Map.entry("s3", new String[]{"", "#e6f4ff", "#1677ff"}),
+            Map.entry("file", new String[]{"", "#fafafa", "#595959"}),
+            Map.entry("ftp", new String[]{"", "#fafafa", "#595959"}),
+            Map.entry("http_api", new String[]{"", "#f9f0ff", "#722ed1"}),
+            Map.entry("trino", new String[]{"", "#e6f4ff", "#1677ff"}),
+            Map.entry("tableau", new String[]{"", "#f6ffed", "#389e0d"}),
+            Map.entry("superset", new String[]{"", "#e6fffb", "#13c2c2"}),
+            Map.entry("airflow", new String[]{"", "#e6fffb", "#13c2c2"})
     );
 
     @Resource
@@ -79,11 +83,12 @@ public class LhDatasourceViewAssembler {
         vo.setType(label);
         vo.setTypeCode(typeCode);
         vo.setCategory(e.getCategory());
-        String[] vis = TYPE_VISUAL.getOrDefault(typeCode, new String[]{"🔌", "#e8f0ff", "#1e6fff"});
+        String[] vis = TYPE_VISUAL.getOrDefault(typeCode, new String[]{"", "#e8f0ff", "#1e6fff"});
         vo.setIcon(vis[0]);
         vo.setBg(vis[1]);
         vo.setColor(vis[2]);
         vo.setName(e.getName());
+        vo.setDsCode(e.getDsCode());
         vo.setHost(e.getEndpointHost());
         vo.setPort(e.getEndpointPort());
         vo.setDatabase(e.getDatabaseName());
@@ -94,6 +99,7 @@ public class LhDatasourceViewAssembler {
         vo.setHealth(e.getHealthScore());
         vo.setAsset(e.getAssetName());
         vo.setOwner(e.getOwner());
+        vo.setCreateUser(e.getCreateUser());
         vo.setVer(e.getVer());
         vo.setDesc(e.getRemark());
         vo.setRevision(e.getRevision());

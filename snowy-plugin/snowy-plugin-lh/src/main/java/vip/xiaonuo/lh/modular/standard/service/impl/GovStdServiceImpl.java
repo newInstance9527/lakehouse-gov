@@ -542,6 +542,160 @@ public class GovStdServiceImpl implements GovStdService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> runLandingDetect(String ws) {
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String runId = "std-detect-" + IdUtil.getSnowflakeNextIdStr();
+        Date now = new Date();
+        List<GovStdMapping> mappings = mappingMapper.selectList(new QueryWrapper<GovStdMapping>().lambda()
+                .eq(GovStdMapping::getWs, workspace)
+                .eq(GovStdMapping::getDeleteFlag, NOT_DELETE));
+        int ok = 0;
+        int warn = 0;
+        int fail = 0;
+        int written = 0;
+        for (GovStdMapping m : mappings) {
+            String table = StrUtil.blankToDefault(m.getTargetTable(), m.getSrcObject());
+            String field = StrUtil.blankToDefault(m.getStdFieldName(), m.getSrcField());
+            String stdRef = m.getStdFieldName();
+
+            // 1) 标准字段是否登记
+            GovStdField stdField = fieldMapper.selectOne(new QueryWrapper<GovStdField>().lambda()
+                    .eq(GovStdField::getWs, workspace)
+                    .eq(GovStdField::getFieldName, m.getStdFieldName())
+                    .eq(GovStdField::getDeleteFlag, NOT_DELETE)
+                    .last("LIMIT 1"));
+            if (stdField == null) {
+                recordDetectResult(workspace, table, field, stdRef, "标准字段存在性",
+                        "标准字段未登记: " + m.getStdFieldName(), "fail", m.getAssetId(), runId);
+                fail++;
+                written++;
+                continue;
+            }
+            recordDetectResult(workspace, table, field, stdRef, "标准字段存在性",
+                    "标准字段已登记 · type=" + StrUtil.blankToDefault(stdField.getDataType(), "—"),
+                    "ok", m.getAssetId(), runId);
+            ok++;
+            written++;
+
+            // 2) 类型/单位
+            boolean hasType = StrUtil.isNotBlank(stdField.getDataType());
+            boolean hasUnit = StrUtil.isNotBlank(stdField.getUnit()) && !"—".equals(stdField.getUnit());
+            String typeStatus = hasType ? "ok" : "warn";
+            if (!hasType) {
+                warn++;
+            } else {
+                ok++;
+            }
+            recordDetectResult(workspace, table, field, stdRef, "单位+类型",
+                    "type=" + StrUtil.blankToDefault(stdField.getDataType(), "缺失")
+                            + " · unit=" + StrUtil.blankToDefault(stdField.getUnit(), "—")
+                            + (hasUnit ? "" : "（单位未填）"),
+                    typeStatus, m.getAssetId(), runId);
+            written++;
+
+            // 3) 码值合规（映射绑定码值集时）
+            if (StrUtil.isNotBlank(m.getCodeSetId())) {
+                GovStdCode code = codeMapper.selectOne(new QueryWrapper<GovStdCode>().lambda()
+                        .eq(GovStdCode::getWs, workspace)
+                        .eq(GovStdCode::getCodeSetId, m.getCodeSetId().trim())
+                        .eq(GovStdCode::getDeleteFlag, NOT_DELETE)
+                        .last("LIMIT 1"));
+                if (code == null) {
+                    recordDetectResult(workspace, table, field, m.getCodeSetId(), "码值合规",
+                            "映射绑定码值集不存在: " + m.getCodeSetId(), "fail", m.getAssetId(), runId);
+                    fail++;
+                    written++;
+                } else {
+                    long itemCnt = codeItemMapper.selectCount(new QueryWrapper<GovStdCodeItem>().lambda()
+                            .eq(GovStdCodeItem::getCodeId, code.getId())
+                            .eq(GovStdCodeItem::getDeleteFlag, NOT_DELETE));
+                    String st = itemCnt > 0 ? "ok" : "warn";
+                    if (itemCnt > 0) {
+                        ok++;
+                    } else {
+                        warn++;
+                    }
+                    recordDetectResult(workspace, table, field, m.getCodeSetId(), "码值合规",
+                            "码值集 " + m.getCodeSetId() + " · 枚举 " + itemCnt + " 条"
+                                    + (itemCnt > 0 ? "（元数据抽检通过；行级抽检待质量作业）" : "（无枚举项）"),
+                            st, m.getAssetId(), runId);
+                    written++;
+                }
+            }
+
+            // 4) 映射自身状态
+            String mapSt = StrUtil.blankToDefault(m.getStatus(), "ok").toLowerCase(Locale.ROOT);
+            if ("fail".equals(mapSt) || "warn".equals(mapSt)) {
+                recordDetectResult(workspace, table, field, stdRef, "映射健康度",
+                        "映射状态=" + mapSt + " · " + StrUtil.blankToDefault(m.getRuleText(), "无规则说明"),
+                        mapSt, m.getAssetId(), runId);
+                if ("fail".equals(mapSt)) {
+                    fail++;
+                } else {
+                    warn++;
+                }
+                written++;
+            }
+        }
+
+        // 无映射时：对已登记标准字段做存在性占位检测，避免空跑无反馈
+        if (mappings.isEmpty()) {
+            List<GovStdField> fields = fieldMapper.selectList(new QueryWrapper<GovStdField>().lambda()
+                    .eq(GovStdField::getWs, workspace)
+                    .eq(GovStdField::getDeleteFlag, NOT_DELETE)
+                    .last("LIMIT 50"));
+            for (GovStdField f : fields) {
+                recordDetectResult(workspace, "_registry", f.getFieldName(), f.getFieldName(),
+                        "标准字段登记", "已登记但无源→标准映射；请先补录映射", "warn", null, runId);
+                warn++;
+                written++;
+            }
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("runId", runId);
+        out.put("ws", workspace);
+        out.put("mappingCount", mappings.size());
+        out.put("written", written);
+        out.put("ok", ok);
+        out.put("warn", warn);
+        out.put("fail", fail);
+        out.put("checkedAt", now);
+        return out;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void recordDetectResult(String ws, String tableName, String fieldName, String stdRef,
+                                   String checkType, String resultText, String status,
+                                   String assetId, String runId) {
+        GovStdDetectResult d = new GovStdDetectResult();
+        d.setId(IdUtil.getSnowflakeNextIdStr());
+        d.setWs(StrUtil.blankToDefault(ws, WS_DEFAULT));
+        d.setTableName(StrUtil.blankToDefault(tableName, "_"));
+        d.setFieldName(StrUtil.blankToDefault(fieldName, "_"));
+        d.setStdRef(StrUtil.blankToDefault(stdRef, fieldName));
+        d.setCheckType(StrUtil.blankToDefault(checkType, "合规"));
+        d.setResultText(resultText);
+        String st = StrUtil.blankToDefault(status, "ok").toLowerCase(Locale.ROOT);
+        if (!List.of("ok", "warn", "fail").contains(st)) {
+            st = "warn";
+        }
+        d.setStatus(st);
+        d.setAssetId(assetId);
+        d.setCheckedAt(new Date());
+        d.setRunId(runId);
+        d.setCreateTime(new Date());
+        try {
+            d.setCreateUser(vip.xiaonuo.lh.core.auth.LhLoginUsers.requireUserId());
+        } catch (Exception e) {
+            d.setCreateUser("system");
+        }
+        detectMapper.insert(d);
+    }
+
+    @Override
     public Map<String, Object> metaOptions() {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("domains", List.of(

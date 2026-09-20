@@ -63,5 +63,15 @@ public interface GovStdService {
 
     Page<GovStdDetectVo> pageDetects(GovStdPageParam param);
 
+    /**
+     * 按当前映射/字段/码值跑一轮落地检测，写入 {@code gov_std_detect_result}（作业结果，非手填通过）。
+     */
+    Map<String, Object> runLandingDetect(String ws);
+
+    /** 供质量规则运行回写一条检测结果 */
+    void recordDetectResult(String ws, String tableName, String fieldName, String stdRef,
+                            String checkType, String resultText, String status,
+                            String assetId, String runId);
+
     Map<String, Object> metaOptions();
 }

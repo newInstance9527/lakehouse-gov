@@ -150,6 +150,13 @@ public class GovStdController {
         return CommonResult.data(govStdService.pageDetects(param));
     }
 
+    @Operation(summary = "运行落地检测（按映射/字段/码值抽检并写入结果流水）")
+    @CommonLog("运行标准落地检测")
+    @PostMapping("/lh/standard/detects/run")
+    public CommonResult<Map<String, Object>> runLandingDetect(@RequestParam(required = false) String ws) {
+        return CommonResult.data(govStdService.runLandingDetect(ws));
+    }
+
     @Operation(summary = "域/层级/状态字典")
     @GetMapping("/lh/standard/metaOptions")
     public CommonResult<Map<String, Object>> metaOptions() {

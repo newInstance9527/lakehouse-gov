@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.DsClient;
 import vip.xiaonuo.lh.core.engine.DsWorkflowBuilder;
 import vip.xiaonuo.lh.core.engine.EngineResolver;
@@ -48,6 +49,7 @@ import vip.xiaonuo.lh.modular.etl.support.IgEtlRunAlertBuilder;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlSinkTargetChecker;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlVaultInjector;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.ArrayList;
 import java.util.Date;
@@ -104,6 +106,10 @@ public class IgEtlServiceImpl implements IgEtlService {
     private IgEtlLocalTrialExecutor localTrialExecutor;
     @Resource
     private ApplyTicketService applyTicketService;
+    @Resource
+    private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
 
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
@@ -128,7 +134,9 @@ public class IgEtlServiceImpl implements IgEtlService {
         }
         Page<IgEtlDag> page = dagMapper.selectPage(CommonPageRequest.defaultPage(), qw);
         Page<Map<String, Object>> out = new Page<>(page.getCurrent(), page.getSize(), page.getTotal());
-        out.setRecords(page.getRecords().stream().map(this::dagBrief).collect(Collectors.toList()));
+        List<Map<String, Object>> briefs = page.getRecords().stream().map(this::dagBriefRaw).collect(Collectors.toList());
+        userNameResolver.fillDagBriefs(briefs);
+        out.setRecords(briefs);
         return out;
     }
 
@@ -161,7 +169,9 @@ public class IgEtlServiceImpl implements IgEtlService {
         dag.setName(param.getName());
         dag.setDescription(param.getDescription());
         dag.setCron(StrUtil.blankToDefault(param.getCron(), "0 2 * * *"));
-        dag.setOwner(param.getOwner());
+        String userId = LhLoginUsers.requireUserId();
+        dag.setOwner(StrUtil.blankToDefault(param.getOwner(), userId));
+        dag.setCreateUser(userId);
         dag.setStatus("draft");
         dag.setVer("v0.1");
         dag.setEnv(StrUtil.blankToDefault(param.getEnv(), "dev"));
@@ -175,6 +185,7 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> editDag(IgEtlDagEditParam param) {
         IgEtlDag dag = requireDag(param.getId());
+        assertCanEditDag(dag);
         String prevStatus = dag.getStatus();
         if (StrUtil.isNotBlank(param.getName())) {
             dag.setName(param.getName());
@@ -220,6 +231,51 @@ public class IgEtlServiceImpl implements IgEtlService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> deleteDag(IgEtlIdParam param) {
+        IgEtlDag dag = requireDag(param.getId());
+        assertCanDeleteDag(dag);
+        Long running = runMapper.selectCount(new QueryWrapper<IgEtlRun>().lambda()
+                .eq(IgEtlRun::getDagId, dag.getId())
+                .in(IgEtlRun::getStatus, "running", "submitted", "pending"));
+        if (running != null && running > 0) {
+            throw new CommonException("任务运行中，请等待完成或终止后再删除");
+        }
+        Map<String, Object> dsSchedule = null;
+        if (StrUtil.isNotBlank(dag.getDsWorkflowCode())
+                && ("prod".equals(dag.getStatus()) || "paused".equals(dag.getStatus()))) {
+            dsSchedule = dsClient.setScheduleState(dag.getDsWorkflowCode(), "OFFLINE");
+        }
+        // 级联软删节点 / 边（保留运行记录作审计）
+        List<IgEtlNode> nodes = nodeMapper.selectList(new QueryWrapper<IgEtlNode>().lambda()
+                .eq(IgEtlNode::getDagId, dag.getId()));
+        for (IgEtlNode n : nodes) {
+            nodeMapper.deleteById(n.getId());
+        }
+        List<IgEtlEdge> edges = edgeMapper.selectList(new QueryWrapper<IgEtlEdge>().lambda()
+                .eq(IgEtlEdge::getDagId, dag.getId()));
+        for (IgEtlEdge e : edges) {
+            edgeMapper.deleteById(e.getId());
+        }
+        // 释放 uq_ig_etl_dag(ws,dag_code)，便于同编码重建
+        String freed = truncateKey(dag.getDagCode() + "__del_" + dag.getId(), 128);
+        dag.setDagCode(freed);
+        dag.setStatus("draft");
+        dag.setRevision(dag.getRevision() == null ? 1 : dag.getRevision() + 1);
+        dagMapper.updateById(dag);
+        dagMapper.deleteById(dag.getId());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", dag.getId());
+        out.put("deleted", true);
+        out.put("nodeCount", nodes.size());
+        out.put("edgeCount", edges.size());
+        if (dsSchedule != null) {
+            out.put("dsSchedule", dsSchedule);
+        }
+        return out;
+    }
+
+    @Override
     public Map<String, Object> graph(String id) {
         IgEtlDag dag = requireDag(id);
         List<IgEtlNode> nodes = nodeMapper.selectList(new QueryWrapper<IgEtlNode>().lambda()
@@ -237,6 +293,7 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> saveGraph(IgEtlGraphSaveParam param) {
         IgEtlDag dag = requireDag(param.getId());
+        assertCanEditDag(dag);
         List<Map<String, Object>> nodeMaps = param.getNodes() == null ? List.of() : param.getNodes();
         List<Map<String, Object>> edgeMaps = param.getEdges() == null ? List.of() : param.getEdges();
 
@@ -343,6 +400,7 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> updateNodeConfig(IgEtlNodeConfigParam param) {
+        assertCanEditDag(requireDag(param.getDagId()));
         IgEtlNode node = nodeMapper.selectOne(new QueryWrapper<IgEtlNode>().lambda()
                 .eq(IgEtlNode::getDagId, param.getDagId())
                 .eq(IgEtlNode::getNodeKey, param.getNodeKey()));
@@ -499,6 +557,7 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> trial(IgEtlTrialParam param) {
+        assertCanEditDag(requireDag(param.getId()));
         IgEtlIdParam idParam = new IgEtlIdParam();
         idParam.setId(param.getId());
         Map<String, Object> v = validate(idParam);
@@ -699,6 +758,7 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> backfill(IgEtlBackfillParam param) {
         IgEtlDag dag = requireDag(param.getId());
+        assertCanEditDag(dag);
         if (!"prod".equals(dag.getStatus()) && !"paused".equals(dag.getStatus())) {
             throw new CommonException("仅已发布或暂停的 DAG 可补数（当前 status=" + dag.getStatus() + "）");
         }
@@ -758,6 +818,7 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> deploy(IgEtlDeployParam param) {
+        assertCanEditDag(requireDag(param.getId()));
         IgEtlIdParam idParam = new IgEtlIdParam();
         idParam.setId(param.getId());
         Map<String, Object> v = validate(idParam);
@@ -890,6 +951,116 @@ public class IgEtlServiceImpl implements IgEtlService {
     }
 
     @Override
+    public Map<String, Object> runNodeLog(String runId, String nodeKey, Integer skipLineNum, Integer limit) {
+        if (StrUtil.isBlank(runId) || StrUtil.isBlank(nodeKey)) {
+            throw new CommonException("runId / nodeKey 不能为空");
+        }
+        IgEtlRun run = runMapper.selectOne(new QueryWrapper<IgEtlRun>().lambda().eq(IgEtlRun::getRunId, runId));
+        if (run == null) {
+            throw new CommonException("运行不存在: " + runId);
+        }
+        // 先同步一次 DS 任务态，便于拿到 taskInstanceId
+        syncRunFromDs(run);
+        IgEtlRunNode rn = runNodeMapper.selectOne(new QueryWrapper<IgEtlRunNode>().lambda()
+                .eq(IgEtlRunNode::getRunId, runId)
+                .eq(IgEtlRunNode::getNodeKey, nodeKey.trim())
+                .last("LIMIT 1"));
+        if (rn == null) {
+            throw new CommonException("运行节点不存在: " + nodeKey);
+        }
+        int skip = skipLineNum == null ? 0 : Math.max(0, skipLineNum);
+        int lim = limit == null || limit <= 0 ? 1000 : Math.min(limit, 5000);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("runId", runId);
+        out.put("nodeKey", rn.getNodeKey());
+        out.put("nodeType", rn.getNodeType());
+        out.put("status", rn.getStatus());
+        out.put("logRef", rn.getLogRef());
+        out.put("skipLineNum", skip);
+        out.put("limit", lim);
+
+        String taskId = resolveDsTaskInstanceId(run, rn);
+        out.put("taskInstanceId", taskId);
+        if (StrUtil.isBlank(taskId)) {
+            out.put("ok", false);
+            out.put("degraded", true);
+            out.put("source", "portal");
+            out.put("content", StrUtil.blankToDefault(rn.getMessage(), "暂无 DS 任务实例，无法拉实时日志（本地试跑或尚未调度）"));
+            out.put("lineNum", skip);
+            out.put("message", "no_ds_task_instance");
+            return out;
+        }
+        Map<String, Object> log = dsClient.queryTaskInstanceLog(taskId, skip, lim);
+        out.put("source", "ds");
+        out.put("ok", Boolean.TRUE.equals(log.get("ok")));
+        out.put("degraded", Boolean.TRUE.equals(log.get("degraded")));
+        out.put("content", str(log.get("content"), str(log.get("message"), "")));
+        Object lineNum = log.get("lineNum");
+        out.put("lineNum", lineNum != null ? lineNum : skip);
+        if (log.get("message") != null && !Boolean.TRUE.equals(log.get("ok"))) {
+            out.put("message", log.get("message"));
+        }
+        // 回写 logRef，便于下次直达
+        String wantRef = "dsTask:" + taskId;
+        if (!wantRef.equals(rn.getLogRef())) {
+            rn.setLogRef(wantRef);
+            runNodeMapper.updateById(rn);
+            out.put("logRef", wantRef);
+        }
+        return out;
+    }
+
+    /** 从 logRef 或 DS 任务列表解析 taskInstanceId */
+    @SuppressWarnings("unchecked")
+    private String resolveDsTaskInstanceId(IgEtlRun run, IgEtlRunNode rn) {
+        String fromRef = parseDsTaskId(rn.getLogRef());
+        if (StrUtil.isNotBlank(fromRef)) {
+            return fromRef;
+        }
+        if (run == null || StrUtil.isBlank(run.getDsRunId())) {
+            return null;
+        }
+        String dsId = run.getDsRunId().trim();
+        if (dsId.startsWith("WF_") || !dsId.matches("\\d+")) {
+            return null;
+        }
+        Map<String, Object> taskSync = dsClient.listTaskInstances(dsId);
+        if (!Boolean.TRUE.equals(taskSync.get("ok")) || !(taskSync.get("tasks") instanceof List<?> tasks)) {
+            return null;
+        }
+        for (Object o : tasks) {
+            if (!(o instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            Map<String, Object> t = (Map<String, Object>) raw;
+            String name = str(t.get("name"), "");
+            if (StrUtil.isBlank(name)) {
+                continue;
+            }
+            if (name.equals(rn.getNodeKey()) || name.contains(rn.getNodeKey())
+                    || name.contains(StrUtil.blankToDefault(rn.getNodeType(), "___"))) {
+                return str(t.get("id"), null);
+            }
+        }
+        return null;
+    }
+
+    private static String parseDsTaskId(String logRef) {
+        if (StrUtil.isBlank(logRef)) {
+            return null;
+        }
+        String s = logRef.trim();
+        if (s.startsWith("dsTask:")) {
+            String id = s.substring("dsTask:".length()).trim();
+            return StrUtil.isBlank(id) ? null : id;
+        }
+        if (s.matches("\\d+")) {
+            return s;
+        }
+        return null;
+    }
+
+    @Override
     public Map<String, Object> resolveEngine(IgEtlEngineResolveParam param) {
         String confJson = sanitizeConfJson(param.getConf(), param.getConfJson());
         return engineResolver.resolve(param.getNodeType(), confJson);
@@ -915,7 +1086,22 @@ public class IgEtlServiceImpl implements IgEtlService {
         return dag;
     }
 
+    /** 拥有者或 MANAGE grant 方可编辑/删除/发布（超管不短路） */
+    private void assertCanEditDag(IgEtlDag dag) {
+        secAuthGrantService.assertCanEditEtl(dag);
+    }
+
+    private void assertCanDeleteDag(IgEtlDag dag) {
+        secAuthGrantService.assertCanDeleteEtl(dag);
+    }
+
     private Map<String, Object> dagBrief(IgEtlDag dag) {
+        Map<String, Object> m = dagBriefRaw(dag);
+        userNameResolver.fillDagBrief(m);
+        return m;
+    }
+
+    private Map<String, Object> dagBriefRaw(IgEtlDag dag) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", dag.getId());
         m.put("ws", dag.getWs());
@@ -925,6 +1111,7 @@ public class IgEtlServiceImpl implements IgEtlService {
         m.put("description", dag.getDescription());
         m.put("cron", dag.getCron());
         m.put("owner", dag.getOwner());
+        m.put("createUser", dag.getCreateUser());
         m.put("status", dag.getStatus());
         m.put("ver", dag.getVer());
         m.put("env", dag.getEnv());
@@ -991,10 +1178,12 @@ public class IgEtlServiceImpl implements IgEtlService {
     private Map<String, Object> runNodeVo(IgEtlRunNode n) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("nodeKey", n.getNodeKey());
+        m.put("nodeId", n.getNodeKey());
         m.put("nodeType", n.getNodeType());
         m.put("status", n.getStatus());
         m.put("engine", n.getEngine());
         m.put("logRef", n.getLogRef());
+        m.put("dsTaskInstanceId", parseDsTaskId(n.getLogRef()));
         m.put("message", n.getMessage());
         m.put("startedAt", n.getStartedAt());
         m.put("finishedAt", n.getFinishedAt());
@@ -1162,8 +1351,15 @@ public class IgEtlServiceImpl implements IgEtlService {
                 continue;
             }
             rn.setStatus(mapped);
-            rn.setLogRef(str(matched.get("logPath"), rn.getLogRef()));
-            rn.setMessage("DS task state=" + matched.get("state"));
+            String taskId = str(matched.get("id"), null);
+            if (StrUtil.isNotBlank(taskId)) {
+                rn.setLogRef("dsTask:" + taskId);
+            } else {
+                rn.setLogRef(str(matched.get("logPath"), rn.getLogRef()));
+            }
+            String path = str(matched.get("logPath"), null);
+            rn.setMessage("DS task state=" + matched.get("state")
+                    + (StrUtil.isNotBlank(path) ? " · logPath=" + path : ""));
             if ("running".equals(mapped) && rn.getStartedAt() == null) {
                 rn.setStartedAt(now);
             }
@@ -1565,6 +1761,13 @@ public class IgEtlServiceImpl implements IgEtlService {
         visiting.remove(cur);
         visited.add(cur);
         return false;
+    }
+
+    private String truncateKey(String s, int max) {
+        if (s == null) {
+            return null;
+        }
+        return s.length() <= max ? s : s.substring(0, max);
     }
 
     private void upsertWatermark(String sourceSystem, String markKey, String markValue) {

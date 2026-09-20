@@ -22,7 +22,7 @@ public class ApplyTicketCreateParam {
     @Schema(description = "gov_asset.id（table_read MUST；lake_export 可选）")
     private String assetId;
 
-    @Schema(description = "权限，默认 SELECT（table_read）")
+    @Schema(description = "权限：table_read 默认 SELECT；resource_manage 为 EDIT|DELETE|MANAGE（默认 MANAGE）")
     private String privilege;
 
     @Schema(description = "时效文案，如 30天/长期")
@@ -36,4 +36,10 @@ public class ApplyTicketCreateParam {
 
     @Schema(description = "出湖目标（lake_export MUST）")
     private String exportTarget;
+
+    @Schema(description = "资源类型：asset|datasource|etl（resource_manage）")
+    private String resourceType;
+
+    @Schema(description = "资源 ID（resource_manage；asset 时亦可填 assetId）")
+    private String resourceId;
 }

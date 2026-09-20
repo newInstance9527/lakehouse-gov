@@ -28,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryDiscoverer;
 import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryDiscoverResult;
@@ -98,6 +99,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     /** ? @Order?Hive/Kafka/ES/Redis/RMQ/MinIO ????????? */
     @Resource
     private List<LhInventoryDiscoverer> inventoryDiscoverers;
+    @Resource
+    private vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService secAuthGrantService;
+    @Resource
+    private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
 
     @Override
     public Page<LhDatasourceVo> page(LhDatasourcePageParam param) {
@@ -157,6 +162,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         Page<LhDatasourceVo> page = new Page<>(raw.getCurrent(), raw.getSize(), raw.getTotal());
         List<LhDatasourceVo> vos = raw.getRecords().stream().map(viewAssembler::toVo).collect(Collectors.toList());
         linkedAssetFiller.fill(vos);
+        userNameResolver.fillDatasources(vos);
         page.setRecords(vos);
         return page;
     }
@@ -183,7 +189,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         entity.setCategory(StrUtil.blankToDefault(param.getCategory(),
                 LhDatasourceTypeEnum.resolveCategory(typeCode)));
         entity.setLevel(param.getLevel());
-        entity.setOwner(param.getOwner());
+        String userId = LhLoginUsers.requireUserId();
+        entity.setOwner(StrUtil.blankToDefault(param.getOwner(), userId));
+        entity.setCreateUser(userId);
         entity.setRemark(param.getDesc());
         entity.setAccessMode(StrUtil.blankToDefault(n.accessMode, param.getAccess()));
         entity.setSchemaSummary(StrUtil.blankToDefault(n.schemaSummary, param.getSchema()));
@@ -206,7 +214,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         seedTablesFromSummary(entity);
         // Grav Catalog ? ????? ? OM?soft-fail???????
         postRegisterBridge.afterPersist(entity);
-        return viewAssembler.toVo(this.getById(entity.getId()));
+        return enrichVo(viewAssembler.toVo(this.getById(entity.getId())));
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -217,6 +225,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             throw new CommonException("id????");
         }
         LhDatasource entity = queryEntity(param.getId());
+        assertCanEditDs(entity);
         if (StrUtil.isNotBlank(param.getDsCode()) && !param.getDsCode().equals(entity.getDsCode())) {
             ensureDsCodeUnique(param.getDsCode(), entity.getId());
             entity.setDsCode(param.getDsCode());
@@ -304,7 +313,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         this.updateById(entity);
         // ??????? Grav / ??? / OM?soft-fail?
         postRegisterBridge.afterPersist(entity);
-        return viewAssembler.toVo(this.getById(entity.getId()));
+        return enrichVo(viewAssembler.toVo(this.getById(entity.getId())));
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -314,6 +323,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         for (String id : idList) {
             LhDatasource ds = this.getById(id);
             if (ds != null) {
+                assertCanDeleteDs(ds);
                 ds.setStatus(LhDatasourceStatusEnum.REVOKED.getValue());
                 ds.setRevision(Optional.ofNullable(ds.getRevision()).orElse(1) + 1);
                 this.updateById(ds);
@@ -327,7 +337,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public LhDatasourceVo detail(LhDatasourceIdParam param) {
         LhDatasourceVo vo = viewAssembler.toVo(queryEntity(param.getId()));
         linkedAssetFiller.fill(vo);
-        return vo;
+        return enrichVo(vo);
     }
 
     @Override
@@ -592,6 +602,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Override
     public void updatePurposes(LhDatasourcePurposesParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanEditDs(ds);
         if (param.getPurposes().contains("analyze_direct") && !"trino".equals(ds.getType())) {
             throw new CommonException("??????? analyze_direct");
         }
@@ -611,6 +622,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Override
     public void rotateCred(LhDatasourceIdParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanEditDs(ds);
         Map<String, Object> old = vaultClient.read(ds.getVaultPath());
         old.put("rotatedAt", new Date().toString());
         vaultClient.write(ds.getVaultPath(), old);
@@ -625,20 +637,24 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                 .filter(LhDatasourceTypeEnum::isIngestable)
                 .map(LhDatasourceTypeEnum::getValue)
                 .collect(Collectors.toList());
-        return this.list(new QueryWrapper<LhDatasource>().lambda()
+        List<LhDatasourceVo> vos = this.list(new QueryWrapper<LhDatasource>().lambda()
                         .eq(LhDatasource::getStatus, LhDatasourceStatusEnum.ONLINE.getValue())
                         .like(LhDatasource::getPurposes, "ingest")
                         .in(LhDatasource::getType, ingestTypes))
                 .stream().map(viewAssembler::toVo).collect(Collectors.toList());
+        userNameResolver.fillDatasources(vos);
+        return vos;
     }
 
     @Override
     public List<LhDatasourceVo> supersetProjection() {
-        return this.list(new QueryWrapper<LhDatasource>().lambda()
+        List<LhDatasourceVo> vos = this.list(new QueryWrapper<LhDatasource>().lambda()
                         .eq(LhDatasource::getType, "trino")
                         .like(LhDatasource::getPurposes, "query_gateway")
                         .ne(LhDatasource::getStatus, LhDatasourceStatusEnum.REVOKED.getValue()))
                 .stream().map(viewAssembler::toVo).collect(Collectors.toList());
+        userNameResolver.fillDatasources(vos);
+        return vos;
     }
 
     @Override
@@ -674,6 +690,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Override
     public Map<String, Object> toggleStatus(LhDatasourceToggleParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanEditDs(ds);
         String next = LhDatasourceStatusEnum.ONLINE.getValue().equals(ds.getStatus())
                 ? LhDatasourceStatusEnum.PAUSED.getValue()
                 : LhDatasourceStatusEnum.ONLINE.getValue();
@@ -683,7 +700,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", ds.getId());
         m.put("status", next);
-        m.put("source", viewAssembler.toVo(ds));
+        m.put("source", enrichVo(viewAssembler.toVo(ds)));
         return m;
     }
 
@@ -772,12 +789,13 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Transactional(rollbackFor = Exception.class)
     @Override
     public LhDsTableVo tableAdd(LhDsTableAddParam param) {
-        queryEntity(param.getDsId());
+        LhDatasource ds = queryEntity(param.getDsId());
+        assertCanEditDs(ds);
         Long cnt = dsTableMapper.selectCount(new QueryWrapper<LhDsTable>().lambda()
                 .eq(LhDsTable::getDsId, param.getDsId())
                 .eq(LhDsTable::getTableName, param.getName()));
         if (cnt != null && cnt > 0) {
-            throw new CommonException("?????: {}", param.getName());
+            throw new CommonException("表名已存在: {}", param.getName());
         }
         LhDsTable row = new LhDsTable();
         row.setId(IdUtil.getSnowflakeNextIdStr());
@@ -800,8 +818,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public LhDsTableVo tableEdit(LhDsTableEditParam param) {
         LhDsTable row = dsTableMapper.selectById(param.getId());
         if (row == null) {
-            throw new CommonException("????????: {}", param.getId());
+            throw new CommonException("表不存在: {}", param.getId());
         }
+        LhDatasource ds = queryEntity(row.getDsId());
+        assertCanEditDs(ds);
         row.setCnName(param.getCnName());
         row.setCommentTxt(param.getComment());
         row.setEncoding(param.getEncoding());
@@ -822,6 +842,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                 dsIds.add(row.getDsId());
             }
         }
+        for (String dsId : dsIds) {
+            assertCanDeleteDs(queryEntity(dsId));
+        }
         dsTableMapper.deleteBatchIds(idList);
         for (String dsId : dsIds) {
             refreshSchemaSummary(dsId);
@@ -832,6 +855,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Override
     public Map<String, Object> tableSync(LhDatasourceIdParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanEditDs(ds);
         Date now = new Date();
         DiscoverBundle bundle = discoverRemoteTables(ds);
         List<RemoteTableMeta> metas = bundle.metas;
@@ -1367,6 +1391,20 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             throw new CommonException("??????: {}", id);
         }
         return ds;
+    }
+
+    /** 拥有者或 MANAGE grant 方可改删/启停（超管不短路） */
+    private LhDatasourceVo enrichVo(LhDatasourceVo vo) {
+        userNameResolver.fillDatasource(vo);
+        return vo;
+    }
+
+    private void assertCanEditDs(LhDatasource ds) {
+        secAuthGrantService.assertCanEditDatasource(ds);
+    }
+
+    private void assertCanDeleteDs(LhDatasource ds) {
+        secAuthGrantService.assertCanDeleteDatasource(ds);
     }
 
     private void markBindingsStale(String dsId) {
