@@ -1,0 +1,45 @@
+package vip.xiaonuo.lh.modular.dataapi.entity;
+
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.Getter;
+import lombok.Setter;
+import vip.xiaonuo.common.pojo.CommonEntity;
+
+import java.util.Date;
+
+@Getter
+@Setter
+@TableName("dataapi_api_binding")
+@Schema(description = "数据服务 API 绑定")
+public class DataapiApiBinding extends CommonEntity {
+
+    @TableId
+    private String id;
+    private Integer revision;
+    private String status;
+    private String ws;
+    private String remark;
+    private String name;
+    private String publicPath;
+    private String method;
+    private String sqlrestApiId;
+    private String sqlrestCommitId;
+    private Integer sqlrestVersion;
+    private String sourceKind;
+    private String sourceRef;
+    private String state;
+    private String apisixRouteId;
+    private String authMode;
+    private Integer qpsLimit;
+    private Integer burstLimit;
+    private String domainCode;
+    private String ownerUser;
+    private String publishEnv;
+    private String contentType;
+    private String paramJson;
+    private String responseJson;
+    private Date lastPublishAt;
+    private String lastError;
+}

@@ -42,10 +42,19 @@ lh:
     password: ""
   sqlrest:
     manager-url: http://127.0.0.1:18090
+    username: admin
+    password: ""
+    default-group-id: 1
+    default-module-id: 1
+    # 正式 MUST 为 Trino JDBC；当前环境未登记 Trino 时可临时用已有 DS
+    datasource-id: 1
+    # APISIX upstream host:port；生产改 Executor，联调可用 Gateway :18091
+    executor-upstream: "127.0.0.1:18091"
   apisix:
     admin-url: http://127.0.0.1:9180
     vault-path: platform/apisix/admin
     api-key: 
+    key-auth-enabled: false
   openmetadata:
     url: http://127.0.0.1:8585
     vault-path: platform/openmetadata/bot

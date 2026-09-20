@@ -138,7 +138,23 @@ public class LhProperties {
     @Getter
     @Setter
     public static class Sqlrest {
+        /** Manager UI / Admin API 根，如 http://host:18090 */
         private String managerUrl;
+        private String username = "admin";
+        private String password = "123456";
+        /** 默认授权分组 / 模块（SQLREST） */
+        private Long defaultGroupId = 1L;
+        private Long defaultModuleId = 1L;
+        /**
+         * SQLREST 数据源 ID；正式环境 MUST 指向 Trino JDBC。
+         * 联调环境若尚未登记 Trino，可临时指向现有 DS。
+         */
+        private Long datasourceId = 1L;
+        /**
+         * APISIX upstream 节点 host:port。
+         * 生产应指向 SQLREST Executor；当前环境可临时用 Gateway（如 host:18091）。
+         */
+        private String executorUpstream = "127.0.0.1:18091";
     }
 
     @Getter
@@ -148,6 +164,8 @@ public class LhProperties {
         private String vaultPath = LhVaultPaths.APISIX;
         /** bootstrap Admin Key */
         private String apiKey;
+        /** 是否挂 key-auth（无 consumer 时一期可关，仅限流） */
+        private boolean keyAuthEnabled = false;
     }
 
     @Getter
