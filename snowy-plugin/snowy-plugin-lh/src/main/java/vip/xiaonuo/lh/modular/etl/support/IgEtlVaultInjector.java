@@ -167,9 +167,15 @@ public class IgEtlVaultInjector {
                 if (readerDs != null) {
                     conf.set("lhUpstreamDsType", readerDs.getType());
                     conf.set("lhReaderDsType", readerDs.getType());
+                    conf.set("_lhUpstreamDsId", readerDsId);
                     taskParams.put("lhReaderDsId", readerDsId);
                     taskParams.put("lhReaderDsType", readerDs.getType());
+                    taskParams.put("lhUpstreamDsId", readerDsId);
                 }
+            } else if (sinkSide && StrUtil.isNotBlank(readerDsId) && readerDsId.equals(dsId)) {
+                // 汇点 reader 不能与写端同 ds（否则 mysqlreader 会吃到 postgres URL）
+                notes.add(nodeKey + ": sink readerDsId 与写端 dsId 相同，忽略并等待上游解析");
+                readerDsId = null;
             } else if (!sinkSide) {
                 readerDs = ds;
                 readerDsId = dsId;

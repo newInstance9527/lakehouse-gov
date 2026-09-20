@@ -66,18 +66,25 @@ public final class DataxJobBuilder {
         writerParam.put("username", "${LH_WRITER_JDBC_USER}");
         writerParam.put("password", "${LH_WRITER_JDBC_PASSWORD}");
         writerParam.put("column", cols.writer);
+        // Writer：jdbcUrl 必须是字符串（Reader 才是数组）；写成数组会被当成字面量 URL → No suitable driver for ["jdbc:…
         writerParam.put("connection", List.of(Map.of(
                 "table", List.of(StrUtil.blankToDefault(writerTable, "lh_sync_target")),
-                "jdbcUrl", List.of("${LH_WRITER_JDBC_URL}"))));
-        String writeMode = StrUtil.blankToDefault(conf.getStr("writeMode"), "insert");
-        // DataX postgresqlwriter 仅支持 insert；upsert/update 会直接失败
-        if ("postgresqlwriter".equalsIgnoreCase(writerType)
-                && !"insert".equalsIgnoreCase(writeMode)) {
-            writeMode = "insert";
+                "jdbcUrl", "${LH_WRITER_JDBC_URL}")));
+        // DataX postgresqlwriter：禁止配置 writeMode（任意非 null 都会 ConfError；仅 insert）
+        // 重复跑会撞主键：默认 DELETE 目标表（可用 conf.preSql / skipPreDelete 覆盖）
+        if (!"postgresqlwriter".equalsIgnoreCase(writerType)) {
+            String writeMode = StrUtil.blankToDefault(conf.getStr("writeMode"), "insert");
+            writerParam.put("writeMode", writeMode);
         }
-        writerParam.put("writeMode", writeMode);
         if (StrUtil.isNotBlank(conf.getStr("preSql"))) {
             writerParam.put("preSql", List.of(conf.getStr("preSql")));
+        } else if ("postgresqlwriter".equalsIgnoreCase(writerType)
+                && !Boolean.TRUE.equals(conf.getBool("skipPreDelete"))) {
+            String wt = StrUtil.blankToDefault(writerTable, "lh_sync_target");
+            // 仅允许简单表名，防注入
+            if (wt.matches("[A-Za-z0-9_\\.]+")) {
+                writerParam.put("preSql", List.of("DELETE FROM " + wt));
+            }
         }
         if (StrUtil.isNotBlank(conf.getStr("postSql"))) {
             writerParam.put("postSql", List.of(conf.getStr("postSql")));
@@ -110,13 +117,14 @@ public final class DataxJobBuilder {
         sb.append("#!/bin/bash\nset -euo pipefail\n");
         sb.append("NODE_KEY='").append(n.getNodeKey()).append("'\n");
         sb.append("DATAX_HOME=\"${LH_DATAX_HOME:-/opt/datax}\"\n");
-        // 兼容：若只注入了 LH_JDBC_*，映射到 READER/WRITER
-        sb.append("export LH_READER_JDBC_URL=\"${LH_READER_JDBC_URL:-${LH_JDBC_URL:-}}\"\n");
-        sb.append("export LH_READER_JDBC_USER=\"${LH_READER_JDBC_USER:-${LH_JDBC_USER:-}}\"\n");
-        sb.append("export LH_READER_JDBC_PASSWORD=\"${LH_READER_JDBC_PASSWORD:-${LH_JDBC_PASSWORD:-}}\"\n");
+        // 写端可回退 LH_JDBC（汇点本节点 ds）；读端禁止回退——否则 sink 会把 postgres 填进 mysqlreader
         sb.append("export LH_WRITER_JDBC_URL=\"${LH_WRITER_JDBC_URL:-${LH_JDBC_URL:-}}\"\n");
         sb.append("export LH_WRITER_JDBC_USER=\"${LH_WRITER_JDBC_USER:-${LH_JDBC_USER:-}}\"\n");
         sb.append("export LH_WRITER_JDBC_PASSWORD=\"${LH_WRITER_JDBC_PASSWORD:-${LH_JDBC_PASSWORD:-}}\"\n");
+        sb.append("export LH_READER_JDBC_URL=\"${LH_READER_JDBC_URL:-}\"\n");
+        sb.append("export LH_READER_JDBC_USER=\"${LH_READER_JDBC_USER:-}\"\n");
+        sb.append("export LH_READER_JDBC_PASSWORD=\"${LH_READER_JDBC_PASSWORD:-}\"\n");
+        sb.append("if [ -z \"${LH_READER_JDBC_URL}\" ]; then echo '[lh-datax] LH_READER_JDBC_URL empty (upstream ds missing)'; exit 2; fi\n");
         sb.append("JOB_FILE=$(mktemp /tmp/lh-datax-${NODE_KEY}-XXXX.json)\n");
         sb.append("cat > \"$JOB_FILE\" <<'LH_DATAX_EOF'\n");
         sb.append(JSONUtil.toJsonPrettyStr(job)).append("\n");
@@ -131,12 +139,13 @@ public final class DataxJobBuilder {
         sb.append("#!/bin/bash\nset -euo pipefail\n");
         sb.append("NODE_KEY='").append(StrUtil.blankToDefault(nodeKey, "datax")).append("'\n");
         sb.append("DATAX_HOME=\"${LH_DATAX_HOME:-/opt/datax}\"\n");
-        sb.append("export LH_READER_JDBC_URL=\"${LH_READER_JDBC_URL:-${LH_JDBC_URL:-}}\"\n");
-        sb.append("export LH_READER_JDBC_USER=\"${LH_READER_JDBC_USER:-${LH_JDBC_USER:-}}\"\n");
-        sb.append("export LH_READER_JDBC_PASSWORD=\"${LH_READER_JDBC_PASSWORD:-${LH_JDBC_PASSWORD:-}}\"\n");
         sb.append("export LH_WRITER_JDBC_URL=\"${LH_WRITER_JDBC_URL:-${LH_JDBC_URL:-}}\"\n");
         sb.append("export LH_WRITER_JDBC_USER=\"${LH_WRITER_JDBC_USER:-${LH_JDBC_USER:-}}\"\n");
         sb.append("export LH_WRITER_JDBC_PASSWORD=\"${LH_WRITER_JDBC_PASSWORD:-${LH_JDBC_PASSWORD:-}}\"\n");
+        sb.append("export LH_READER_JDBC_URL=\"${LH_READER_JDBC_URL:-}\"\n");
+        sb.append("export LH_READER_JDBC_USER=\"${LH_READER_JDBC_USER:-}\"\n");
+        sb.append("export LH_READER_JDBC_PASSWORD=\"${LH_READER_JDBC_PASSWORD:-}\"\n");
+        sb.append("if [ -z \"${LH_READER_JDBC_URL}\" ]; then echo '[lh-datax] LH_READER_JDBC_URL empty (upstream ds missing)'; exit 2; fi\n");
         sb.append("JOB_FILE=$(mktemp /tmp/lh-datax-${NODE_KEY}-XXXX.json)\n");
         sb.append("cat > \"$JOB_FILE\" <<'LH_DATAX_EOF'\n");
         sb.append(StrUtil.blankToDefault(jobJson, "{\"job\":{\"content\":[]}}")).append("\n");
