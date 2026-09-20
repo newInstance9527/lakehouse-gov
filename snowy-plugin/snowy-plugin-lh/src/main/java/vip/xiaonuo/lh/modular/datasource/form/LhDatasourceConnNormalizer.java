@@ -93,7 +93,7 @@ public class LhDatasourceConnNormalizer {
         String database = first(c, "database", "sid", "namespace", "vhost", "tenant", "db", "path", "warehouse");
         String user = first(c, "user", "accessKey", "username");
         String password = first(c, "password", "secretKey", "token");
-        String extra = first(c, "extra", "feNodes", "warehouse");
+        String extra = first(c, "extra", "feNodes");
         String schema = first(c, "schema", "topics", "queues");
         String access = first(c, "access", "pollCycle");
 
@@ -143,7 +143,66 @@ public class LhDatasourceConnNormalizer {
         if (StrUtil.isNotBlank(n.database)) {
             m.put("database", n.database);
         }
+        // schemaSummary（表清单）禁止写入 Vault 的 schema：PG 预览/JDBC 会把该值当 schema 名
+        sanitizeJdbcSchemaInSecret(m);
         return m;
+    }
+
+    /**
+     * Vault {@code schema} 仅允许单一 JDBC schema 标识（如 {@code public}）；
+     * 逗号分隔的表清单属于 {@code schema_summary}，不得进凭证。
+     */
+    static void sanitizeJdbcSchemaInSecret(Map<String, Object> secret) {
+        if (secret == null) {
+            return;
+        }
+        Object raw = secret.get("schema");
+        if (raw == null) {
+            return;
+        }
+        String s = String.valueOf(raw).trim();
+        if (StrUtil.isBlank(s) || "null".equalsIgnoreCase(s)) {
+            secret.remove("schema");
+            return;
+        }
+        if (looksLikeTableInventory(s)) {
+            secret.remove("schema");
+        }
+    }
+
+    /** 表清单摘要：含逗号/空白多段，或超长，均非合法单一 schema 名 */
+    public static boolean looksLikeTableInventory(String schema) {
+        if (StrUtil.isBlank(schema)) {
+            return false;
+        }
+        String s = schema.trim();
+        if (s.length() > 64) {
+            return true;
+        }
+        if (s.contains(",") || s.contains(";") || s.contains("\n")) {
+            return true;
+        }
+        // 含空白且多 token（如 "api_binding auth_…"）
+        return s.chars().filter(Character::isWhitespace).findAny().isPresent();
+    }
+
+    /**
+     * JDBC 元数据用的 schema 名：非法/表清单 → 回退 defaultSchema（PG 一般为 public）。
+     */
+    public static String resolveJdbcSchemaName(Object raw, String defaultSchema) {
+        String fallback = StrUtil.blankToDefault(defaultSchema, "public");
+        if (raw == null) {
+            return fallback;
+        }
+        String s = String.valueOf(raw).trim();
+        if (StrUtil.isBlank(s) || "null".equalsIgnoreCase(s) || looksLikeTableInventory(s)) {
+            return fallback;
+        }
+        // 仅允许简单标识符
+        if (!s.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+            return fallback;
+        }
+        return s;
     }
 
     public String mapPurposes(String purpose, String purposesJson) {

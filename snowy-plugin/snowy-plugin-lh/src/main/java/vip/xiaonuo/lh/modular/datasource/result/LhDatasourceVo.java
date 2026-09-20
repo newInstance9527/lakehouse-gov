@@ -86,8 +86,11 @@ public class LhDatasourceVo {
     @Schema(description = "健康分")
     private Integer health;
 
-    @Schema(description = "关联资产")
+    @Schema(description = "关联资产编码（兼容：主链接 assetCode 或历史 asset_name）")
     private String asset;
+
+    @Schema(description = "关联资产列表（SoT: gov_asset_source_link）")
+    private java.util.List<java.util.Map<String, Object>> linkedAssets;
 
     @Schema(description = "负责人")
     private String owner;

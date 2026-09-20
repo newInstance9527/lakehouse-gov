@@ -49,7 +49,19 @@ public class CbOmAssetRef extends CommonEntity {
     @Schema(description = "备注")
     private String remark;
 
-    @Schema(description = "grav资产ID")
+    @Schema(description = "gov_asset.id")
+    private String assetId;
+
+    @Schema(description = "OM实体类型 table/topic/searchIndex/container")
+    private String omEntityType;
+
+    @Schema(description = "OM服务类型 Kafka/Mysql/...")
+    private String omServiceType;
+
+    @Schema(description = "OM服务族 DATABASE/MESSAGING/...")
+    private String omFamily;
+
+    @Schema(description = "grav资产ID，可空")
     private String gravAssetId;
 
     @Schema(description = "OM FQN")

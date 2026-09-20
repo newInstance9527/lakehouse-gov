@@ -1,0 +1,59 @@
+/*
+ * Copyright [2022] [https://www.xiaonuo.vip]
+ *
+ * Snowy采用APACHE LICENSE 2.0开源协议，您在使用过程中，需要注意以下几点：
+ *
+ * 1.请不要删除和修改根目录下的LICENSE文件。
+ * 2.请不要删除和修改Snowy源码头部的版权声明。
+ * 3.本项目代码可免费商业使用，商业使用请保留源码和相关描述文件的项目出处，作者声明等。
+ * 4.分发源码时候，请注明软件出处 https://www.xiaonuo.vip
+ * 5.不可二次分发开源参与同类竞品，如有想法可联系团队xiaonuobase@qq.com商议合作。
+ * 6.若您的项目无法满足以上几点，需要更多功能代码，获取Snowy商业授权许可，请在官网购买授权，地址为 https://www.xiaonuo.vip
+ */
+package vip.xiaonuo.lh.modular.catalog.enums;
+
+import cn.hutool.core.util.StrUtil;
+import lombok.Getter;
+import vip.xiaonuo.common.exception.CommonException;
+
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.Optional;
+
+/**
+ * 湖内分层
+ *
+ * @author lakehouse
+ * @date 2026/3/18
+ */
+@Getter
+public enum GovAssetLayerEnum {
+
+    ODS("ods", "ODS"),
+    DWD("dwd", "DWD"),
+    DIM("dim", "DIM"),
+    DWS("dws", "DWS"),
+    ADS("ads", "ADS");
+
+    private final String value;
+    private final String label;
+
+    GovAssetLayerEnum(String value, String label) {
+        this.value = value;
+        this.label = label;
+    }
+
+    public static Optional<GovAssetLayerEnum> of(String v) {
+        if (StrUtil.isBlank(v)) {
+            return Optional.empty();
+        }
+        String x = v.trim().toLowerCase(Locale.ROOT);
+        return Arrays.stream(values()).filter(e -> e.value.equals(x)).findFirst();
+    }
+
+    public static void validate(String v) {
+        if (of(v).isEmpty()) {
+            throw new CommonException("不支持的分层: {}", v);
+        }
+    }
+}

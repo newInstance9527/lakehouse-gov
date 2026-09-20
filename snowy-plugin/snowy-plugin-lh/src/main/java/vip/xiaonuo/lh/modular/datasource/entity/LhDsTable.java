@@ -22,8 +22,8 @@ import vip.xiaonuo.common.pojo.CommonEntity;
 import java.util.Date;
 
 /**
- * 数据源表清单实体（ig_ds_table）
- * <p>登记源端表 / Topic / 路径 / 集合等对象，供 ETL 编排与资产目录引用。</p>
+ * 数据源表清单实体（表名 ig_ds_table，与 ig_datasource 同前缀）
+ * <p>登记源端表 / Topic / Index / Bucket / Queue / 路径等对象，供 ETL 编排与资产目录引用。</p>
  *
  * @author lakehouse
  * @date 2026/3/18

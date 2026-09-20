@@ -51,6 +51,9 @@ public class LhDsTableVo {
     @Schema(description = "行数")
     private Long rowCount;
 
+    @Schema(description = "最近同步时间 yyyy-MM-dd HH:mm:ss")
+    private String syncedAt;
+
     @Schema(description = "状态")
     private String status;
 }

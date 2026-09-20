@@ -1,0 +1,5 @@
+-- 门户联调：关闭 B 端图形验证码（登录仅账号密码）
+UPDATE `DEV_CONFIG`
+SET `CONFIG_VALUE` = 'false',
+    `UPDATE_TIME` = NOW()
+WHERE `CONFIG_KEY` = 'SNOWY_SYS_DEFAULT_CAPTCHA_OPEN_FLAG_FOR_B';

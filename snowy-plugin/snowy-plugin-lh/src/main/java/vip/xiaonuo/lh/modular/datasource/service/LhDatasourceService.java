@@ -78,5 +78,13 @@ public interface LhDatasourceService extends IService<LhDatasource> {
 
     Map<String, Object> tableSync(LhDatasourceIdParam param);
 
+    /**
+     * 按连通参数 / 已登记 id 从源端发现表名（不落库；供注册弹窗「同步清单」）
+     */
+    Map<String, Object> tableDiscover(LhDatasourceTestParam param);
+
     Map<String, Object> batchSyncTables(List<LhDatasourceIdParam> ids);
+
+    /** 将指定 / 全部数据源重新投影到 Gravitino Catalog */
+    Map<String, Object> projectToGravitino(List<LhDatasourceIdParam> ids);
 }

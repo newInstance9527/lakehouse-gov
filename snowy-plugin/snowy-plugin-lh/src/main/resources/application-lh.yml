@@ -14,12 +14,27 @@ lh:
     vault-path: platform/dolphinscheduler/api
     user: admin
     password: ""
-    # token:  # 在 DS UI 创建后填入，或写入 Vault
+    # 门户专用 DS 项目 lakehouse-gov（与「入库项目」等业务项目隔离）
+    project-code: "184736894224512"
+    worker-group: default
+    # admin 用户绑定租户 root；勿用 default（admin 选 default 会报「未指定当前登录用户的租户」）
+    tenant-code: root
+    # token:  # 本环境勿配；必须 user/password → /login 取 sessionId（切勿带 token 请求头，会 401）
   flink:
     url: http://127.0.0.1:8081
     vault-path: platform/flink/ui
     user: admin
     password: ""
+    # DS Worker 内须能执行 sql-client.sh（见 deploy/ds-worker-flink-home.sh）
+    home: /opt/flink
+    # sql-gateway-url:  # 可选
+  spark:
+    # Worker 无 YARN client 时用 local[*]；切 YARN 改 yarn 并配 HADOOP_CONF_DIR 后重新发布
+    master: local[*]
+    home: /opt/spark
+    jars: /opt/spark/jars/mysql-connector-j-8.0.33.jar
+  datax:
+    home: /opt/lh-datax
   clickhouse:
     url: http://127.0.0.1:8123
     vault-path: platform/clickhouse/default
@@ -34,10 +49,16 @@ lh:
   openmetadata:
     url: http://127.0.0.1:8585
     vault-path: platform/openmetadata/bot
-    # token:  # 在 OM 创建 Bot 后填入，启动自动种子；或调用 /lh/engine/om/rotateBotToken
     email: admin@open-metadata.org
+    password: ""
+    # token:  # 可选 Bot PAT；空则运行时用 email/password 登录取 JWT
     lake-service: lakehouse
     lake-database: default
+  marquez:
+    url: http://127.0.0.1:15000
+    vault-path: platform/marquez/api
+    user: admin
+    password: ""
   gravitino:
     url: http://127.0.0.1:8090
     vault-path: platform/gravitino/api
@@ -59,3 +80,7 @@ lh:
     # access-key / secret-key 建议只写 Vault，此处可留空
   etl:
     default-engine: flink
+    local-trial-fallback: true
+  catalog:
+    # false=注册资产时 objectName 必须已在 ig_ds_table；true=允许手工对象名
+    allow-manual-object-name: false

@@ -42,6 +42,9 @@ public final class LhVaultPaths {
     /** OpenMetadata Bot / PAT */
     public static final String OPENMETADATA = "platform/openmetadata/bot";
 
+    /** Marquez API（经 lh-ui-auth Basic） */
+    public static final String MARQUEZ = "platform/marquez/api";
+
     /** Gravitino API（Basic Auth） */
     public static final String GRAVITINO = "platform/gravitino/api";
 

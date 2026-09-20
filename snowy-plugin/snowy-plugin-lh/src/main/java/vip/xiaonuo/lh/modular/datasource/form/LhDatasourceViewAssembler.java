@@ -106,7 +106,13 @@ public class LhDatasourceViewAssembler {
         vo.setConn(conn);
         vo.setUser(str(conn.get("user"), conn.get("username"), ""));
         vo.setPassword(StrUtil.isNotBlank(str(conn.get("password"), null, "")) ? "******" : "");
-        vo.setExtra(str(conn.get("extra"), null, e.getAccessMode()));
+        // extra 仅来自 conn；禁止回落到 accessMode（否则 JDBC 高级参数被填成「接入方式」）
+        String extra = str(conn.get("extra"), null, "");
+        if (StrUtil.isNotBlank(extra) && extra.equals(StrUtil.blankToDefault(e.getAccessMode(), ""))) {
+            // 历史脏数据：曾把接入方式误写入 extra
+            extra = "";
+        }
+        vo.setExtra(extra);
         // 用 conn 补齐 host/port/database
         if (StrUtil.isBlank(vo.getHost())) {
             vo.setHost(str(conn.get("host"), conn.get("bootstrap"), conn.get("endpoint")));
@@ -116,6 +122,9 @@ public class LhDatasourceViewAssembler {
         }
         if (StrUtil.isBlank(vo.getDatabase())) {
             vo.setDatabase(str(conn.get("database"), conn.get("sid"), conn.get("namespace")));
+        }
+        if (StrUtil.isBlank(vo.getAccess())) {
+            vo.setAccess(str(conn.get("access"), conn.get("pollCycle"), ""));
         }
         if (StrUtil.isBlank(vo.getSchema())) {
             vo.setSchema(str(conn.get("schema"), conn.get("topics"), conn.get("queues")));
@@ -134,6 +143,9 @@ public class LhDatasourceViewAssembler {
         vo.setEngine(t.getEngine());
         vo.setRowCount(t.getRowCount());
         vo.setStatus(t.getStatus());
+        if (t.getSyncedAt() != null) {
+            vo.setSyncedAt(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(t.getSyncedAt()));
+        }
         return vo;
     }
 
@@ -174,11 +186,7 @@ public class LhDatasourceViewAssembler {
         put(conn, "feNodes", p.getFeNodes());
         put(conn, "pollCycle", p.getPollCycle());
         put(conn, "jdbcUrl", p.getJdbcUrl());
-        // lag 常与 access 同源
-        if (StrUtil.isBlank(p.getAccess()) && StrUtil.isNotBlank(p.getLag())) {
-            p.setAccess(p.getLag());
-            put(conn, "access", p.getLag());
-        }
+        // lag 仅作展示文案，勿回写进 access（避免与接入方式/JDBC 参数串味）
         p.setConn(conn);
     }
 

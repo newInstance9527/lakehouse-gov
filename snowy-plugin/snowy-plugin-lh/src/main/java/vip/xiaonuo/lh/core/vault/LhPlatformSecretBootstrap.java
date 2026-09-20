@@ -69,15 +69,41 @@ public class LhPlatformSecretBootstrap implements ApplicationRunner {
             }
         }
 
-        if (StrUtil.isNotBlank(lhProperties.getOpenmetadata().getToken())) {
+        if (StrUtil.isNotBlank(lhProperties.getOpenmetadata().getToken())
+                || StrUtil.isNotBlank(lhProperties.getOpenmetadata().getPassword())) {
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("token", lhProperties.getOpenmetadata().getToken());
+            if (StrUtil.isNotBlank(lhProperties.getOpenmetadata().getToken())) {
+                m.put("token", lhProperties.getOpenmetadata().getToken());
+            }
             if (StrUtil.isNotBlank(lhProperties.getOpenmetadata().getEmail())) {
                 m.put("email", lhProperties.getOpenmetadata().getEmail());
+            }
+            if (StrUtil.isNotBlank(lhProperties.getOpenmetadata().getPassword())) {
+                m.put("password", lhProperties.getOpenmetadata().getPassword());
             }
             if (vaultClient.writeIfAbsent(lhProperties.getOpenmetadata().getVaultPath(), m)) {
                 n++;
                 log.info("[LhVault] seeded {}", lhProperties.getOpenmetadata().getVaultPath());
+            } else {
+                // path 已存在但可能缺 token：合并补 password/email，不覆盖已有 token
+                try {
+                    Map<String, Object> exist = new LinkedHashMap<>(
+                            vaultClient.readOrEmpty(lhProperties.getOpenmetadata().getVaultPath()));
+                    boolean changed = false;
+                    for (Map.Entry<String, Object> e : m.entrySet()) {
+                        if (!exist.containsKey(e.getKey()) || exist.get(e.getKey()) == null
+                                || StrUtil.isBlank(String.valueOf(exist.get(e.getKey())))) {
+                            exist.put(e.getKey(), e.getValue());
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        vaultClient.write(lhProperties.getOpenmetadata().getVaultPath(), exist);
+                        log.info("[LhVault] merged bootstrap fields into {}",
+                                lhProperties.getOpenmetadata().getVaultPath());
+                    }
+                } catch (Exception ignored) {
+                }
             }
         }
 

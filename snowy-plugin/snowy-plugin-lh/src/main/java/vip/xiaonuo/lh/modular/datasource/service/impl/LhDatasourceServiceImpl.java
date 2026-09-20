@@ -1,14 +1,14 @@
 /*
  * Copyright [2022] [https://www.xiaonuo.vip]
  *
- * Snowy采用APACHE LICENSE 2.0开源协议，您在使用过程中，需要注意以下几点：
+ * Snowy??APACHE LICENSE 2.0??????????????????????
  *
- * 1.请不要删除和修改根目录下的LICENSE文件。
- * 2.请不要删除和修改Snowy源码头部的版权声明。
- * 3.本项目代码可免费商业使用，商业使用请保留源码和相关描述文件的项目出处，作者声明等。
- * 4.分发源码时候，请注明软件出处 https://www.xiaonuo.vip
- * 5.不可二次分发开源参与同类竞品，如有想法可联系团队xiaonuobase@qq.com商议合作。
- * 6.若您的项目无法满足以上几点，需要更多功能代码，获取Snowy商业授权许可，请在官网购买授权，地址为 https://www.xiaonuo.vip
+ * 1.?????????????LICENSE???
+ * 2.????????Snowy??????????
+ * 3.?????????????????????????????????????????
+ * 4.?????????????? https://www.xiaonuo.vip
+ * 5.????????????????????????xiaonuobase@qq.com?????
+ * 6.?????????????????????????Snowy??????????????????? https://www.xiaonuo.vip
  */
 package vip.xiaonuo.lh.modular.datasource.service.impl;
 
@@ -22,12 +22,18 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
+import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryDiscoverer;
+import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryDiscoverResult;
+import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryObjectKinds;
+import vip.xiaonuo.lh.modular.datasource.discover.LhManualSummaryInventoryDiscoverer;
+import vip.xiaonuo.lh.modular.datasource.discover.LhRemoteInventoryItem;
 import vip.xiaonuo.lh.modular.datasource.entity.LhConsumerBinding;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDsTable;
@@ -42,21 +48,27 @@ import vip.xiaonuo.lh.modular.datasource.mapper.LhDsTableMapper;
 import vip.xiaonuo.lh.modular.datasource.param.*;
 import vip.xiaonuo.lh.modular.datasource.result.LhDatasourceVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhDsTableVo;
+import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
+import vip.xiaonuo.lh.modular.datasource.service.LhDatasourcePostRegisterBridge;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceService;
+import vip.xiaonuo.lh.modular.datasource.service.LhPortalInventoryOmBridge;
 
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 数据源中心 Service 实现（对外字段对齐前端）
+ * ????? Service ????????????
  *
  * @author lakehouse
  * @date 2026/3/18
  */
+@Slf4j
 @Service
 public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhDatasource>
         implements LhDatasourceService {
@@ -73,6 +85,19 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     private LhDatasourceConnNormalizer connNormalizer;
     @Resource
     private LhDatasourceViewAssembler viewAssembler;
+    @Resource
+    private LhDatasourcePostRegisterBridge postRegisterBridge;
+    @Resource
+    private LhDatasourceGravitinoProjector gravitinoProjector;
+    @Resource
+    private LhPortalInventoryOmBridge portalInventoryOmBridge;
+    @Resource
+    private vip.xiaonuo.lh.modular.catalog.support.GovAssetSourceReconcile govAssetSourceReconcile;
+    @Resource
+    private vip.xiaonuo.lh.modular.datasource.support.LhDatasourceLinkedAssetFiller linkedAssetFiller;
+    /** ? @Order?Hive/Kafka/ES/Redis/RMQ/MinIO ????????? */
+    @Resource
+    private List<LhInventoryDiscoverer> inventoryDiscoverers;
 
     @Override
     public Page<LhDatasourceVo> page(LhDatasourcePageParam param) {
@@ -82,7 +107,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             qw.lambda().like(LhDatasource::getName, param.getName());
         }
         if (StrUtil.isNotBlank(param.getType())) {
-            // 前端传展示名或编码
+            // ?????????
             try {
                 String code = formSchemaService.resolveTypeCode(param.getType());
                 qw.lambda().and(w -> w.eq(LhDatasource::getType, code)
@@ -113,9 +138,11 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         if (StrUtil.isNotBlank(param.getPurpose())) {
             qw.lambda().like(LhDatasource::getPurposes, param.getPurpose());
         }
-        if ("1".equals(param.getUsableInDag())) {
+        if ("1".equals(param.getUsableInDag()) || "true".equalsIgnoreCase(param.getUsableInDag())) {
+            // ?????? DAG?ingest????? export????
             qw.lambda().eq(LhDatasource::getStatus, LhDatasourceStatusEnum.ONLINE.getValue())
-                    .like(LhDatasource::getPurposes, "ingest");
+                    .and(w -> w.like(LhDatasource::getPurposes, "ingest")
+                            .or().like(LhDatasource::getPurposes, "export"));
         }
         if (ObjectUtil.isAllNotEmpty(param.getSortField(), param.getSortOrder())) {
             CommonSortOrderEnum.validate(param.getSortOrder());
@@ -128,7 +155,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         }
         Page<LhDatasource> raw = this.page(CommonPageRequest.defaultPage(), qw);
         Page<LhDatasourceVo> page = new Page<>(raw.getCurrent(), raw.getSize(), raw.getTotal());
-        page.setRecords(raw.getRecords().stream().map(viewAssembler::toVo).collect(Collectors.toList()));
+        List<LhDatasourceVo> vos = raw.getRecords().stream().map(viewAssembler::toVo).collect(Collectors.toList());
+        linkedAssetFiller.fill(vos);
+        page.setRecords(vos);
         return page;
     }
 
@@ -175,7 +204,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         vaultClient.write(entity.getVaultPath(), secret);
         this.save(entity);
         seedTablesFromSummary(entity);
-        return viewAssembler.toVo(entity);
+        // Grav Catalog ? ????? ? OM?soft-fail???????
+        postRegisterBridge.afterPersist(entity);
+        return viewAssembler.toVo(this.getById(entity.getId()));
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -183,7 +214,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public LhDatasourceVo edit(LhDatasourceEditParam param) {
         viewAssembler.enrichParamFromFe(param);
         if (StrUtil.isBlank(param.getId())) {
-            throw new CommonException("id不能为空");
+            throw new CommonException("id????");
         }
         LhDatasource entity = queryEntity(param.getId());
         if (StrUtil.isNotBlank(param.getDsCode()) && !param.getDsCode().equals(entity.getDsCode())) {
@@ -234,7 +265,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             }
         });
         boolean touchConn = StrUtil.isNotBlank(param.getHost())
-                || StrUtil.isNotBlank(param.getPassword())
+                || StrUtil.isNotBlank(param.getBootstrap())
+                || StrUtil.isNotBlank(param.getBootstrapServers())
+                || (StrUtil.isNotBlank(param.getPassword()) && !"******".equals(param.getPassword()))
                 || StrUtil.isNotBlank(param.getUser())
                 || StrUtil.isNotBlank(param.getDatabase())
                 || (param.getConn() != null && !param.getConn().isEmpty());
@@ -269,7 +302,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         entity.setRevision(Optional.ofNullable(entity.getRevision()).orElse(1) + 1);
         bumpVer(entity);
         this.updateById(entity);
-        return viewAssembler.toVo(entity);
+        // ??????? Grav / ??? / OM?soft-fail?
+        postRegisterBridge.afterPersist(entity);
+        return viewAssembler.toVo(this.getById(entity.getId()));
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -290,7 +325,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
 
     @Override
     public LhDatasourceVo detail(LhDatasourceIdParam param) {
-        return viewAssembler.toVo(queryEntity(param.getId()));
+        LhDatasourceVo vo = viewAssembler.toVo(queryEntity(param.getId()));
+        linkedAssetFiller.fill(vo);
+        return vo;
     }
 
     @Override
@@ -299,9 +336,13 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         Map<String, Object> result = new LinkedHashMap<>();
         try {
             viewAssembler.enrichParamFromFe(param);
+            LhDatasource existing = null;
+            if (StrUtil.isNotBlank(param.getId())) {
+                existing = queryEntity(param.getId());
+            }
             String type = param.getType();
-            if (StrUtil.isBlank(type) && StrUtil.isNotBlank(param.getId())) {
-                type = queryEntity(param.getId()).getType();
+            if (StrUtil.isBlank(type) && existing != null) {
+                type = existing.getType();
             }
             String typeCode;
             try {
@@ -311,43 +352,110 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             }
             param.setType(typeCode);
             Map<String, Object> conn = connNormalizer.mergeConn(param);
+            // ??????? ******?????????????
+            stripSecretPlaceholders(conn);
+            // ??????? Vault ????????UI ?? id ???????
+            if (existing != null) {
+                if (StrUtil.isNotBlank(existing.getConnMasked())) {
+                    try {
+                        JSONUtil.parseObj(existing.getConnMasked()).forEach((k, v) -> {
+                            if (v != null && !isSecretPlaceholder(v)) {
+                                conn.putIfAbsent(k, v);
+                            }
+                        });
+                    } catch (Exception ignored) {
+                    }
+                }
+                vaultClient.readOrEmpty(existing.getVaultPath()).forEach((k, v) -> {
+                    if (v == null || StrUtil.isBlank(String.valueOf(v)) || isSecretPlaceholder(v)) {
+                        return;
+                    }
+                    // ???????????? Vault????????
+                    if (isSecretKey(k) || !conn.containsKey(k) || isSecretPlaceholder(conn.get(k))) {
+                        conn.put(k, v);
+                    } else {
+                        conn.putIfAbsent(k, v);
+                    }
+                });
+                // Vault ?? username???? user
+                if (StrUtil.isBlank(str(conn.get("user"))) && StrUtil.isNotBlank(str(conn.get("username")))) {
+                    conn.put("user", conn.get("username"));
+                }
+                if (StrUtil.isBlank(str(conn.get("host"))) && StrUtil.isNotBlank(existing.getEndpointHost())) {
+                    conn.put("host", existing.getEndpointHost());
+                }
+                if (StrUtil.isBlank(str(conn.get("port"))) && StrUtil.isNotBlank(existing.getEndpointPort())) {
+                    conn.put("port", existing.getEndpointPort());
+                }
+                if (StrUtil.isBlank(str(conn.get("database"))) && StrUtil.isNotBlank(existing.getDatabaseName())) {
+                    conn.put("database", existing.getDatabaseName());
+                }
+            }
+            if (isSecretPlaceholder(conn.get("password"))) {
+                throw new CommonException("??????????????????????????? Vault ???");
+            }
             LhDatasourceConnNormalizer.NormalizedConn n = connNormalizer.normalize(
                     typeCode, conn, formSchemaService.defaultPort(typeCode));
             LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(typeCode).orElse(null);
 
             if (typeEnum != null && typeEnum.isJdbc()) {
                 String url = buildJdbcUrl(typeCode, n, conn);
+                if (StrUtil.isBlank(url)) {
+                    throw new CommonException("???? JDBC URL???? host/port/database");
+                }
+                if (StrUtil.isBlank(n.user)) {
+                    throw new CommonException("???????");
+                }
+                if (StrUtil.isBlank(n.password)) {
+                    throw new CommonException("??????");
+                }
                 try (Connection c = DriverManager.getConnection(url, n.user, n.password);
                      Statement st = c.createStatement()) {
                     st.setQueryTimeout(5);
                     st.execute("SELECT 1");
+                } catch (java.sql.SQLException jdbcEx) {
+                    // ClickHouse/Trino ????? classpath ???? TCP???????
+                    String msg = StrUtil.blankToDefault(jdbcEx.getMessage(), "");
+                    if (msg.contains("No suitable driver") || msg.contains("????????")) {
+                        probeTcp(n.host, n.port, typeCode + " ??");
+                        result.put("warning", "??? " + typeCode + " JDBC ???? TCP ????");
+                    } else {
+                        throw jdbcEx;
+                    }
                 }
-            } else if (typeEnum == LhDatasourceTypeEnum.HTTP_API) {
+            } else if (typeEnum == LhDatasourceTypeEnum.HTTP_API
+                    || typeEnum == LhDatasourceTypeEnum.TABLEAU
+                    || typeEnum == LhDatasourceTypeEnum.SUPERSET
+                    || typeEnum == LhDatasourceTypeEnum.AIRFLOW
+                    || StrUtil.isNotBlank(str(conn.get("baseURL")))) {
                 String url = firstNonBlank(str(conn.get("baseURL")), str(conn.get("httpUrl")), n.host);
                 if (StrUtil.isBlank(url)) {
-                    throw new CommonException("baseURL 不能为空");
+                    throw new CommonException("baseURL ????");
                 }
                 if (!url.startsWith("http")) {
                     url = "https://" + url;
                 }
                 cn.hutool.http.HttpRequest.get(url).timeout(5000).execute();
             } else if (typeEnum == LhDatasourceTypeEnum.KAFKA) {
-                if (StrUtil.isBlank(n.host)) {
-                    throw new CommonException("bootstrap 不能为空");
+                String bootstrap = firstNonBlank(str(conn.get("bootstrap")), str(conn.get("bootstrapServers")), n.host);
+                String port = firstNonBlank(str(conn.get("port")), n.port);
+                // ??????????????
+                if (StrUtil.isNotBlank(port) && StrUtil.isNotBlank(bootstrap) && !bootstrap.contains(":")) {
+                    bootstrap = bootstrap + ":" + port;
                 }
+                probeTcp(bootstrap, null, "Kafka bootstrap");
             } else {
-                if (StrUtil.isBlank(n.host)) {
-                    throw new CommonException("连接端点不能为空");
-                }
+                String host = firstNonBlank(n.host, str(conn.get("endpoint")), str(conn.get("zkQuorum")),
+                        str(conn.get("nameNode")), str(conn.get("serviceUrl")));
+                probeTcp(host, n.port, "??");
             }
-            result.put("ok", true);
+            result.putIfAbsent("ok", true);
             result.put("costMs", System.currentTimeMillis() - start);
-            if (StrUtil.isNotBlank(param.getId())) {
-                LhDatasource ds = queryEntity(param.getId());
-                ds.setLastOkAt(new Date());
-                ds.setStatus(LhDatasourceStatusEnum.ONLINE.getValue());
-                ds.setHealthScore(100);
-                this.updateById(ds);
+            if (existing != null) {
+                existing.setLastOkAt(new Date());
+                existing.setStatus(LhDatasourceStatusEnum.ONLINE.getValue());
+                existing.setHealthScore(100);
+                this.updateById(existing);
             }
         } catch (Exception e) {
             result.put("ok", false);
@@ -366,35 +474,110 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         return result;
     }
 
+    private void probeTcp(String host, String port, String label) throws Exception {
+        if (StrUtil.isBlank(host)) {
+            throw new CommonException(label + " host ????");
+        }
+        String h = host.trim();
+        int p = 9092;
+        try {
+            if (StrUtil.isNotBlank(port)) {
+                p = Integer.parseInt(port.trim());
+            } else if (h.contains(":")) {
+                int idx = h.lastIndexOf(':');
+                p = Integer.parseInt(h.substring(idx + 1).trim());
+                h = h.substring(0, idx);
+            }
+        } catch (NumberFormatException e) {
+            throw new CommonException(label + " port ??");
+        }
+        try (java.net.Socket socket = new java.net.Socket()) {
+            socket.connect(new java.net.InetSocketAddress(h, p), 5000);
+        }
+    }
+
     @Override
     public Map<String, Object> previewSchema(LhDatasourceIdParam param) {
         LhDatasource ds = queryEntity(param.getId());
         Map<String, Object> secret = vaultClient.read(ds.getVaultPath());
         List<Map<String, Object>> columns = new ArrayList<>();
         LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(ds.getType()).orElse(null);
+        List<LhDsTable> registered = dsTableMapper.selectList(new QueryWrapper<LhDsTable>().lambda()
+                .eq(LhDsTable::getDsId, ds.getId()).last("LIMIT 100"));
         if (typeEnum != null && typeEnum.isJdbc()) {
             try {
                 String url = String.valueOf(secret.getOrDefault("jdbcUrl", ""));
                 String user = String.valueOf(secret.getOrDefault("username", ""));
                 String pwd = String.valueOf(secret.getOrDefault("password", ""));
-                try (Connection conn = DriverManager.getConnection(url, user, pwd);
-                     ResultSet rs = conn.getMetaData().getColumns(null, null, "%", "%")) {
+                try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
+                    DatabaseMetaData meta = conn.getMetaData();
+                    List<String> tableNames = new ArrayList<>();
+                    for (LhDsTable t : registered) {
+                        if (StrUtil.isNotBlank(t.getTableName())) {
+                            tableNames.add(t.getTableName());
+                        }
+                    }
+                    if (tableNames.isEmpty()) {
+                        tableNames.add("%");
+                    }
+                    String dsDb = StrUtil.blankToDefault(ds.getDatabaseName(), null);
+                    boolean mysqlFamily = typeEnum == LhDatasourceTypeEnum.MYSQL
+                            || typeEnum == LhDatasourceTypeEnum.DORIS
+                            || typeEnum == LhDatasourceTypeEnum.CLICKHOUSE;
+                    boolean pgFamily = typeEnum == LhDatasourceTypeEnum.PG
+                            || typeEnum == LhDatasourceTypeEnum.POSTGRESQL;
                     int n = 0;
-                    while (rs.next() && n++ < 50) {
-                        Map<String, Object> col = new LinkedHashMap<>();
-                        col.put("table", rs.getString("TABLE_NAME"));
-                        col.put("column", rs.getString("COLUMN_NAME"));
-                        col.put("type", rs.getString("TYPE_NAME"));
-                        columns.add(col);
+                    int maxCols = 2000;
+                    for (String tablePat : tableNames) {
+                        String simple = tablePat;
+                        String schemaPat = null;
+                        String catalog = null;
+                        if (tablePat.contains(".")) {
+                            String[] parts = tablePat.split("\\.");
+                            simple = parts[parts.length - 1];
+                            if (parts.length >= 2) {
+                                schemaPat = parts[parts.length - 2];
+                            }
+                        }
+                        // MySQL?catalog=???schema=null?PG?schema=public?????
+                        if (mysqlFamily) {
+                            catalog = dsDb;
+                            schemaPat = null;
+                        } else if (pgFamily) {
+                            catalog = dsDb;
+                            if (StrUtil.isBlank(schemaPat)) {
+                                schemaPat = vip.xiaonuo.lh.modular.datasource.form.LhDatasourceConnNormalizer
+                                        .resolveJdbcSchemaName(secret.get("schema"), "public");
+                            }
+                        }
+                        try (ResultSet rs = meta.getColumns(catalog, schemaPat, simple, "%")) {
+                            while (rs.next() && n++ < maxCols) {
+                                Map<String, Object> col = new LinkedHashMap<>();
+                                String tbl = rs.getString("TABLE_NAME");
+                                String sch = rs.getString("TABLE_SCHEM");
+                                if (StrUtil.isNotBlank(sch) && !"null".equalsIgnoreCase(sch)
+                                        && pgFamily) {
+                                    col.put("table", sch + "." + tbl);
+                                } else {
+                                    col.put("table", tbl);
+                                }
+                                col.put("column", rs.getString("COLUMN_NAME"));
+                                col.put("type", rs.getString("TYPE_NAME"));
+                                columns.add(col);
+                            }
+                        }
+                        if (n >= maxCols) {
+                            break;
+                        }
                     }
                 }
             } catch (Exception e) {
-                columns.add(Map.of("table", "demo", "column", "id", "type", "BIGINT"));
+                log.warn("previewSchema JDBC fail dsId={}: {}", ds.getId(), e.getMessage());
+                columns.add(Map.of("table", "_error", "column", "_preview_failed", "type", "STRING",
+                        "message", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName())));
             }
         } else {
-            List<LhDsTable> tables = dsTableMapper.selectList(new QueryWrapper<LhDsTable>().lambda()
-                    .eq(LhDsTable::getDsId, ds.getId()).last("LIMIT 20"));
-            for (LhDsTable t : tables) {
+            for (LhDsTable t : registered) {
                 columns.add(Map.of("name", t.getTableName(), "type", "OBJECT",
                         "cnName", StrUtil.blankToDefault(t.getCnName(), "")));
             }
@@ -410,7 +593,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public void updatePurposes(LhDatasourcePurposesParam param) {
         LhDatasource ds = queryEntity(param.getId());
         if (param.getPurposes().contains("analyze_direct") && !"trino".equals(ds.getType())) {
-            throw new CommonException("业务源默认禁止 analyze_direct");
+            throw new CommonException("??????? analyze_direct");
         }
         ds.setPurposes(JSONUtil.toJsonStr(param.getPurposes()));
         ds.setRevision(Optional.ofNullable(ds.getRevision()).orElse(1) + 1);
@@ -523,7 +706,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
 
     @Override
     public List<Map<String, Object>> typeOptions() {
-        // 优先返回表单 schema 中的展示名，贴合前端筛选
+        // ?????? schema ????????????
         Map<String, Object> full = formSchemaService.fullSchema();
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> types = (List<Map<String, Object>>) full.get("types");
@@ -594,7 +777,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                 .eq(LhDsTable::getDsId, param.getDsId())
                 .eq(LhDsTable::getTableName, param.getName()));
         if (cnt != null && cnt > 0) {
-            throw new CommonException("表名已存在: {}", param.getName());
+            throw new CommonException("?????: {}", param.getName());
         }
         LhDsTable row = new LhDsTable();
         row.setId(IdUtil.getSnowflakeNextIdStr());
@@ -617,7 +800,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public LhDsTableVo tableEdit(LhDsTableEditParam param) {
         LhDsTable row = dsTableMapper.selectById(param.getId());
         if (row == null) {
-            throw new CommonException("表清单记录不存在: {}", param.getId());
+            throw new CommonException("????????: {}", param.getId());
         }
         row.setCnName(param.getCnName());
         row.setCommentTxt(param.getComment());
@@ -649,62 +832,473 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Override
     public Map<String, Object> tableSync(LhDatasourceIdParam param) {
         LhDatasource ds = queryEntity(param.getId());
-        Set<String> discovered = new LinkedHashSet<>();
-        LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(ds.getType()).orElse(null);
-        if (typeEnum != null && typeEnum.isJdbc()) {
-            try {
-                Map<String, Object> secret = vaultClient.read(ds.getVaultPath());
-                String url = String.valueOf(secret.getOrDefault("jdbcUrl", ""));
-                String user = String.valueOf(secret.getOrDefault("username", ""));
-                String pwd = String.valueOf(secret.getOrDefault("password", ""));
-                try (Connection conn = DriverManager.getConnection(url, user, pwd);
-                     ResultSet rs = conn.getMetaData().getTables(null, null, "%", new String[]{"TABLE", "VIEW"})) {
-                    while (rs.next()) {
-                        discovered.add(rs.getString("TABLE_NAME"));
-                    }
-                }
-            } catch (Exception e) {
-                discovered.addAll(parseSchemaSummary(ds.getSchemaSummary()));
-            }
-        } else {
-            discovered.addAll(parseSchemaSummary(ds.getSchemaSummary()));
-        }
-        int added = 0;
         Date now = new Date();
-        List<LhDsTableVo> addedRows = new ArrayList<>();
-        for (String name : discovered) {
-            if (StrUtil.isBlank(name)) {
+        DiscoverBundle bundle = discoverRemoteTables(ds);
+        List<RemoteTableMeta> metas = bundle.metas;
+        int added = 0;
+        int updated = 0;
+        int removed = 0;
+        List<LhDsTableVo> touched = new ArrayList<>();
+        Set<String> remoteNames = new HashSet<>();
+        for (RemoteTableMeta meta : metas) {
+            if (StrUtil.isBlank(meta.name)) {
                 continue;
             }
-            Long cnt = dsTableMapper.selectCount(new QueryWrapper<LhDsTable>().lambda()
-                    .eq(LhDsTable::getDsId, ds.getId()).eq(LhDsTable::getTableName, name));
-            if (cnt != null && cnt > 0) {
-                continue;
+            remoteNames.add(meta.name);
+            LhDsTable row = dsTableMapper.selectOne(new QueryWrapper<LhDsTable>().lambda()
+                    .eq(LhDsTable::getDsId, ds.getId())
+                    .eq(LhDsTable::getTableName, meta.name));
+            if (row == null) {
+                row = new LhDsTable();
+                row.setId(IdUtil.getSnowflakeNextIdStr());
+                row.setRevision(1);
+                row.setDsId(ds.getId());
+                row.setTableName(meta.name);
+                row.setStatus("ENABLE");
+                applyRemoteMeta(row, meta, now);
+                dsTableMapper.insert(row);
+                added++;
+            } else {
+                applyRemoteMeta(row, meta, now);
+                row.setRevision(Optional.ofNullable(row.getRevision()).orElse(1) + 1);
+                dsTableMapper.updateById(row);
+                updated++;
             }
-            LhDsTable row = new LhDsTable();
-            row.setId(IdUtil.getSnowflakeNextIdStr());
-            row.setRevision(1);
-            row.setDsId(ds.getId());
-            row.setTableName(name.trim());
-            row.setEncoding("utf8mb4");
-            row.setRowCount(10000L + (Math.abs(name.hashCode()) % 90000));
-            row.setSyncedAt(now);
-            row.setStatus("ENABLE");
-            dsTableMapper.insert(row);
-            addedRows.add(viewAssembler.toTableVo(row));
-            added++;
+            touched.add(viewAssembler.toTableVo(row));
+        }
+        // ????????????????????????? mock ???
+        Map<String, Object> catalogStale = null;
+        String catalogStaleError = null;
+        if (bundle.fromRemote) {
+            List<LhDsTable> existing = dsTableMapper.selectList(new QueryWrapper<LhDsTable>().lambda()
+                    .eq(LhDsTable::getDsId, ds.getId()));
+            List<LhDsTable> staleRows = existing.stream()
+                    .filter(t -> !remoteNames.contains(t.getTableName()))
+                    .collect(Collectors.toList());
+            if (!staleRows.isEmpty()) {
+                try {
+                    List<String> missingNames = staleRows.stream()
+                            .map(LhDsTable::getTableName)
+                            .filter(StrUtil::isNotBlank)
+                            .toList();
+                    catalogStale = govAssetSourceReconcile.markMissingObjects(ds.getId(), missingNames);
+                } catch (Exception e) {
+                    catalogStaleError = e.getMessage();
+                }
+                List<String> staleIds = staleRows.stream().map(LhDsTable::getId).collect(Collectors.toList());
+                dsTableMapper.deleteBatchIds(staleIds);
+                removed = staleIds.size();
+            }
         }
         refreshSchemaSummary(ds.getId());
         long total = dsTableMapper.selectCount(new QueryWrapper<LhDsTable>().lambda()
                 .eq(LhDsTable::getDsId, ds.getId()));
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("dsId", ds.getId());
-        result.put("discovered", discovered.size());
+        result.put("source", bundle.fromRemote ? "remote" : ("manual".equals(bundle.path) ? "manual" : "fallback"));
+        result.put("path", bundle.path);
+        result.put("objectKind", bundle.objectKind);
+        result.put("objectKindLabel", LhInventoryObjectKinds.labelOf(bundle.objectKind));
+        if (StrUtil.isNotBlank(bundle.hint)) {
+            result.put("hint", bundle.hint);
+        }
+        result.put("discovered", metas.size());
         result.put("added", added);
+        result.put("updated", updated);
+        result.put("removed", removed);
         result.put("total", total);
-        result.put("tables", addedRows);
+        result.put("tables", touched);
         result.put("schema", this.getById(ds.getId()).getSchemaSummary());
+        if (catalogStale != null) {
+            result.put("catalogStale", catalogStale);
+        }
+        if (catalogStaleError != null) {
+            result.put("catalogStaleError", catalogStaleError);
+        }
+        // P2???????Grav ?? OM ?????? OM?soft-fail?
+        if (portalInventoryOmBridge.shouldPush(ds)) {
+            try {
+                Map<String, Object> portalOm = portalInventoryOmBridge.pushInventory(
+                        ds, gravitinoProjector.catalogNameOf(ds));
+                result.put("portalOm", portalOm);
+            } catch (Exception e) {
+                result.put("portalOmError", e.getMessage());
+            }
+        }
         return result;
+    }
+
+    @Override
+    public Map<String, Object> tableDiscover(LhDatasourceTestParam param) {
+        viewAssembler.enrichParamFromFe(param);
+        LhDatasource existing = null;
+        if (StrUtil.isNotBlank(param.getId())) {
+            existing = queryEntity(param.getId());
+        }
+        String type = param.getType();
+        if (StrUtil.isBlank(type) && existing != null) {
+            type = existing.getType();
+        }
+        String typeCode;
+        try {
+            typeCode = formSchemaService.resolveTypeCode(type);
+        } catch (Exception e) {
+            typeCode = type;
+        }
+        param.setType(typeCode);
+        Map<String, Object> conn = connNormalizer.mergeConn(param);
+        stripSecretPlaceholders(conn);
+        if (existing != null) {
+            if (StrUtil.isNotBlank(existing.getConnMasked())) {
+                try {
+                    JSONUtil.parseObj(existing.getConnMasked()).forEach((k, v) -> {
+                        if (v != null && !isSecretPlaceholder(v)) {
+                            conn.putIfAbsent(k, v);
+                        }
+                    });
+                } catch (Exception ignored) {
+                }
+            }
+            vaultClient.readOrEmpty(existing.getVaultPath()).forEach((k, v) -> {
+                if (v == null || StrUtil.isBlank(String.valueOf(v)) || isSecretPlaceholder(v)) {
+                    return;
+                }
+                if (isSecretKey(k) || !conn.containsKey(k) || isSecretPlaceholder(conn.get(k))) {
+                    conn.put(k, v);
+                } else {
+                    conn.putIfAbsent(k, v);
+                }
+            });
+            if (StrUtil.isBlank(str(conn.get("user"))) && StrUtil.isNotBlank(str(conn.get("username")))) {
+                conn.put("user", conn.get("username"));
+            }
+            if (StrUtil.isBlank(str(conn.get("host"))) && StrUtil.isNotBlank(existing.getEndpointHost())) {
+                conn.put("host", existing.getEndpointHost());
+            }
+            if (StrUtil.isBlank(str(conn.get("port"))) && StrUtil.isNotBlank(existing.getEndpointPort())) {
+                conn.put("port", existing.getEndpointPort());
+            }
+            if (StrUtil.isBlank(str(conn.get("database"))) && StrUtil.isNotBlank(existing.getDatabaseName())) {
+                conn.put("database", existing.getDatabaseName());
+            }
+        }
+        if (isSecretPlaceholder(conn.get("password"))) {
+            throw new CommonException("??????????????????????????? Vault ???");
+        }
+        LhDatasourceConnNormalizer.NormalizedConn n = connNormalizer.normalize(
+                typeCode, conn, formSchemaService.defaultPort(typeCode));
+        LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(typeCode).orElse(null);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("type", typeCode);
+        // ???????? Discoverer ???Hive/Kafka/ES/Redis/RMQ/MinIO ????????????
+        if (existing != null) {
+            LhInventoryDiscoverer discoverer = findInventoryDiscoverer(typeCode);
+            if (discoverer != null) {
+                DiscoverBundle bundle = discoverRemoteTables(existing);
+                List<Map<String, Object>> tables = new ArrayList<>();
+                for (RemoteTableMeta m : bundle.metas) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("name", m.name);
+                    row.put("comment", m.comment);
+                    row.put("engine", m.engine);
+                    row.put("encoding", m.encoding);
+                    row.put("rowCount", m.rowCount);
+                    tables.add(row);
+                }
+                result.put("ok", true);
+                result.put("source", bundle.fromRemote ? "remote"
+                        : ("manual".equals(bundle.path) ? "manual" : "fallback"));
+                result.put("path", bundle.path);
+                result.put("objectKind", bundle.objectKind);
+                result.put("objectKindLabel", LhInventoryObjectKinds.labelOf(bundle.objectKind));
+                if (StrUtil.isNotBlank(bundle.hint)) {
+                    result.put("hint", bundle.hint);
+                }
+                result.put("discovered", tables.size());
+                result.put("tables", tables);
+                result.put("schema", tables.stream().map(t -> String.valueOf(t.get("name")))
+                        .collect(Collectors.joining(",")));
+                return result;
+            }
+        }
+        if (typeEnum == null || !typeEnum.isJdbc()) {
+            String kind = LhInventoryObjectKinds.ofType(typeCode);
+            String kindLabel = LhInventoryObjectKinds.labelOf(kind);
+            String hint = LhManualSummaryInventoryDiscoverer.hintOf(
+                    StrUtil.blankToDefault(typeCode, "").toLowerCase(Locale.ROOT), kindLabel);
+            if (StrUtil.isBlank(hint) || hint.startsWith("????")) {
+                hint = "??????? JDBC ??????????????????????"
+                        + kindLabel + "?";
+            }
+            result.put("ok", false);
+            result.put("error", hint);
+            result.put("objectKind", kind);
+            result.put("objectKindLabel", kindLabel);
+            result.put("path", "unsupported");
+            result.put("tables", Collections.emptyList());
+            return result;
+        }
+        String url = buildJdbcUrl(typeCode, n, conn);
+        if (StrUtil.isBlank(url)) {
+            throw new CommonException("???? JDBC URL???? host/port/database");
+        }
+        if (StrUtil.isBlank(n.user) || StrUtil.isBlank(n.password)) {
+            throw new CommonException("???/??????");
+        }
+        LhDatasource probe = existing != null ? existing : new LhDatasource();
+        if (existing == null) {
+            probe.setType(typeCode);
+            probe.setDatabaseName(n.database);
+        }
+        try (Connection c = DriverManager.getConnection(url, n.user, n.password)) {
+            Map<String, Object> secret = new LinkedHashMap<>(conn);
+            secret.put("database", n.database);
+            List<RemoteTableMeta> metas;
+            if ("mysql".equals(typeCode) || "doris".equals(typeCode)) {
+                metas = discoverMysqlTables(c, secret, probe);
+            } else if ("postgresql".equals(typeCode) || "pg".equals(typeCode)) {
+                metas = discoverPgTables(c);
+            } else {
+                metas = discoverJdbcTables(c);
+            }
+            List<Map<String, Object>> tables = new ArrayList<>();
+            for (RemoteTableMeta m : metas) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("name", m.name);
+                row.put("comment", m.comment);
+                row.put("engine", m.engine);
+                row.put("encoding", m.encoding);
+                row.put("rowCount", m.rowCount);
+                tables.add(row);
+            }
+            result.put("ok", true);
+            result.put("source", "remote");
+            result.put("discovered", tables.size());
+            result.put("tables", tables);
+            result.put("schema", tables.stream().map(t -> String.valueOf(t.get("name")))
+                    .collect(Collectors.joining(",")));
+            return result;
+        } catch (CommonException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CommonException("???????: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * ????????Discoverer ???Hive/Kafka/ES/Redis/RMQ/MinIO / ?????? JDBC ? fallback
+     */
+    private DiscoverBundle discoverRemoteTables(LhDatasource ds) {
+        String type = StrUtil.blankToDefault(ds.getType(), "").toLowerCase(Locale.ROOT);
+        LhInventoryDiscoverer discoverer = findInventoryDiscoverer(type);
+        if (discoverer != null) {
+            return fromInventory(discoverer.discover(ds));
+        }
+        LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(ds.getType()).orElse(null);
+        if (typeEnum == null || !typeEnum.isJdbc()) {
+            DiscoverBundle b = new DiscoverBundle();
+            b.fromRemote = false;
+            b.path = "fallback";
+            b.objectKind = LhInventoryObjectKinds.ofType(type);
+            b.hint = "????????????? schemaSummary ??????";
+            b.metas = parseSchemaSummary(ds.getSchemaSummary()).stream().map(n -> {
+                RemoteTableMeta m = new RemoteTableMeta();
+                m.name = n;
+                return m;
+            }).collect(Collectors.toList());
+            return b;
+        }
+        try {
+            Map<String, Object> secret = vaultClient.read(ds.getVaultPath());
+            String url = String.valueOf(secret.getOrDefault("jdbcUrl", ""));
+            String user = String.valueOf(secret.getOrDefault("username", ""));
+            String pwd = String.valueOf(secret.getOrDefault("password", ""));
+            if (StrUtil.isBlank(url)) {
+                throw new CommonException("Vault ??? jdbcUrl");
+            }
+            try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
+                List<RemoteTableMeta> metas;
+                if ("mysql".equals(type) || "doris".equals(type)) {
+                    metas = discoverMysqlTables(conn, secret, ds);
+                } else if ("postgresql".equals(type) || "pg".equals(type)) {
+                    metas = discoverPgTables(conn);
+                } else {
+                    metas = discoverJdbcTables(conn);
+                }
+                DiscoverBundle b = new DiscoverBundle();
+                b.fromRemote = true;
+                b.path = "jdbc";
+                b.objectKind = LhInventoryObjectKinds.TABLE;
+                b.metas = metas;
+                return b;
+            }
+        } catch (Exception e) {
+            DiscoverBundle b = new DiscoverBundle();
+            b.fromRemote = false;
+            b.path = "fallback";
+            b.objectKind = LhInventoryObjectKinds.TABLE;
+            b.hint = "JDBC ???????? schemaSummary?" + e.getMessage();
+            b.metas = parseSchemaSummary(ds.getSchemaSummary()).stream().map(n -> {
+                RemoteTableMeta m = new RemoteTableMeta();
+                m.name = n;
+                m.comment = "fallback";
+                return m;
+            }).collect(Collectors.toList());
+            if (b.metas.isEmpty()) {
+                throw new CommonException("???????: {}", e.getMessage());
+            }
+            return b;
+        }
+    }
+
+    private LhInventoryDiscoverer findInventoryDiscoverer(String typeCode) {
+        if (inventoryDiscoverers == null || inventoryDiscoverers.isEmpty()) {
+            return null;
+        }
+        for (LhInventoryDiscoverer d : inventoryDiscoverers) {
+            if (d.supports(typeCode)) {
+                return d;
+            }
+        }
+        return null;
+    }
+
+    private static DiscoverBundle fromInventory(LhInventoryDiscoverResult inv) {
+        DiscoverBundle b = new DiscoverBundle();
+        b.fromRemote = inv.fromRemote;
+        b.path = inv.path;
+        b.objectKind = StrUtil.blankToDefault(inv.objectKind, LhInventoryObjectKinds.TABLE);
+        b.hint = inv.hint;
+        List<RemoteTableMeta> metas = new ArrayList<>();
+        for (LhRemoteInventoryItem item : inv.items) {
+            RemoteTableMeta m = new RemoteTableMeta();
+            m.name = item.name;
+            m.comment = item.comment;
+            m.engine = item.engine;
+            m.encoding = item.encoding;
+            m.rowCount = item.rowCount;
+            metas.add(m);
+        }
+        b.metas = metas;
+        return b;
+    }
+
+    private static final class DiscoverBundle {
+        boolean fromRemote;
+        String path = "unknown";
+        String objectKind = LhInventoryObjectKinds.TABLE;
+        String hint;
+        List<RemoteTableMeta> metas = Collections.emptyList();
+    }
+
+    private List<RemoteTableMeta> discoverMysqlTables(Connection conn, Map<String, Object> secret,
+                                                      LhDatasource ds) throws Exception {
+        String schema = firstNonBlank(
+                str(secret.get("database")),
+                ds.getDatabaseName(),
+                conn.getCatalog());
+        String sql = "SELECT TABLE_NAME, ENGINE, TABLE_ROWS, TABLE_COMMENT, TABLE_COLLATION "
+                + "FROM information_schema.TABLES "
+                + "WHERE TABLE_SCHEMA = ? AND TABLE_TYPE IN ('BASE TABLE','VIEW') "
+                + "ORDER BY TABLE_NAME";
+        List<RemoteTableMeta> list = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    RemoteTableMeta m = new RemoteTableMeta();
+                    m.name = rs.getString("TABLE_NAME");
+                    m.engine = rs.getString("ENGINE");
+                    long rows = rs.getLong("TABLE_ROWS");
+                    if (!rs.wasNull()) {
+                        m.rowCount = rows;
+                    }
+                    m.comment = rs.getString("TABLE_COMMENT");
+                    m.encoding = collationToEncoding(rs.getString("TABLE_COLLATION"));
+                    list.add(m);
+                }
+            }
+        }
+        return list;
+    }
+
+    private List<RemoteTableMeta> discoverPgTables(Connection conn) throws Exception {
+        String sql = "SELECT c.relname AS table_name, "
+                + "COALESCE(obj_description(c.oid), '') AS table_comment, "
+                + "COALESCE(s.n_live_tup, 0) AS table_rows "
+                + "FROM pg_class c "
+                + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                + "LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid "
+                + "WHERE c.relkind IN ('r','p','v','m') "
+                + "AND n.nspname NOT IN ('pg_catalog','information_schema') "
+                + "ORDER BY c.relname";
+        List<RemoteTableMeta> list = new ArrayList<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                RemoteTableMeta m = new RemoteTableMeta();
+                m.name = rs.getString("table_name");
+                m.comment = rs.getString("table_comment");
+                m.rowCount = rs.getLong("table_rows");
+                m.engine = "heap";
+                m.encoding = "UTF8";
+                list.add(m);
+            }
+        }
+        return list;
+    }
+
+    private List<RemoteTableMeta> discoverJdbcTables(Connection conn) throws Exception {
+        List<RemoteTableMeta> list = new ArrayList<>();
+        try (ResultSet rs = conn.getMetaData().getTables(conn.getCatalog(), null, "%",
+                new String[]{"TABLE", "VIEW"})) {
+            while (rs.next()) {
+                RemoteTableMeta m = new RemoteTableMeta();
+                m.name = rs.getString("TABLE_NAME");
+                m.comment = rs.getString("REMARKS");
+                list.add(m);
+            }
+        }
+        return list;
+    }
+
+    private void applyRemoteMeta(LhDsTable row, RemoteTableMeta meta, Date now) {
+        if (StrUtil.isNotBlank(meta.comment)) {
+            row.setCommentTxt(StrUtil.sub(meta.comment, 0, 512));
+            // ?????????????
+            if (StrUtil.isBlank(row.getCnName())) {
+                row.setCnName(StrUtil.sub(meta.comment, 0, 64));
+            }
+        }
+        if (StrUtil.isNotBlank(meta.engine)) {
+            row.setEngine(meta.engine);
+        }
+        if (StrUtil.isNotBlank(meta.encoding)) {
+            row.setEncoding(meta.encoding);
+        } else if (StrUtil.isBlank(row.getEncoding())) {
+            row.setEncoding("utf8mb4");
+        }
+        if (meta.rowCount != null) {
+            row.setRowCount(meta.rowCount);
+        }
+        row.setSyncedAt(now);
+    }
+
+    private static String collationToEncoding(String collation) {
+        if (StrUtil.isBlank(collation)) {
+            return "utf8mb4";
+        }
+        // utf8mb4_general_ci ? utf8mb4
+        int idx = collation.indexOf('_');
+        return idx > 0 ? collation.substring(0, idx) : collation;
+    }
+
+    private static class RemoteTableMeta {
+        String name;
+        String comment;
+        String engine;
+        String encoding;
+        Long rowCount;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -721,10 +1315,56 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                 "columnEstimate", tableAdded * 12);
     }
 
+    @Override
+    public Map<String, Object> projectToGravitino(List<LhDatasourceIdParam> ids) {
+        List<LhDatasource> list;
+        if (ids == null || ids.isEmpty()) {
+            list = this.list(new QueryWrapper<LhDatasource>().lambda()
+                    .ne(LhDatasource::getStatus, LhDatasourceStatusEnum.REVOKED.getValue()));
+        } else {
+            list = new ArrayList<>();
+            for (LhDatasourceIdParam p : ids) {
+                list.add(queryEntity(p.getId()));
+            }
+        }
+        int projected = 0;
+        int skipped = 0;
+        int errors = 0;
+        List<Map<String, Object>> details = new ArrayList<>();
+        for (LhDatasource ds : list) {
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("id", ds.getId());
+            one.put("name", ds.getName());
+            one.put("type", ds.getType());
+            try {
+                Map<String, Object> r = gravitinoProjector.project(ds);
+                one.putAll(r);
+                if (Boolean.TRUE.equals(r.get("skipped"))) {
+                    skipped++;
+                } else if (r.get("error") != null) {
+                    errors++;
+                } else {
+                    projected++;
+                }
+            } catch (Exception e) {
+                errors++;
+                one.put("error", e.getMessage());
+            }
+            details.add(one);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total", list.size());
+        out.put("projected", projected);
+        out.put("skipped", skipped);
+        out.put("errors", errors);
+        out.put("details", details);
+        return out;
+    }
+
     public LhDatasource queryEntity(String id) {
         LhDatasource ds = this.getById(id);
         if (ds == null) {
-            throw new CommonException("数据源不存在: {}", id);
+            throw new CommonException("??????: {}", id);
         }
         return ds;
     }
@@ -747,7 +1387,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             qw.lambda().ne(LhDatasource::getId, excludeId);
         }
         if (this.count(qw) > 0) {
-            throw new CommonException("数据源编码已存在: {}", dsCode);
+            throw new CommonException("????????: {}", dsCode);
         }
     }
 
@@ -783,13 +1423,20 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                     + (StrUtil.isNotBlank(extra) ? "?" + extra : "");
         }
         if ("oracle".equals(type)) {
+            // SID ? :??????????? SID?? /
+            if (StrUtil.isNotBlank(db) && (db.contains(".") || db.contains("/") || db.toLowerCase().contains("service"))) {
+                String svc = db.replace("service:", "").replace("SERVICE:", "");
+                return "jdbc:oracle:thin:@//" + host + ":" + port + "/" + svc;
+            }
             return "jdbc:oracle:thin:@" + host + ":" + port + ":" + db;
         }
         if ("sqlserver".equals(type)) {
-            return "jdbc:sqlserver://" + host + ":" + port + ";databaseName=" + db;
+            return "jdbc:sqlserver://" + host + ":" + port + ";databaseName=" + db
+                    + (StrUtil.isNotBlank(extra) ? ";" + extra.replace("&", ";") : "");
         }
         if ("clickhouse".equals(type)) {
-            return "jdbc:clickhouse://" + host + ":" + port + "/" + db;
+            return "jdbc:clickhouse://" + host + ":" + port + "/" + StrUtil.blankToDefault(db, "default")
+                    + (StrUtil.isNotBlank(extra) ? "?" + extra : "");
         }
         if ("doris".equals(type)) {
             return "jdbc:mysql://" + host + ":" + port + "/" + db + "?useSSL=false";
@@ -801,6 +1448,11 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     }
 
     private void seedTablesFromSummary(LhDatasource entity) {
+        // JDBC ?? afterPersist ? tableSync ??????????? mock/????????
+        LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(entity.getType()).orElse(null);
+        if (typeEnum != null && typeEnum.isJdbc()) {
+            return;
+        }
         List<String> names = parseSchemaSummary(entity.getSchemaSummary());
         Date now = new Date();
         for (String name : names) {
@@ -841,6 +1493,42 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
 
     private static String str(Object o) {
         return o == null ? null : String.valueOf(o);
+    }
+
+    private static boolean isSecretPlaceholder(Object v) {
+        if (v == null) {
+            return false;
+        }
+        String s = String.valueOf(v).trim();
+        if (s.isEmpty() || "******".equals(s)) {
+            return true;
+        }
+        // ?? * ????
+        return s.length() >= 4 && s.chars().allMatch(c -> c == '*');
+    }
+
+    private static boolean isSecretKey(String k) {
+        if (k == null) {
+            return false;
+        }
+        return "password".equalsIgnoreCase(k)
+                || "secretKey".equalsIgnoreCase(k)
+                || "token".equalsIgnoreCase(k)
+                || "privateKey".equalsIgnoreCase(k)
+                || "authHeader".equalsIgnoreCase(k);
+    }
+
+    private static void stripSecretPlaceholders(Map<String, Object> conn) {
+        if (conn == null || conn.isEmpty()) {
+            return;
+        }
+        List<String> drop = new ArrayList<>();
+        conn.forEach((k, v) -> {
+            if (isSecretKey(k) && isSecretPlaceholder(v)) {
+                drop.add(k);
+            }
+        });
+        drop.forEach(conn::remove);
     }
 
     private static String firstNonBlank(String... vals) {

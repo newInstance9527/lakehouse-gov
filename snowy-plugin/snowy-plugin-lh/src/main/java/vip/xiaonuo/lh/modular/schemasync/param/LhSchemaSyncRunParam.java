@@ -37,4 +37,25 @@ public class LhSchemaSyncRunParam {
 
     @Schema(description = "强制全量（忽略 revision 跳过）")
     private Boolean force;
+
+    @Schema(description = "OM DatabaseService 名，空则用配置 lake-service；按类型分类时如 lh_mysql")
+    private String lakeService;
+
+    @Schema(description = "OM Database 名，空则用配置 lake-database；登记投影建议用 ds catalog 名隔离")
+    private String lakeDatabase;
+
+    @Schema(description = "OM DatabaseService.serviceType，如 Mysql/Postgres；空则 CustomDatabase")
+    private String omServiceType;
+
+    @Schema(description = "OM DatabaseService 展示名")
+    private String omServiceDisplayName;
+
+    @Schema(description = "OM DatabaseService 描述")
+    private String omServiceDescription;
+
+    @Schema(description = "OM Database 展示名")
+    private String omDatabaseDisplayName;
+
+    @Schema(description = "OM Database 描述")
+    private String omDatabaseDescription;
 }

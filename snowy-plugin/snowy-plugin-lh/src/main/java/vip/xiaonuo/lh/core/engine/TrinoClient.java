@@ -70,6 +70,7 @@ public class TrinoClient {
             JSONObject body = JSONUtil.parseObj(resp.body());
             List<Map<String, Object>> rows = new ArrayList<>();
             List<String> columns = new ArrayList<>();
+            throwIfTrinoError(body);
             String next = body.getStr("nextUri");
             collect(body, columns, rows);
             int guard = 0;
@@ -79,11 +80,9 @@ public class TrinoClient {
                     trustAll(nreq);
                 }
                 JSONObject page = JSONUtil.parseObj(nreq.execute().body());
+                throwIfTrinoError(page);
                 collect(page, columns, rows);
                 next = page.getStr("nextUri");
-                if (page.containsKey("error")) {
-                    throw new CommonException("Trino错误: {}", page.getByPath("error.message"));
-                }
             }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("columns", columns);
@@ -94,10 +93,11 @@ public class TrinoClient {
             throw e;
         } catch (Exception e) {
             Map<String, Object> degraded = new LinkedHashMap<>();
-            degraded.put("columns", List.of("message"));
-            degraded.put("rows", List.of(Map.of("message", "Trino暂不可达: " + e.getMessage())));
-            degraded.put("rowCount", 1);
+            degraded.put("columns", List.of());
+            degraded.put("rows", List.of());
+            degraded.put("rowCount", 0);
             degraded.put("degraded", true);
+            degraded.put("message", "Trino暂不可达: " + StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
             return degraded;
         }
     }
@@ -127,6 +127,13 @@ public class TrinoClient {
             )));
         }
         return tree;
+    }
+
+    private static void throwIfTrinoError(JSONObject page) {
+        if (page != null && page.containsKey("error")) {
+            Object msg = page.getByPath("error.message");
+            throw new CommonException("Trino错误: {}", msg == null ? "unknown" : msg);
+        }
     }
 
     private void collect(JSONObject page, List<String> columns, List<Map<String, Object>> rows) {

@@ -22,7 +22,10 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.GravitinoClient;
+import vip.xiaonuo.lh.core.engine.LhOmCatalogClassifier;
 import vip.xiaonuo.lh.core.engine.OpenMetadataClient;
+import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
+import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbOmAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbSchemaSyncWatermark;
@@ -56,6 +59,10 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
     private CbOmAssetRefMapper omMapper;
     @Resource
     private CbSchemaSyncWatermarkMapper watermarkMapper;
+    @Resource
+    private GovAssetMapper govAssetMapper;
+
+    private static final String NOT_DELETE = "NOT_DELETE";
 
     @Transactional(rollbackFor = Exception.class)
     @Override
@@ -68,9 +75,29 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
         }
         String metalake = StrUtil.blankToDefault(param.getMetalake(), lhProperties.getGravitino().getMetalake());
         String catalog = StrUtil.blankToDefault(param.getCatalog(), lhProperties.getGravitino().getCatalog());
-        String lakeService = lhProperties.getOpenmetadata().getLakeService();
-        String lakeDatabase = lhProperties.getOpenmetadata().getLakeDatabase();
+        String lakeService = StrUtil.blankToDefault(param.getLakeService(),
+                lhProperties.getOpenmetadata().getLakeService());
+        String lakeDatabase = StrUtil.blankToDefault(param.getLakeDatabase(),
+                lhProperties.getOpenmetadata().getLakeDatabase());
         boolean force = Boolean.TRUE.equals(param.getForce());
+        LhOmCatalogClassifier.Spec classify = buildClassify(param, lakeService, lakeDatabase);
+
+        // Catalog 不存在 / 非 relational：软跳过，避免对门户「不支持 Grav」类型抛 500
+        try {
+            gravitinoClient.listSchemas(metalake, catalog);
+        } catch (Exception e) {
+            String msg = StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName());
+            Map<String, Object> soft = new LinkedHashMap<>();
+            soft.put("skipped", true);
+            soft.put("reason", "catalog_unavailable");
+            soft.put("catalog", catalog);
+            soft.put("metalake", metalake);
+            soft.put("message", msg);
+            soft.put("scanned", 0);
+            soft.put("upserted", 0);
+            soft.put("errors", 0);
+            return soft;
+        }
 
         List<String> schemas = resolveSchemas(param.getSchemas(), metalake, catalog);
         int scanned = 0;
@@ -100,9 +127,12 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
                         skipped++;
                         continue;
                     }
+                    // 多 schema 时按实际 schema 挂载；分类规格仅驱动 DatabaseService 类型
+                    LhOmCatalogClassifier.Spec tableClassify = copyClassify(classify);
+                    tableClassify.schemaName = schema;
                     Map<String, Object> omResult = openMetadataClient.upsertTableStructure(
-                            lakeService, lakeDatabase, schema, grav);
-                    saveOmRef(gravRef, omRef, omResult, grav.auditVersion, null);
+                            lakeService, lakeDatabase, schema, grav, tableClassify);
+                    saveOmRef(gravRef, omRef, omResult, grav.auditVersion, null, tableClassify);
                     upserted++;
                 } catch (Exception e) {
                     errors++;
@@ -116,7 +146,7 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
                                 .eq(CbGravAssetRef::getGravTable, table));
                         if (g != null) {
                             saveOmRef(g, findOmRef(g.getId()), null, g.getGravRevision(),
-                                    StrUtil.sub(msg, 0, 500));
+                                    StrUtil.sub(msg, 0, 500), classify);
                         }
                     } catch (Exception ignored) {
                     }
@@ -128,6 +158,9 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("metalake", metalake);
         result.put("catalog", catalog);
+        result.put("lakeService", lakeService);
+        result.put("lakeDatabase", lakeDatabase);
+        result.put("omServiceType", classify.serviceType);
         result.put("schemas", schemas);
         result.put("scanned", scanned);
         result.put("upserted", upserted);
@@ -135,6 +168,36 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
         result.put("errors", errors);
         result.put("errorMsgs", errorMsgs.size() > 20 ? errorMsgs.subList(0, 20) : errorMsgs);
         return result;
+    }
+
+    private static LhOmCatalogClassifier.Spec buildClassify(LhSchemaSyncRunParam param,
+                                                            String lakeService, String lakeDatabase) {
+        LhOmCatalogClassifier.Spec s = new LhOmCatalogClassifier.Spec();
+        s.omFamily = LhOmCatalogClassifier.FAMILY_DATABASE;
+        s.serviceName = lakeService;
+        s.serviceType = StrUtil.blankToDefault(param.getOmServiceType(), "CustomDatabase");
+        s.serviceDisplayName = param.getOmServiceDisplayName();
+        s.serviceDescription = param.getOmServiceDescription();
+        s.databaseName = lakeDatabase;
+        s.databaseDisplayName = param.getOmDatabaseDisplayName();
+        s.databaseDescription = param.getOmDatabaseDescription();
+        return s;
+    }
+
+    private static LhOmCatalogClassifier.Spec copyClassify(LhOmCatalogClassifier.Spec src) {
+        LhOmCatalogClassifier.Spec s = new LhOmCatalogClassifier.Spec();
+        s.omFamily = src.omFamily;
+        s.serviceName = src.serviceName;
+        s.serviceType = src.serviceType;
+        s.serviceDisplayName = src.serviceDisplayName;
+        s.serviceDescription = src.serviceDescription;
+        s.databaseName = src.databaseName;
+        s.databaseDisplayName = src.databaseDisplayName;
+        s.databaseDescription = src.databaseDescription;
+        s.schemaName = src.schemaName;
+        s.category = src.category;
+        s.typeCode = src.typeCode;
+        return s;
     }
 
     private List<String> resolveSchemas(String override, String metalake, String catalog) {
@@ -196,18 +259,37 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
     }
 
     private void saveOmRef(CbGravAssetRef gravRef, CbOmAssetRef omRef, Map<String, Object> omResult,
-                           long gravRev, String error) {
+                           long gravRev, String error, LhOmCatalogClassifier.Spec classify) {
         Date now = new Date();
+        String fqn = omResult != null ? String.valueOf(omResult.getOrDefault("fqn",
+                gravRef.getGravSchema() + "." + gravRef.getGravTable()))
+                : gravRef.getGravSchema() + "." + gravRef.getGravTable();
+        // 按 om_fqn 去重：目录 upsertOmPointer 可能已写过一行
+        if (omRef == null && StrUtil.isNotBlank(fqn)) {
+            omRef = omMapper.selectOne(new QueryWrapper<CbOmAssetRef>().lambda()
+                    .eq(CbOmAssetRef::getOmFqn, fqn)
+                    .last("LIMIT 1"));
+        }
         if (omRef == null) {
             omRef = new CbOmAssetRef();
             omRef.setId(IdUtil.getSnowflakeNextIdStr());
             omRef.setRevision(1);
             omRef.setWs("default");
             omRef.setGravAssetId(gravRef.getId());
-            omRef.setOmFqn(omResult != null ? String.valueOf(omResult.get("fqn"))
-                    : gravRef.getGravSchema() + "." + gravRef.getGravTable());
+            omRef.setOmFqn(fqn);
             omRef.setSyncedGravRev(0L);
+            omRef.setOmEntityType("table");
+            if (classify != null) {
+                omRef.setOmFamily(classify.omFamily);
+                omRef.setOmServiceType(classify.serviceType);
+            }
             omMapper.insert(omRef);
+        }
+        omRef.setGravAssetId(gravRef.getId());
+        omRef.setOmEntityType(StrUtil.blankToDefault(omRef.getOmEntityType(), "table"));
+        if (classify != null) {
+            omRef.setOmFamily(classify.omFamily);
+            omRef.setOmServiceType(classify.serviceType);
         }
         if (error != null) {
             omRef.setStatus("stale");
@@ -224,9 +306,53 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
             omRef.setLastError(null);
             omRef.setDriftFlag(0);
         }
+        linkGovAsset(omRef);
         omRef.setLastSyncAt(now);
         omRef.setRevision(Optional.ofNullable(omRef.getRevision()).orElse(1) + 1);
         omMapper.updateById(omRef);
+    }
+
+    /** 按 om_fqn 反查门户资产并回填双向指针 */
+    private void linkGovAsset(CbOmAssetRef omRef) {
+        if (omRef == null || StrUtil.isBlank(omRef.getOmFqn())) {
+            return;
+        }
+        try {
+            GovAsset asset = null;
+            if (StrUtil.isNotBlank(omRef.getAssetId())) {
+                asset = govAssetMapper.selectById(omRef.getAssetId());
+            }
+            if (asset == null) {
+                asset = govAssetMapper.selectOne(new QueryWrapper<GovAsset>().lambda()
+                        .eq(GovAsset::getOmFqn, omRef.getOmFqn())
+                        .eq(GovAsset::getDeleteFlag, NOT_DELETE)
+                        .last("LIMIT 1"));
+            }
+            if (asset == null) {
+                return;
+            }
+            omRef.setAssetId(asset.getId());
+            boolean dirty = false;
+            if (!Objects.equals(asset.getOmAssetId(), omRef.getId())) {
+                asset.setOmAssetId(omRef.getId());
+                dirty = true;
+            }
+            if (StrUtil.isBlank(asset.getOmFqn())) {
+                asset.setOmFqn(omRef.getOmFqn());
+                dirty = true;
+            }
+            if (StrUtil.isNotBlank(omRef.getGravAssetId())
+                    && !Objects.equals(asset.getGravAssetId(), omRef.getGravAssetId())) {
+                asset.setGravAssetId(omRef.getGravAssetId());
+                dirty = true;
+            }
+            if (dirty) {
+                asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
+                govAssetMapper.updateById(asset);
+            }
+        } catch (Exception ignored) {
+            // soft-fail：Schema Sync 不因门户回填失败中断
+        }
     }
 
     private void touchWatermark(String markKey, String markValue) {
