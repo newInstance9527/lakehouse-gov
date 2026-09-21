@@ -24,6 +24,7 @@ import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
 
 import java.util.*;
+import java.util.Locale;
 
 /**
  * Apache Gravitino REST 客户端（结构 SoT 读取侧）
@@ -203,52 +204,130 @@ public class GravitinoClient {
 
     public Map<String, Object> grantTablePrivilege(String metalake, String catalog, String schema, String table,
                                                    String subjectId, String privilege, String rowFilter) {
-        return mutateTablePrivilege("POST", metalake, catalog, schema, table, subjectId, privilege, rowFilter);
+        return mutateTablePrivilege(true, metalake, catalog, schema, table, subjectId, privilege, rowFilter);
     }
 
     /** 回收 Gravitino 表权限。 */
     public Map<String, Object> revokeTablePrivilege(String metalake, String catalog, String schema, String table,
                                                     String subjectId, String privilege) {
-        return mutateTablePrivilege("DELETE", metalake, catalog, schema, table, subjectId, privilege, null);
+        return mutateTablePrivilege(false, metalake, catalog, schema, table, subjectId, privilege, null);
     }
 
-    private Map<String, Object> mutateTablePrivilege(String method, String metalake, String catalog, String schema,
+    /**
+     * Gravitino ≥1.0 ACL：用户 ← Role ← Privilege（SELECT_TABLE 等）。
+     * 旧路径 {@code /permissions/user/...} 已不存在（会 404）。
+     */
+    private Map<String, Object> mutateTablePrivilege(boolean grant, String metalake, String catalog, String schema,
                                                      String table, String subjectId, String privilege, String rowFilter) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", false);
-        String priv = StrUtil.blankToDefault(privilege, "SELECT");
-        String fullName = metalake + "." + catalog + "." + schema + "." + table;
-        String path = "/api/metalakes/" + enc(metalake) + "/permissions/" + enc("user") + "/" + enc(subjectId);
-        JSONObject body = new JSONObject();
-        JSONArray privileges = new JSONArray();
-        if (StrUtil.isNotBlank(rowFilter)) {
-            JSONObject one = new JSONObject();
-            one.set("name", priv);
-            one.set("condition", rowFilter.trim());
-            privileges.add(one);
-        } else {
-            privileges.add(priv);
+        if (StrUtil.hasBlank(metalake, catalog, schema, table, subjectId)) {
+            out.put("message", "metalake/catalog/schema/table/subject 不能为空");
+            return out;
         }
-        body.set("privileges", privileges);
-        JSONObject securable = new JSONObject();
-        securable.set("type", "TABLE");
-        securable.set("fullName", catalog + "." + schema + "." + table);
-        JSONArray objects = new JSONArray();
-        objects.add(securable);
-        body.set("securableObjects", objects);
+        String gravPriv = toGravPrivilege(privilege);
+        String fullName = catalog + "." + schema + "." + table;
+        String role = portalSelectRole(subjectId);
+        out.put("role", role);
+        out.put("privilege", gravPriv);
+        out.put("fullName", metalake + "." + fullName);
+        // rowFilter 不是 Grav privilege.condition（仅为 ALLOW/DENY）；行过滤仍落门户投影
+        if (StrUtil.isNotBlank(rowFilter)) {
+            out.put("rowFilterNote", "rowFilter 仅写门户投影，未写入 Grav privilege.condition");
+        }
         try {
-            String resp = "DELETE".equalsIgnoreCase(method)
-                    ? authDelete(path, body.toString())
-                    : authPost(path, body.toString());
+            ensureUser(metalake, subjectId);
+            ensureRole(metalake, role);
+            String objectPath = "/api/metalakes/" + enc(metalake)
+                    + "/permissions/roles/" + enc(role)
+                    + "/table/" + enc(fullName)
+                    + (grant ? "/grant" : "/revoke");
+            JSONObject body = new JSONObject();
+            JSONArray privileges = new JSONArray();
+            JSONObject one = new JSONObject();
+            one.set("name", gravPriv);
+            one.set("condition", "ALLOW");
+            privileges.add(one);
+            body.set("privileges", privileges);
+            String resp = authPut(objectPath, body.toString());
+            if (grant) {
+                JSONObject grantUser = new JSONObject();
+                grantUser.set("roleNames", List.of(role));
+                authPut("/api/metalakes/" + enc(metalake) + "/permissions/users/" + enc(subjectId) + "/grant",
+                        grantUser.toString());
+            }
             out.put("ok", true);
-            out.put("policyId", "grav:" + fullName + ":" + priv + ":" + subjectId);
+            out.put("policyId", "grav-role:" + role + ":" + fullName + ":" + gravPriv);
             out.put("response", resp);
         } catch (Exception e) {
             out.put("ok", false);
             out.put("message", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
-            out.put("fullName", fullName);
         }
         return out;
+    }
+
+    /** 门户人查主体对应的 Grav Role（每用户一个，多表复用）。 */
+    static String portalSelectRole(String trinoUser) {
+        String raw = StrUtil.blankToDefault(trinoUser, "anonymous").trim();
+        String safe = raw.replaceAll("[^A-Za-z0-9_]", "_");
+        if (safe.length() > 48) {
+            safe = safe.substring(0, 48);
+        }
+        return "lh_sel_" + safe;
+    }
+
+    static String toGravPrivilege(String privilege) {
+        String p = StrUtil.blankToDefault(privilege, "SELECT").trim().toUpperCase(Locale.ROOT);
+        return switch (p) {
+            case "SELECT", "SELECT_TABLE", "READ" -> "SELECT_TABLE";
+            case "INSERT", "UPDATE", "DELETE", "MODIFY", "MODIFY_TABLE", "WRITE" -> "MODIFY_TABLE";
+            default -> p.contains("SELECT") ? "SELECT_TABLE" : p;
+        };
+    }
+
+    private void ensureUser(String metalake, String user) {
+        String getPath = "/api/metalakes/" + enc(metalake) + "/users/" + enc(user);
+        try {
+            authGet(getPath);
+            return;
+        } catch (Exception ignored) {
+            // 404 → create
+        }
+        JSONObject body = new JSONObject();
+        body.set("name", user);
+        try {
+            authPost("/api/metalakes/" + enc(metalake) + "/users", body.toString());
+        } catch (Exception e) {
+            // 并发创建：再 GET 一次确认
+            try {
+                authGet(getPath);
+            } catch (Exception e2) {
+                throw e;
+            }
+        }
+    }
+
+    private void ensureRole(String metalake, String role) {
+        String getPath = "/api/metalakes/" + enc(metalake) + "/roles/" + enc(role);
+        try {
+            authGet(getPath);
+            return;
+        } catch (Exception ignored) {
+            // 404 → create
+        }
+        JSONObject body = new JSONObject();
+        body.set("name", role);
+        body.set("properties", Map.of("managedBy", "lakehouse-portal"));
+        body.set("securableObjects", new JSONArray());
+        try {
+            authPost("/api/metalakes/" + enc(metalake) + "/roles", body.toString());
+        } catch (Exception e) {
+            try {
+                authGet(getPath);
+            } catch (Exception e2) {
+                throw e;
+            }
+        }
     }
 
     private long extractAuditVersion(JSONObject t) {

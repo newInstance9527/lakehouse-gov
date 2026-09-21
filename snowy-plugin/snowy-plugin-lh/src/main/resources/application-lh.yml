@@ -11,6 +11,11 @@ lh:
     user: admin
     password: ""
     insecure-ssl: true
+    # 即席查询面：白名单 ∩ SHOW CATALOGS；默认仅湖表 iceberg
+    query-catalogs: iceberg
+    lake-catalogs: iceberg
+    catalog-cache-ttl-ms: 300000
+    show-unrunnable-in-tree: false
   ds:
     url: http://127.0.0.1:12345/dolphinscheduler
     vault-path: platform/dolphinscheduler/api

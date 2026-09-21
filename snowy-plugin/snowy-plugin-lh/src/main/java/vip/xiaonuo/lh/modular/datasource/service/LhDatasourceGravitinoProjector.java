@@ -108,8 +108,11 @@ public class LhDatasourceGravitinoProjector {
         };
     }
 
-    /** Grav Catalog 名（由 dsCode 清洗） */
+    /** Grav Catalog 名。Iceberg 固定用湖 catalog（默认 iceberg），不能落成 ds_*。 */
     public String catalogNameOf(LhDatasource ds) {
+        if (ds != null && "iceberg".equalsIgnoreCase(StrUtil.blankToDefault(ds.getType(), ""))) {
+            return StrUtil.blankToDefault(lhProperties.getGravitino().getCatalog(), "iceberg");
+        }
         return sanitizeCatalogName(ds == null ? null : ds.getDsCode());
     }
 
@@ -140,6 +143,8 @@ public class LhDatasourceGravitinoProjector {
             }
         } else if ("hive".equals(p.provider)) {
             props.put("metastore.uris", resolveHiveMetastoreUris(ds, secret));
+        } else if ("lakehouse-iceberg".equals(p.provider)) {
+            putIcebergProps(ds, secret, props);
         } else if ("hadoop".equals(p.provider)) {
             if ("hdfs".equals(ds.getType())) {
                 putHadoopHdfsProps(ds, secret, props);
@@ -386,6 +391,61 @@ public class LhDatasourceGravitinoProjector {
         return jdbcUrl;
     }
 
+    /**
+     * Gravitino lakehouse-iceberg。catalog 名由 {@link #catalogNameOf} 固定为湖 catalog。
+     * Hive Metastore 用 thrift URI；warehouse 必须是存储路径，不能写成 Trino 的 REST warehouse。
+     */
+    private void putIcebergProps(LhDatasource ds, Map<String, Object> secret, Map<String, String> props) {
+        String warehouse = first(secret, "warehouse", "warehouseUri");
+        if (StrUtil.isBlank(warehouse)) {
+            throw new IllegalArgumentException("Iceberg 投影需要 warehouse（如 s3a://warehouse/）");
+        }
+        String catalogType = first(secret, "catalogType", "catalog-backend").toLowerCase(Locale.ROOT);
+        boolean jdbc = catalogType.contains("jdbc");
+        props.put("catalog-backend", jdbc ? "jdbc" : "hive");
+        props.put("warehouse", warehouse);
+        String uri = first(secret, "uri", "metastoreUri", "metastore.uris");
+        if (StrUtil.isBlank(uri)) {
+            String host = first(secret, "host", "endpointHost");
+            if (StrUtil.isBlank(host)) {
+                host = StrUtil.blankToDefault(ds.getEndpointHost(), "");
+            }
+            String port = first(secret, "port");
+            if (StrUtil.isBlank(port)) {
+                port = StrUtil.blankToDefault(ds.getEndpointPort(), jdbc ? "3306" : "9083");
+            }
+            if (StrUtil.isBlank(host)) {
+                throw new IllegalArgumentException("Iceberg 投影需要 Catalog 地址（Hive Metastore 或 JDBC）");
+            }
+            uri = jdbc ? ("jdbc:mysql://" + host + ":" + port) : ("thrift://" + host + ":" + port);
+        }
+        props.put("uri", uri);
+        String endpoint = first(secret, "s3.endpoint", "s3Endpoint", "endpoint");
+        if (StrUtil.isNotBlank(endpoint) && (endpoint.startsWith("http://") || endpoint.startsWith("https://"))) {
+            props.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
+            props.put("s3.endpoint", endpoint);
+            props.put("s3.path-style-access", "true");
+            String access = first(secret, "s3.access-key-id", "accessKey", "access-key");
+            String secretKey = first(secret, "s3.secret-access-key", "secretKey", "secret-key");
+            if (StrUtil.isNotBlank(access)) {
+                props.put("s3.access-key-id", access);
+            }
+            if (StrUtil.isNotBlank(secretKey)) {
+                props.put("s3.secret-access-key", secretKey);
+            }
+        }
+        if (jdbc) {
+            String user = first(secret, "jdbc.user", "username", "user");
+            String password = first(secret, "jdbc.password", "password");
+            if (StrUtil.isNotBlank(user)) {
+                props.put("jdbc.user", user);
+            }
+            if (StrUtil.isNotBlank(password)) {
+                props.put("jdbc.password", password);
+            }
+        }
+    }
+
     private Optional<ProviderSpec> resolveProvider(String type) {
         if (StrUtil.isBlank(type)) {
             return Optional.empty();
@@ -400,6 +460,7 @@ public class LhDatasourceGravitinoProjector {
             case "clickhouse" -> Optional.of(new ProviderSpec("relational", "jdbc-clickhouse",
                     "com.clickhouse.jdbc.ClickHouseDriver"));
             case "hive" -> Optional.of(new ProviderSpec("relational", "hive", ""));
+            case "iceberg" -> Optional.of(new ProviderSpec("relational", "lakehouse-iceberg", ""));
             case "s3", "minio" -> Optional.of(new ProviderSpec("fileset", "hadoop", ""));
             case "hdfs" -> Optional.of(new ProviderSpec("fileset", "hadoop", ""));
             case "kafka" -> Optional.of(new ProviderSpec("messaging", "kafka", ""));

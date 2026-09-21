@@ -153,8 +153,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         row.setModelName(modelName.trim());
         row.setBaseUrl(param.getBaseUrl().trim());
         row.setVaultPath(vaultPath);
-        Integer ctx = param.getContextTokens() != null ? param.getContextTokens() : param.getContext();
-        row.setContextTokens(ctx == null ? 128000 : ctx);
+        row.setContextTokens(normalizeContextLabel(
+                firstNonBlank(param.getContextTokens(), param.getContext(), "128K")));
         row.setPriceUnit(StrUtil.blankToDefault(param.getPriceUnit(), "usd_1m"));
         row.setInputRate(param.getInputRate() == null ? BigDecimal.ZERO : param.getInputRate());
         row.setOutputRate(param.getOutputRate() == null ? BigDecimal.ZERO : param.getOutputRate());
@@ -187,9 +187,9 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         if (StrUtil.isNotBlank(param.getKind())) {
             row.setKind(normalizeKind(param.getKind()));
         }
-        Integer ctx = param.getContextTokens() != null ? param.getContextTokens() : param.getContext();
+        String ctx = firstNonBlank(param.getContextTokens(), param.getContext(), null);
         if (ctx != null) {
-            row.setContextTokens(ctx);
+            row.setContextTokens(normalizeContextLabel(ctx));
         }
         if (StrUtil.isNotBlank(param.getPriceUnit())) {
             row.setPriceUnit(param.getPriceUnit());
@@ -484,8 +484,9 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         vo.setEndpoint(row.getBaseUrl());
         vo.setKeyMask(row.getKeyMask());
         vo.setKey(StrUtil.blankToDefault(row.getKeyMask(), "sk-****（Vault）"));
-        vo.setContextTokens(row.getContextTokens());
-        vo.setContext(row.getContextTokens() == null ? null : formatContext(row.getContextTokens()));
+        String ctxLabel = normalizeContextLabel(row.getContextTokens());
+        vo.setContextTokens(ctxLabel);
+        vo.setContext(ctxLabel);
         vo.setPriceUnit(row.getPriceUnit());
         vo.setInputRate(row.getInputRate());
         vo.setOutputRate(row.getOutputRate());
@@ -534,11 +535,24 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         return "embed".equals(k) ? "embed" : "chat";
     }
 
-    private static String formatContext(int tokens) {
-        if (tokens >= 1000) {
-            return (tokens / 1000) + "K";
+    /** 库字段为展示串（128K）；兼容纯数字入参 */
+    private static String normalizeContextLabel(String raw) {
+        if (StrUtil.isBlank(raw)) {
+            return "128K";
         }
-        return tokens + "";
+        String s = raw.trim();
+        if (s.matches("(?i)\\d+[km]")) {
+            return s.substring(0, s.length() - 1) + Character.toUpperCase(s.charAt(s.length() - 1));
+        }
+        if (s.matches("\\d+")) {
+            try {
+                int tokens = Integer.parseInt(s);
+                return tokens >= 1000 ? (tokens / 1000) + "K" : String.valueOf(tokens);
+            } catch (NumberFormatException ignored) {
+                return s;
+            }
+        }
+        return s;
     }
 
     private static String firstNonBlank(String... vals) {

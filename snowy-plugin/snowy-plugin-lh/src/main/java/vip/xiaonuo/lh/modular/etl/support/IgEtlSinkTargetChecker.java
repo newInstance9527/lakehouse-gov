@@ -19,6 +19,7 @@ import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDsTableMapper;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlNode;
+import vip.xiaonuo.lh.modular.query.support.LakeQueryAssetBinder;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
 
@@ -47,6 +48,8 @@ public class IgEtlSinkTargetChecker {
     private LhProperties lhProperties;
     @Resource
     private CbGravAssetRefMapper gravAssetRefMapper;
+    @Resource
+    private LakeQueryAssetBinder lakeQueryAssetBinder;
     @Resource
     private LhDatasourceMapper datasourceMapper;
     @Resource
@@ -254,6 +257,7 @@ public class IgEtlSinkTargetChecker {
                 existing.setGravTable(ref.table);
                 gravAssetRefMapper.insert(existing);
             }
+            lakeQueryAssetBinder.ensure(existing);
         } catch (Exception e) {
             log.warn("register cb_grav_asset_ref soft-fail: {}", e.getMessage());
         }

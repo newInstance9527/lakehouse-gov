@@ -51,15 +51,22 @@ public class Application {
         springApplication.setBannerMode(Banner.Mode.OFF);
         ConfigurableApplicationContext configurableApplicationContext = springApplication.run(args);
         Environment env = configurableApplicationContext.getEnvironment();
+        String port = env.getProperty("server.port");
+        String contextPath = env.getProperty("server.servlet.context-path", "");
+        if (contextPath == null) {
+            contextPath = "";
+        }
         log.info("""
                         
                         ----------------------------------------------------------
                         Application is running! Access URLs:
-                        Local:    http://localhost:{}
-                        Doc:      http://localhost:{}/doc.html
+                        Local:    http://localhost:{}{}
+                        Doc:      http://localhost:{}{}/doc.html
                         ----------------------------------------------------------""",
-                env.getProperty("server.port"),
-                env.getProperty("server.port"));
+                port,
+                contextPath,
+                port,
+                contextPath);
     }
 
     /**

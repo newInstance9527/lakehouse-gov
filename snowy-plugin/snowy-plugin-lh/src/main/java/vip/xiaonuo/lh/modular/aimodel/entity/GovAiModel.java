@@ -31,7 +31,8 @@ public class GovAiModel extends CommonEntity {
     private String modelName;
     private String baseUrl;
     private String vaultPath;
-    private Integer contextTokens;
+    /** 上下文窗展示，如 128K（与库 varchar 一致） */
+    private String contextTokens;
     private String priceUnit;
     private BigDecimal inputRate;
     private BigDecimal outputRate;

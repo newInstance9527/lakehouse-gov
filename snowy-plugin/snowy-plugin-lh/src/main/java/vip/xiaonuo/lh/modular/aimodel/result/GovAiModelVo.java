@@ -22,7 +22,8 @@ public class GovAiModelVo {
     /** 脱敏 Key */
     private String key;
     private String keyMask;
-    private Integer contextTokens;
+    /** 与库一致，如 128K */
+    private String contextTokens;
     private String context;
     private String priceUnit;
     private BigDecimal inputRate;

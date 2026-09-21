@@ -33,6 +33,7 @@ import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbOmAssetRefMapper;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbSchemaSyncWatermarkMapper;
 import vip.xiaonuo.lh.modular.schemasync.param.LhSchemaSyncRunParam;
+import vip.xiaonuo.lh.modular.query.support.LakeQueryAssetBinder;
 import vip.xiaonuo.lh.modular.schemasync.service.LhSchemaSyncService;
 
 import java.util.*;
@@ -61,6 +62,8 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
     private CbSchemaSyncWatermarkMapper watermarkMapper;
     @Resource
     private GovAssetMapper govAssetMapper;
+    @Resource
+    private LakeQueryAssetBinder lakeQueryAssetBinder;
 
     private static final String NOT_DELETE = "NOT_DELETE";
 
@@ -120,6 +123,7 @@ public class LhSchemaSyncServiceImpl implements LhSchemaSyncService {
                 try {
                     GravitinoClient.GravTable grav = gravitinoClient.loadTable(metalake, catalog, schema, table);
                     CbGravAssetRef gravRef = upsertGravRef(grav);
+                    lakeQueryAssetBinder.ensure(gravRef);
                     CbOmAssetRef omRef = findOmRef(gravRef.getId());
                     long synced = omRef == null ? -1L : Optional.ofNullable(omRef.getSyncedGravRev()).orElse(-1L);
                     if (!force && omRef != null && synced >= grav.auditVersion

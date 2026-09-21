@@ -37,7 +37,7 @@ const loginBack = ref(false)
 const isDirectMode = !import.meta.env.DEV && sysConfig.API_URL && /^https?:\/\//.test(sysConfig.API_URL)
 // 创建 axios 实例
 const service = axios.create({
-	baseURL: isDirectMode ? sysConfig.API_URL : '/api',
+	baseURL: isDirectMode ? sysConfig.API_URL : '/lakehouse',
 	timeout: sysConfig.TIMEOUT
 })
 
@@ -183,7 +183,7 @@ export const baseRequest = (url, value = {}, method = 'post', options = {}) => {
 
 // 获取API基础地址（供上传组件、WebSocket等非axios场景使用）
 export const getApiBaseUrl = () => {
-	return isDirectMode ? sysConfig.API_URL : '/api'
+	return isDirectMode ? sysConfig.API_URL : '/lakehouse'
 }
 
 export default service

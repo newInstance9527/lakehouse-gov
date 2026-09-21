@@ -12,7 +12,7 @@
 					v-model:value="keyword"
 					allow-clear
 					size="small"
-					placeholder="搜索库、表"
+					placeholder="搜索数据源、schema、表"
 					style="margin-bottom: 8px"
 				/>
 				<a-tree
@@ -25,7 +25,6 @@
 				>
 					<template #title="node">
 						<span class="q-node" :class="{ locked: node.locked }">
-							<span v-if="node.layer" class="q-layer" :class="'q-layer-' + String(node.layer).toLowerCase()">{{ node.layer }}</span>
 							<span class="q-name">{{ node.name }}</span>
 							<span v-if="node.engine" class="q-engine">{{ node.engine }}</span>
 							<span v-if="node.locked" class="q-lock">未授权</span>
@@ -35,7 +34,7 @@
 						</span>
 					</template>
 				</a-tree>
-				<div v-else class="q-empty">{{ keyword.trim() ? '没有匹配的库表' : '当前没有已登记的表' }}</div>
+				<div v-else class="q-empty">{{ keyword.trim() ? '没有匹配的库表' : '暂无可用表（需拥有者或 SELECT，且已挂接并进入查询面；默认仅 iceberg）' }}</div>
 			</a-card>
 		</a-col>
 		<a-col :span="18">
@@ -71,11 +70,14 @@
 	</a-row>
 </template>
 <script setup>
-	import { ref, onMounted, computed } from 'vue'
+	import { ref, onMounted, computed, watch } from 'vue'
+	import { useRoute } from 'vue-router'
 	import { message } from 'ant-design-vue'
 	import queryApi from '@/api/lh/queryApi'
 
-	const sql = ref('SHOW CATALOGS')
+	const route = useRoute()
+	const sql = ref('')
+	let appliedLinkKey = ''
 	const tree = ref([])
 	const keyword = ref('')
 	const expandedKeys = ref([])
@@ -178,6 +180,12 @@
 		}
 	}
 
+	function withoutTrailingSemicolon(sql) {
+		const s = String(sql ?? '').trim()
+		if (s.endsWith(';')) return s.slice(0, -1).trim()
+		return s
+	}
+
 	const onSelectTree = async (_keys, info) => {
 		const n = info?.node?.data || info?.node?.dataRef || info?.node
 		if (!n) return
@@ -191,11 +199,11 @@
 			return
 		}
 		if (n.type === 'table' && n.runnable === false) {
-			message.warning('未挂接查询引擎')
+			message.warning(n.message || '未进入即席查询面（登记 catalog 未映射到 Trino 白名单）')
 			return
 		}
 		if (n.sampleSql) {
-			sql.value = n.sampleSql
+			sql.value = withoutTrailingSemicolon(n.sampleSql)
 		}
 		if (n.type === 'table' && !n.locked && n.runnable !== false && !n.columnsLoaded && (n.assetId || n.fqn)) {
 			try {
@@ -242,12 +250,32 @@
 		message.success('已导出脱敏 CSV')
 	}
 
+	function applyDeepLink() {
+		const q = route.query || {}
+		const linked = typeof q.sql === 'string' ? q.sql : ''
+		const fqn = typeof q.fqn === 'string' ? q.fqn : ''
+		if (!linked && !fqn) return
+		const key = linked ? `sql:${linked}` : `fqn:${fqn}`
+		if (key === appliedLinkKey) return
+		appliedLinkKey = key
+		sql.value = linked
+			? linked
+			: `SELECT *\nFROM ${fqn}\nWHERE dt >= date_add('day', -7, current_date)\nLIMIT 100;`
+		message.info(linked ? '已从深链载入 SQL 草稿（未自动执行）' : `已预插表 ${fqn}（未自动执行）`)
+	}
+
+	watch(
+		() => [route.query.sql, route.query.fqn],
+		() => applyDeepLink(),
+	)
+
 	onMounted(() => {
 		queryApi.schemaTree().then((r) => {
 			tree.value = r || []
 			expandedKeys.value = (tree.value || []).filter((n) => n.open).map((n) => n.id)
 		})
 		loadHistory()
+		applyDeepLink()
 	})
 </script>
 <style scoped>

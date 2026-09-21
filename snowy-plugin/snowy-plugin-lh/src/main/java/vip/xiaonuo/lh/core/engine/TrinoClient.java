@@ -23,6 +23,7 @@ import org.springframework.stereotype.Component;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
+import vip.xiaonuo.lh.modular.query.support.CpQueryScanGuard;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -69,6 +70,21 @@ public class TrinoClient {
     }
 
     /**
+     * Trino {@code POST /v1/statement} 只接受一条语句，正文不能以分号结束。
+     * 只去掉末尾一个分号及周围空白；语句内部的分号原样保留，不拆成多条执行。
+     */
+    public static String singleStatement(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        String s = sql.trim();
+        if (!s.isEmpty() && s.charAt(s.length() - 1) == ';') {
+            s = s.substring(0, s.length() - 1).trim();
+        }
+        return s;
+    }
+
+    /**
      * 执行 SQL（兼容旧调用：不截断、默认 catalog）
      */
     public Map<String, Object> execute(String sql) {
@@ -94,6 +110,7 @@ public class TrinoClient {
         String serviceUser = cred.get("username");
         String password = cred.get("password");
         String endUser = resolveEndUser(o, serviceUser);
+        String statement = singleStatement(sql);
         try {
             HttpRequest req = HttpRequest.post(base + "/v1/statement")
                     .header("X-Trino-User", endUser)
@@ -101,25 +118,14 @@ public class TrinoClient {
                     .header("X-Trino-Catalog", StrUtil.blankToDefault(o.catalog, "iceberg"))
                     .header("X-Trino-Schema", StrUtil.blankToDefault(o.schema, "default"))
                     .basicAuth(serviceUser, password)
-                    .body(sql)
+                    .body(statement)
                     .timeout(Math.max(10000, o.timeoutMs));
             if (StrUtil.isNotBlank(o.clientTags)) {
                 req.header("X-Trino-Client-Tags", o.clientTags);
             }
-            // session：扫描硬顶 + 其它属性
-            StringBuilder session = new StringBuilder();
-            if (o.maxScanBytes > 0) {
-                appendSession(session, "query_max_scan_physical_bytes", String.valueOf(o.maxScanBytes));
-            }
-            if (o.sessionProps != null) {
-                o.sessionProps.forEach((k, v) -> {
-                    if (!"query_max_scan_physical_bytes".equals(k)) {
-                        appendSession(session, k, v);
-                    }
-                });
-            }
-            if (!session.isEmpty()) {
-                req.header("X-Trino-Session", session.toString());
+            String sessionHeader = buildSessionHeader(o);
+            if (StrUtil.isNotBlank(sessionHeader)) {
+                req.header("X-Trino-Session", sessionHeader);
             }
             if (lhProperties.getTrino().isInsecureSsl()) {
                 trustAll(req);
@@ -270,6 +276,30 @@ public class TrinoClient {
         del.execute();
     }
 
+    /**
+     * {@code X-Trino-Session} 值。{@code query_max_scan_physical_bytes} 在 Trino 455
+     * 由 {@code PropertyMetadataUtil.dataSizeProperty} → airlift {@code DataSize.valueOf} 解码，
+     * 必须是 {@code 10GB}/{@code 50GB} 这类字面量，不能是裸字节整数。
+     */
+    public static String buildSessionHeader(ExecuteOptions o) {
+        if (o == null) {
+            return "";
+        }
+        StringBuilder session = new StringBuilder();
+        if (o.maxScanBytes > 0) {
+            appendSession(session, CpQueryScanGuard.QUERY_MAX_SCAN_PHYSICAL_BYTES,
+                    CpQueryScanGuard.toTrinoDataSize(o.maxScanBytes));
+        }
+        if (o.sessionProps != null) {
+            o.sessionProps.forEach((k, v) -> {
+                if (!CpQueryScanGuard.QUERY_MAX_SCAN_PHYSICAL_BYTES.equals(k)) {
+                    appendSession(session, k, v);
+                }
+            });
+        }
+        return session.toString();
+    }
+
     private static void appendSession(StringBuilder sb, String key, String value) {
         if (StrUtil.isBlank(key) || value == null) {
             return;
@@ -396,7 +426,7 @@ public class TrinoClient {
         public Map<String, String> sessionProps;
         public boolean cancelOnLimit = true;
         public int timeoutMs = 60000;
-        /** 扫描硬拒上限（字节）；&gt;0 时写入 Trino session query_max_scan_physical_bytes */
+        /** 扫描硬拒上限（字节）。写入 session 时转为 {@code 10GB} 这类 DataSize，不传裸字节。 */
         public long maxScanBytes = 0L;
         public ProgressListener onProgress;
         /** HUMAN：代执行映射主体；JOB：服务账号，默认 */

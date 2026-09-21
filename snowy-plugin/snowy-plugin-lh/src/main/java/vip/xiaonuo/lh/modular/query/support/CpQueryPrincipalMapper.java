@@ -41,7 +41,7 @@ public final class CpQueryPrincipalMapper {
     public static Map<String, String> sessionProps(Principal principal, String ws, boolean elevated, long maxScanBytes) {
         Map<String, String> m = new LinkedHashMap<>();
         if (maxScanBytes > 0) {
-            m.put("query_max_scan_physical_bytes", String.valueOf(maxScanBytes));
+            m.put(CpQueryScanGuard.QUERY_MAX_SCAN_PHYSICAL_BYTES, CpQueryScanGuard.toTrinoDataSize(maxScanBytes));
         }
         // 便于审计与队列识别（Trino 日志 / query event）
         m.put("query_max_execution_time", elevated ? "30m" : "10m");

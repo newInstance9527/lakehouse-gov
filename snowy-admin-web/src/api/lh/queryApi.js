@@ -8,4 +8,7 @@ export default {
   schemaTree() { return request('schemaTree', {}, 'get') },
   columns(params) { return request('columns', params, 'get') },
   export(data) { return request('export', data) },
+  querySurface() { return request('query-surface', {}, 'get') },
+  catalogMapList(params) { return request('catalog-map', params || {}, 'get') },
+  catalogMapUpsert(data) { return request('catalog-map', data) },
 }

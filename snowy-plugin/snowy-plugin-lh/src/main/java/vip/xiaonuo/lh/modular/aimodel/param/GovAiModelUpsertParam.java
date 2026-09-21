@@ -28,11 +28,11 @@ public class GovAiModelUpsertParam {
     @Schema(description = "API Key（仅创建/轮换提交）")
     private String key;
 
-    @Schema(description = "上下文窗 token 数")
-    private Integer context;
+    @Schema(description = "上下文窗展示（如 128K）")
+    private String context;
 
-    @Schema(description = "上下文窗 token 数")
-    private Integer contextTokens;
+    @Schema(description = "上下文窗展示（如 128K）")
+    private String contextTokens;
 
     @Schema(description = "价格单位 usd_1m/cny_1k/free")
     private String priceUnit;

@@ -39,11 +39,10 @@ export default defineConfig(({ command, mode }) => {
 		server: {
 			port: envConfig.VITE_PORT,
 			proxy: {
-				'/api': {
+				'/lakehouse': {
 					target: envConfig.VITE_API_BASEURL,
-					ws: false,
-					changeOrigin: true,
-					rewrite: (path) => path.replace(/^\/api/, '')
+					ws: true,
+					changeOrigin: true
 				}
 			}
 		},

@@ -41,7 +41,9 @@ public class LhTrinoPrincipalServiceImpl implements LhTrinoPrincipalService {
         if (row == null) {
             throw new CommonException(
                     "门户账号 " + StrUtil.blankToDefault(user.getAccount(), user.getId())
-                            + " 未映射 Gravitino 主体，拒绝以服务账号执行。请先绑定主体；表权限不在门户");
+                            + " 未映射 Gravitino 主体，拒绝以服务账号执行。"
+                            + "请超管 POST /lh/sec/principals/bind-me {\"trinoUser\":\"你的Trino人类主体\"}；"
+                            + "禁止填服务账号 admin。表权限不在门户");
         }
         assertNotServiceAccount(row.getTrinoUser());
         return row;
@@ -139,14 +141,16 @@ public class LhTrinoPrincipalServiceImpl implements LhTrinoPrincipalService {
             alt.append(Pattern.quote(row.getTrinoUser()));
         }
         String newUser = alt.isEmpty() ? "(?!)" : "^(" + alt + ")$";
+        // Trino file-based access-control 要求 snake_case 字段名
         Map<String, Object> rule = new LinkedHashMap<>();
-        rule.put("originalUser", serviceUser());
-        rule.put("newUser", newUser);
+        rule.put("original_user", serviceUser());
+        rule.put("new_user", newUser);
         rule.put("allow", true);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("duty", "trino-impersonation-only");
-        out.put("note", "合并进 Trino 系统访问控制的 impersonation，不要在此文件写表权限");
+        out.put("note", "合并进 Trino rules.json 的 impersonation；字段须 original_user/new_user（snake_case）；不要在此写表权限");
         out.put("impersonation", List.of(rule));
+        out.put("configHint", "access-control.name=file + access-control.config-files=.../rules.json；见 deploy/trino/README-impersonation.md");
         return out;
     }
 

@@ -45,4 +45,13 @@ public interface CpQueryService {
     Map<String, Object> saveDataset(CpQueryDatasetSaveParam param);
 
     List<Map<String, Object>> listDatasets(String ws, Integer limit);
+
+    /** 即席查询面快照：白名单 ∩ SHOW CATALOGS */
+    Map<String, Object> querySurface();
+
+    /** Grav→Trino catalog 映射列表 */
+    List<Map<String, Object>> listCatalogMaps(String ws);
+
+    /** 联邦源开通：写入/更新映射并返回 checklist */
+    Map<String, Object> upsertCatalogMap(Map<String, Object> body);
 }

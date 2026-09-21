@@ -1,5 +1,8 @@
 package vip.xiaonuo.lh.modular.query.controller;
 
+import cn.dev33.satoken.context.mock.SaTokenContextMockUtil;
+import cn.dev33.satoken.stp.StpUtil;
+import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
@@ -65,8 +68,14 @@ public class CpQueryController {
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter execStream(@RequestBody @Valid CpQueryExecParam param) {
         SseEmitter emitter = new SseEmitter(5 * 60_000L);
+        // 请求线程里取 token；异步线程无 Servlet 上下文，必须自行挂上 SaTokenContext
+        final String token = StpUtil.getTokenValue();
         ssePool.execute(() -> {
+            SaTokenContextMockUtil.setMockContext();
             try {
+                if (StrUtil.isNotBlank(token)) {
+                    StpUtil.setTokenValue(token);
+                }
                 send(emitter, "started", Map.of("ok", true));
                 Map<String, Object> result = cpQueryService.exec(param, stage -> {
                     try {
@@ -80,9 +89,13 @@ public class CpQueryController {
             } catch (Exception e) {
                 try {
                     send(emitter, "error", Map.of("message", e.getMessage() == null ? "error" : e.getMessage()));
+                    // completeWithError 不结束 chunked 响应，浏览器已收到 error 仍会挂住
+                    emitter.complete();
                 } catch (Exception ignored) {
+                    emitter.completeWithError(e);
                 }
-                emitter.completeWithError(e);
+            } finally {
+                SaTokenContextMockUtil.clearContext();
             }
         });
         return emitter;
@@ -168,6 +181,38 @@ public class CpQueryController {
             @RequestParam(required = false) String ws,
             @RequestParam(required = false) Integer limit) {
         return CommonResult.data(cpQueryService.listDatasets(ws, limit));
+    }
+
+    @Operation(summary = "即席查询面（白名单 ∩ SHOW CATALOGS）")
+    @GetMapping({
+            "/lh/compute/query/query-surface",
+            "/lh/query/query-surface",
+            "/api/compute/query/query-surface"
+    })
+    public CommonResult<Map<String, Object>> querySurface() {
+        return CommonResult.data(cpQueryService.querySurface());
+    }
+
+    @Operation(summary = "Grav→Trino catalog 映射列表")
+    @GetMapping({
+            "/lh/compute/query/catalog-map",
+            "/lh/query/catalog-map",
+            "/api/compute/query/catalog-map"
+    })
+    public CommonResult<List<Map<String, Object>>> listCatalogMaps(
+            @RequestParam(required = false) String ws) {
+        return CommonResult.data(cpQueryService.listCatalogMaps(ws));
+    }
+
+    @Operation(summary = "联邦源开通：登记/更新 Grav→Trino 映射")
+    @CommonLog("即席联邦源开通")
+    @PostMapping({
+            "/lh/compute/query/catalog-map",
+            "/lh/query/catalog-map",
+            "/api/compute/query/catalog-map"
+    })
+    public CommonResult<Map<String, Object>> upsertCatalogMap(@RequestBody Map<String, Object> body) {
+        return CommonResult.data(cpQueryService.upsertCatalogMap(body));
     }
 
     private static void send(SseEmitter emitter, String event, Object data) throws IOException {

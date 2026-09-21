@@ -77,6 +77,22 @@ public class LhProperties {
          * false：人查直接拒绝，不会改用服务账号。
          */
         private boolean impersonate = true;
+        /**
+         * 即席查询 catalog 白名单（逗号分隔），与 SHOW CATALOGS 求交后才可跑。
+         * 默认仅湖表；联邦源开通后追加真实 Trino catalog 名（不是 Grav 的 ds_*）。
+         */
+        private String queryCatalogs = "iceberg";
+        /**
+         * 视为湖表的 Grav/Trino catalog（逗号分隔）。湖表查询 FQN 优先落在此集合中的名。
+         */
+        private String lakeCatalogs = "iceberg";
+        /** SHOW CATALOGS 缓存毫秒；≤0 表示每次都拉 */
+        private long catalogCacheTtlMs = 300_000L;
+        /**
+         * true：未进入查询面的已授权表仍出现在树中（runnable=false）；
+         * false（默认）：树里只留可跑表。
+         */
+        private boolean showUnrunnableInTree = false;
     }
 
     @Getter

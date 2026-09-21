@@ -35,7 +35,7 @@ const errorCodeMap = {
 const loginBack = ref(false)
 // 创建 axios 实例
 const clientService = axios.create({
-	baseURL: '/api', // api base_url
+	baseURL: '/lakehouse', // 与 snowy-web-app context-path 一致
 	timeout: sysConfig.TIMEOUT // 请求超时时间
 })
 

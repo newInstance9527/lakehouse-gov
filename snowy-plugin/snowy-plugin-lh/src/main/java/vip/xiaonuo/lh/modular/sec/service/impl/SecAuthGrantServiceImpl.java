@@ -20,10 +20,12 @@ import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.mapper.IgEtlDagMapper;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
+import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
 import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsResourceTypeEnum;
 import vip.xiaonuo.lh.modular.sec.mapper.SecAuthGrantMapper;
+import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.Date;
@@ -50,6 +52,8 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
     private CbGravAssetRefMapper gravAssetRefMapper;
     @Resource
     private GravitinoClient gravitinoClient;
+    @Resource
+    private LhTrinoPrincipalService principalService;
 
     @Override
     public boolean hasTableReadGrant(String assetId) {
@@ -383,15 +387,22 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             return out;
         }
         try {
+            LhTrinoPrincipal principal = principalService.findActive(grant.getSubjectId());
+            if (principal == null || StrUtil.isBlank(principal.getTrinoUser())) {
+                out.put("skipped", true);
+                out.put("message", "no_trino_principal");
+                return out;
+            }
             Map<String, Object> r = gravitinoClient.grantTablePrivilege(
                     ref.getGravMetalake(),
                     ref.getGravCatalog(),
                     ref.getGravSchema(),
                     ref.getGravTable(),
-                    grant.getSubjectId(),
+                    principal.getTrinoUser(),
                     StrUtil.blankToDefault(grant.getPrivilege(), "SELECT"));
             out.putAll(r);
             out.put("projected", Boolean.TRUE.equals(r.get("ok")));
+            out.put("trinoUser", principal.getTrinoUser());
             if (r.get("policyId") != null) {
                 out.put("policyId", r.get("policyId"));
             }

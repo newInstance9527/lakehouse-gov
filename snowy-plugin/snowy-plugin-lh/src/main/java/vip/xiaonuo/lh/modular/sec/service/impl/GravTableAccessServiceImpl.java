@@ -81,9 +81,11 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
                 principal.getTrinoUser(),
                 priv,
                 condition);
-        if (!Boolean.TRUE.equals(granted.get("ok"))) {
-            throw new CommonException("Gravitino 授权失败: " + StrUtil.blankToDefault(
-                    String.valueOf(granted.get("message")), "unknown"));
+        boolean gravOk = Boolean.TRUE.equals(granted.get("ok"));
+        if (!gravOk) {
+            // 与申请中心约定：ACL soft-fail，门户投影仍写入
+            log.warn("Gravitino ACL soft-fail asset={} user={} msg={}",
+                    asset.getId(), principal.getTrinoUser(), granted.get("message"));
         }
         String policyId = granted.get("policyId") == null ? null : String.valueOf(granted.get("policyId"));
         SecAuthGrant projection = secAuthGrantService.recordSelectProjection(
@@ -95,26 +97,37 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
                 condition,
                 policyId,
                 ticket.getWs(),
-                "SELECT projection; catalog only");
+                gravOk ? "SELECT projection; Grav ACL ok"
+                        : "SELECT projection; Grav ACL soft-fail: " + granted.get("message"));
         JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(ticket.getPayload(), "{}"));
         JSONObject grav = new JSONObject();
         grav.set("principal", principal.getTrinoUser());
         grav.set("privilege", priv);
+        grav.set("gravPrivilege", granted.get("privilege"));
+        grav.set("role", granted.get("role"));
         grav.set("policyId", granted.get("policyId"));
         grav.set("fullName", ref.getGravCatalog() + "." + ref.getGravSchema() + "." + ref.getGravTable());
         grav.set("rowFilter", StrUtil.blankToDefault(condition, ""));
         grav.set("expiresAt", ticket.getExpiresAt());
         grav.set("revoked", false);
+        grav.set("projected", gravOk);
+        if (!gravOk) {
+            grav.set("error", String.valueOf(granted.get("message")));
+        }
         payload.set("grav", grav);
-        payload.set("aclStore", "gravitino");
+        payload.set("aclStore", gravOk ? "gravitino" : "portal_only");
         ticket.setPayload(payload.toString());
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("aclStore", "gravitino");
+        out.put("aclStore", gravOk ? "gravitino" : "portal_only");
         out.put("grantId", projection.getId());
         out.put("trinoUser", principal.getTrinoUser());
         out.put("gravPolicyId", granted.get("policyId"));
-        out.put("gravProjected", true);
+        out.put("gravProjected", gravOk);
+        out.put("gravRole", granted.get("role"));
+        if (!gravOk) {
+            out.put("gravMessage", granted.get("message"));
+        }
         out.put("rowFilter", StrUtil.blankToDefault(condition, null));
         out.put("expiresAt", ticket.getExpiresAt());
         return out;

@@ -1,5 +1,6 @@
 package vip.xiaonuo.lh.modular.sec.controller;
 
+import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
+import vip.xiaonuo.lh.modular.sec.param.LhTrinoPrincipalBindMeParam;
 import vip.xiaonuo.lh.modular.sec.param.LhTrinoPrincipalBindParam;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 
@@ -35,6 +37,18 @@ public class LhTrinoPrincipalController {
         return CommonResult.data(principalService.bind(param));
     }
 
+    @Operation(summary = "为当前登录用户绑定主体（仅超管；不授予表权限）")
+    @PostMapping("/lh/sec/principals/bind-me")
+    public CommonResult<LhTrinoPrincipal> bindMe(@RequestBody @Valid LhTrinoPrincipalBindMeParam param) {
+        var user = LhLoginUsers.requireUser();
+        LhTrinoPrincipalBindParam full = new LhTrinoPrincipalBindParam();
+        full.setPortalUserId(user.getId());
+        full.setPortalAccount(StrUtil.blankToDefault(user.getAccount(), "superAdmin"));
+        full.setTrinoUser(param.getTrinoUser());
+        full.setRemark(param.getRemark());
+        return CommonResult.data(principalService.bind(full));
+    }
+
     @Operation(summary = "已映射的人类主体")
     @GetMapping("/lh/sec/principals")
     public CommonResult<java.util.List<LhTrinoPrincipal>> list() {
@@ -49,6 +63,7 @@ public class LhTrinoPrincipalController {
         LhTrinoPrincipal row = principalService.findActive(user.getId());
         out.put("mapped", row != null);
         out.put("portalAccount", user.getAccount());
+        out.put("portalUserId", user.getId());
         out.put("principal", row);
         return CommonResult.data(out);
     }

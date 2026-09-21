@@ -23,10 +23,12 @@ import vip.xiaonuo.lh.modular.query.param.CpQueryExportParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryHistoryParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
 import vip.xiaonuo.lh.modular.query.support.CpQueryAssetCatalog;
+import vip.xiaonuo.lh.modular.query.support.CpQueryCatalogGuard;
 import vip.xiaonuo.lh.modular.query.support.CpQueryConcurrencyGuard;
 import vip.xiaonuo.lh.modular.query.support.CpQueryParamBinder;
 import vip.xiaonuo.lh.modular.query.support.CpQueryPrincipalMapper;
 import vip.xiaonuo.lh.modular.query.support.CpQueryScanGuard;
+import vip.xiaonuo.lh.modular.query.support.CpTrinoQueryCatalogService;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 
@@ -62,6 +64,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private LhTrinoPrincipalService principalService;
     @Resource
     private CpQueryAssetCatalog assetCatalog;
+    @Resource
+    private CpTrinoQueryCatalogService queryCatalogService;
 
     @Override
     public Map<String, Object> exec(CpQueryExecParam param) {
@@ -81,6 +85,11 @@ public class CpQueryServiceImpl implements CpQueryService {
             sql = CpQueryParamBinder.bind(rawSql, param.getParams());
         } catch (IllegalArgumentException e) {
             throw new CommonException(e.getMessage());
+        }
+        // Trino POST /v1/statement 只接受一条语句，且不能带结尾分号。只去掉末尾一个终结符。
+        sql = TrinoClient.singleStatement(sql);
+        if (StrUtil.isBlank(sql)) {
+            throw new CommonException("SQL 不能为空");
         }
         String ws = StrUtil.blankToDefault(param.getWs(), "default");
         int maxRows = param.getMaxRows() == null || param.getMaxRows() <= 0
@@ -111,6 +120,29 @@ public class CpQueryServiceImpl implements CpQueryService {
 
         boolean force = Boolean.TRUE.equals(param.getForce());
         boolean elevated = Boolean.TRUE.equals(param.getElevated());
+        // 查询面闸门：会话 catalog + SQL 三元组 catalog 须 ∈ 白名单 ∩ SHOW CATALOGS
+        String deniedCat = CpQueryCatalogGuard.firstDenied(sql, row.getCatalogName(), queryCatalogService);
+        if (deniedCat != null) {
+            String msg = queryCatalogService.denyMessage(deniedCat);
+            if (CpQueryCatalogGuard.looksLikeRegistrationOnly(deniedCat)) {
+                msg = "禁止使用 Grav 登记名 " + deniedCat
+                        + " 作为 Trino catalog；湖表请用 iceberg.schema.table，联邦源须先开通映射";
+            }
+            row.setStatus("blocked");
+            row.setStatusLabel("⚠ 数据源未进入查询面");
+            row.setErrorMsg(StrUtil.maxLength(msg, 1000));
+            row.setDurMs(0L);
+            row.setRowCount(0);
+            row.setUpdateTime(new Date());
+            execMapper.updateById(row);
+            Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(msg);
+            blocked.put("queryId", queryId);
+            blocked.put("id", row.getId());
+            blocked.put("errorCode", "CATALOG_NOT_IN_QUERY_SURFACE");
+            blocked.put("deniedCatalog", deniedCat);
+            blocked.put("queryable", new ArrayList<>(queryCatalogService.queryableCatalogs()));
+            return blocked;
+        }
         String block = force ? null : CpQueryScanGuard.blockReason(sql);
         if (block != null) {
             row.setStatus("blocked");
@@ -165,16 +197,33 @@ public class CpQueryServiceImpl implements CpQueryService {
         } catch (CommonException e) {
             long dur = System.currentTimeMillis() - t0;
             String msg = StrUtil.blankToDefault(e.getMessage(), "执行失败");
-            boolean scanHard = StrUtil.containsIgnoreCase(msg, "扫描量超过")
-                    || StrUtil.containsIgnoreCase(msg, "query_max_scan_physical_bytes");
+            boolean sessionInvalid = CpQueryScanGuard.isInvalidSessionProperty(msg);
+            boolean scanHard = CpQueryScanGuard.isEngineScanLimitExceeded(msg);
             boolean denied = isAccessDenied(msg);
+            boolean impersonationDenied = isImpersonationDenied(msg);
             row.setStatus(scanHard ? "blocked" : (denied ? "blocked" : "failed"));
             row.setStatusLabel(scanHard ? "⚠ 超扫描限额（引擎硬拒）"
-                    : (denied ? "⚠ 未授权" : "失败"));
+                    : (impersonationDenied ? "⚠ 代执行未开通"
+                    : (denied ? "⚠ 未授权"
+                    : (sessionInvalid ? "⚠ Trino会话属性无效" : "失败"))));
             row.setErrorMsg(StrUtil.maxLength(msg, 1000));
             row.setDurMs(dur);
             row.setUpdateTime(new Date());
             execMapper.updateById(row);
+            if (sessionInvalid) {
+                Map<String, Object> failed = new LinkedHashMap<>();
+                failed.put("queryId", queryId);
+                failed.put("id", row.getId());
+                failed.put("blocked", false);
+                failed.put("status", "failed");
+                failed.put("statusLabel", row.getStatusLabel());
+                failed.put("message", msg);
+                failed.put("errorCode", "TRINO_SESSION");
+                failed.put("scanOverLimit", false);
+                failed.put("scanLimitBytes", opts.maxScanBytes);
+                failed.put("scanHardLimitBytes", CpQueryScanGuard.PLATFORM_HARD_SCAN_BYTES);
+                return failed;
+            }
             if (scanHard) {
                 Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(msg);
                 blocked.put("queryId", queryId);
@@ -184,13 +233,25 @@ public class CpQueryServiceImpl implements CpQueryService {
                 blocked.put("errorCode", "SCAN_LIMIT");
                 return blocked;
             }
+            if (impersonationDenied) {
+                Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(
+                        "Trino 服务账号无法代执行映射主体。请在 Trino rules.json 配置 impersonation（见 deploy/trino/README-impersonation.md），"
+                                + "或 GET /lh/sec/principals/impersonation-rule 导出规则。申请 SELECT 无法解决此错误。");
+                blocked.put("queryId", queryId);
+                blocked.put("id", row.getId());
+                blocked.put("errorCode", "IMPERSONATION_DENIED");
+                blocked.put("applyHint", false);
+                blocked.put("message", msg);
+                blocked.put("trinoUser", principal.trinoUser);
+                return blocked;
+            }
             if (denied) {
                 Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(msg);
                 blocked.put("queryId", queryId);
                 blocked.put("id", row.getId());
                 blocked.put("errorCode", "ACCESS_DENIED");
                 blocked.put("applyHint", true);
-                blocked.put("applyPath", "/apply?type=table&privilege=SELECT");
+                blocked.put("applyPath", "/apply?type=perm&privilege=SELECT");
                 blocked.put("message", msg);
                 return blocked;
             }
@@ -527,10 +588,44 @@ public class CpQueryServiceImpl implements CpQueryService {
     }
 
     @Override
+    public Map<String, Object> querySurface() {
+        return queryCatalogService.surfaceSnapshot();
+    }
+
+    @Override
+    public List<Map<String, Object>> listCatalogMaps(String ws) {
+        return queryCatalogService.listMaps(ws);
+    }
+
+    @Override
+    public Map<String, Object> upsertCatalogMap(Map<String, Object> body) {
+        if (body == null) {
+            throw new CommonException("body 不能为空");
+        }
+        Object en = body.get("enabled");
+        Boolean enabled = null;
+        if (en != null) {
+            enabled = Boolean.TRUE.equals(en)
+                    || "1".equals(String.valueOf(en))
+                    || "true".equalsIgnoreCase(String.valueOf(en));
+        }
+        return queryCatalogService.upsertMap(
+                str(body.get("ws")),
+                str(body.get("gravCatalog")),
+                str(body.get("trinoCatalog")),
+                str(body.get("kind")),
+                enabled,
+                body.get("remark") == null ? null : String.valueOf(body.get("remark")));
+    }
+
+    @Override
     public Map<String, Object> govOverview() {
         Map<String, Object> out = new LinkedHashMap<>();
+        out.put("querySurface", queryCatalogService.surfaceSnapshot());
         // 规则：与即席同源
         List<Map<String, Object>> rules = new ArrayList<>();
+        rules.add(rule("R0", "查询面 catalog", "BLOCK",
+                "SQL catalog 须 ∈ lh.trino.query-catalogs ∩ SHOW CATALOGS；禁止 ds_* 登记名直查"));
         rules.add(rule("R1", "禁写语句", "BLOCK", "INSERT/UPDATE/DELETE/DDL 等写操作禁止"));
         rules.add(rule("R2", "全表扫描防护", "BLOCK", "FROM 无 WHERE 且无 LIMIT"));
         rules.add(rule("R3", "ODS 分区", "BLOCK", "ods_* 缺 dt/partition 且无 LIMIT"));
@@ -637,6 +732,9 @@ public class CpQueryServiceImpl implements CpQueryService {
         if (msg == null) {
             return false;
         }
+        if (isImpersonationDenied(msg)) {
+            return false;
+        }
         String m = msg.toLowerCase(Locale.ROOT);
         return m.contains("access denied")
                 || m.contains("permission denied")
@@ -645,6 +743,14 @@ public class CpQueryServiceImpl implements CpQueryService {
                 || m.contains("无权")
                 || m.contains("未授权")
                 || m.contains("forbidden");
+    }
+
+    private static boolean isImpersonationDenied(String msg) {
+        if (msg == null) {
+            return false;
+        }
+        String m = msg.toLowerCase(Locale.ROOT);
+        return m.contains("cannot impersonate") || m.contains("impersonat");
     }
 
     private UserSnap currentUser() {

@@ -17,6 +17,12 @@ public final class CpQueryScanGuard {
     public static final long ADHOC_DEFAULT_SCAN_BYTES = 10L * 1024 * 1024 * 1024;
     /** 平台硬顶：50 GiB */
     public static final long PLATFORM_HARD_SCAN_BYTES = 50L * 1024 * 1024 * 1024;
+    /** Trino session 名；类型为 DataSize（见 io.airlift.units.DataSize） */
+    public static final String QUERY_MAX_SCAN_PHYSICAL_BYTES = "query_max_scan_physical_bytes";
+    private static final long KIB = 1024L;
+    private static final long MIB = KIB * 1024;
+    private static final long GIB = MIB * 1024;
+    private static final long TIB = GIB * 1024;
 
     private static final Pattern FROM = Pattern.compile("\\bfrom\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern WHERE = Pattern.compile("\\bwhere\\b", Pattern.CASE_INSENSITIVE);
@@ -73,6 +79,61 @@ public final class CpQueryScanGuard {
 
     public static boolean isScanDanger(Long scanBytes, boolean elevated) {
         return scanOverLimitReason(scanBytes, elevated) != null;
+    }
+
+    /**
+     * Trino 455 DataSize session 值。airlift {@code DataSize.valueOf} 要求带单位
+     *（B / kB / MB / GB / TB / PB，1024 进制），拒绝裸字节整数如 {@code 10737418240}。
+     */
+    public static String toTrinoDataSize(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("scan bytes must be >= 0");
+        }
+        if (bytes == 0) {
+            return "0B";
+        }
+        if (bytes % TIB == 0) {
+            return (bytes / TIB) + "TB";
+        }
+        if (bytes % GIB == 0) {
+            return (bytes / GIB) + "GB";
+        }
+        if (bytes % MIB == 0) {
+            return (bytes / MIB) + "MB";
+        }
+        if (bytes % KIB == 0) {
+            return (bytes / KIB) + "kB";
+        }
+        return bytes + "B";
+    }
+
+    /** session 属性解码失败（值格式非法），不是扫描超限。 */
+    public static boolean isInvalidSessionProperty(String msg) {
+        if (StrUtil.isBlank(msg)) {
+            return false;
+        }
+        String m = msg.toLowerCase(Locale.ROOT);
+        return m.contains("is invalid")
+                || m.contains("invalid session property")
+                || m.contains("invalid_session_property");
+    }
+
+    /**
+     * 引擎/客户端真正因扫描量超限失败。不含「property is invalid」误报。
+     */
+    public static boolean isEngineScanLimitExceeded(String msg) {
+        if (StrUtil.isBlank(msg) || isInvalidSessionProperty(msg)) {
+            return false;
+        }
+        String m = msg.toLowerCase(Locale.ROOT);
+        if (m.contains("扫描量超过")) {
+            return true;
+        }
+        if (m.contains("exceeded_scan_limit")) {
+            return true;
+        }
+        return m.contains("exceeded") && m.contains("scan")
+                && (m.contains("physical") || m.contains("limit"));
     }
 
     public static Map<String, Object> blockedPayload(String reason) {

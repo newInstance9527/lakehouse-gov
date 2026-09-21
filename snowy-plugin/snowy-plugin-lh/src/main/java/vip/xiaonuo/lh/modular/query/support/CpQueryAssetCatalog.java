@@ -31,14 +31,13 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 即席目录：只读门户资产。引擎坐标仅用于 sampleSql 与列快照回源，不出现在节点上。
+ * 即席目录：门户资产 + 查询面过滤。树节点 name / sampleSql 使用 Trino 查询 FQN，不是 Grav 登记名。
  */
 @Slf4j
 @Component
 public class CpQueryAssetCatalog {
 
     private static final String NOT_DELETE = "NOT_DELETE";
-    private static final List<String> LAYER_ORDER = List.of("ods", "dwd", "dws", "ads", "dim");
     private static final List<String> VISIBLE_STATUS = List.of("active", "syncing", "degraded");
     private static final Pattern MASK_HINT = Pattern.compile(
             "(mobile|phone|id_card|idcard|email|password|secret|token)", Pattern.CASE_INSENSITIVE);
@@ -53,6 +52,8 @@ public class CpQueryAssetCatalog {
     private SecAuthGrantService secAuthGrantService;
     @Resource
     private GravitinoClient gravitinoClient;
+    @Resource
+    private CpTrinoQueryCatalogService queryCatalogService;
 
     public List<Map<String, Object>> schemaTree(String ws) {
         String workspace = StrUtil.blankToDefault(StrUtil.trim(ws), "default");
@@ -65,39 +66,69 @@ public class CpQueryAssetCatalog {
                 .and(w -> w.eq(GovAsset::getAssetKind, "table")
                         .or().isNull(GovAsset::getAssetKind)
                         .or().eq(GovAsset::getAssetKind, ""))
-                .orderByAsc(GovAsset::getLayer)
-                .orderByAsc(GovAsset::getDomainCode)
                 .orderByAsc(GovAsset::getName));
-        assets.sort((a, b) -> {
-            int c = Integer.compare(layerRank(a.getLayer()), layerRank(b.getLayer()));
-            if (c != 0) {
-                return c;
-            }
-            c = StrUtil.blankToDefault(a.getDomainCode(), "").compareToIgnoreCase(
-                    StrUtil.blankToDefault(b.getDomainCode(), ""));
-            if (c != 0) {
-                return c;
-            }
-            return displayName(a).compareToIgnoreCase(displayName(b));
-        });
         Map<String, CbGravAssetRef> refs = loadRefs(assets);
-        List<Map<String, Object>> tree = new ArrayList<>();
-        Map<String, Object> dbNode = null;
-        String dbKey = null;
+        boolean showUnrunnable = queryCatalogService.showUnrunnableInTree();
+
+        List<TreeRow> rows = new ArrayList<>();
         for (GovAsset asset : assets) {
-            String layer = StrUtil.blankToDefault(asset.getLayer(), "other").trim().toLowerCase(Locale.ROOT);
-            String domain = StrUtil.blankToDefault(asset.getDomainCode(), "default").trim();
-            String key = layer + "\n" + domain.toLowerCase(Locale.ROOT);
-            if (!key.equals(dbKey)) {
-                dbNode = newDatabase(layer, domain, tree.isEmpty());
-                tree.add(dbNode);
-                dbKey = key;
+            boolean allowed = SecAuthGrantServiceImpl.isAssetOwner(asset, user)
+                    || granted.contains(asset.getId());
+            if (!allowed) {
+                continue;
             }
             CbGravAssetRef ref = StrUtil.isBlank(asset.getGravAssetId()) ? null : refs.get(asset.getGravAssetId());
-            boolean locked = !SecAuthGrantServiceImpl.isAssetOwner(asset, user) && !granted.contains(asset.getId());
-            boolean runnable = runnable(ref);
-            children(dbNode).add(newTable(asset, layer, domain, locked, runnable, ref));
-            dbNode.put("tableCount", children(dbNode).size());
+            if (!attached(ref)) {
+                continue;
+            }
+            CpTrinoQueryCatalogService.QueryFqn qf = queryCatalogService.resolveQueryFqn(asset, ref);
+            boolean runnable = qf != null;
+            if (!runnable && !showUnrunnable) {
+                continue;
+            }
+            rows.add(new TreeRow(asset, ref, qf, runnable));
+        }
+        rows.sort((a, b) -> {
+            String ca = a.qf != null ? a.qf.catalog : StrUtil.blankToDefault(a.ref.getGravCatalog(), "");
+            String cb = b.qf != null ? b.qf.catalog : StrUtil.blankToDefault(b.ref.getGravCatalog(), "");
+            int c = ca.compareToIgnoreCase(cb);
+            if (c != 0) {
+                return c;
+            }
+            String sa = a.qf != null ? a.qf.schema : StrUtil.blankToDefault(a.ref.getGravSchema(), "");
+            String sb = b.qf != null ? b.qf.schema : StrUtil.blankToDefault(b.ref.getGravSchema(), "");
+            c = sa.compareToIgnoreCase(sb);
+            if (c != 0) {
+                return c;
+            }
+            String ta = a.qf != null ? a.qf.table : StrUtil.blankToDefault(a.ref.getGravTable(), displayName(a.asset));
+            String tb = b.qf != null ? b.qf.table : StrUtil.blankToDefault(b.ref.getGravTable(), displayName(b.asset));
+            return ta.compareToIgnoreCase(tb);
+        });
+
+        List<Map<String, Object>> tree = new ArrayList<>();
+        Map<String, Object> dsNode = null;
+        Map<String, Object> schNode = null;
+        String dsKey = null;
+        String schKey = null;
+        for (TreeRow row : rows) {
+            String catalog = row.qf != null ? row.qf.catalog : row.ref.getGravCatalog().trim();
+            String schema = row.qf != null ? row.qf.schema : row.ref.getGravSchema().trim();
+            if (!catalog.equalsIgnoreCase(dsKey)) {
+                dsNode = newDatasource(catalog, row.asset.getEngine(), tree.isEmpty(), row.runnable);
+                tree.add(dsNode);
+                dsKey = catalog;
+                schKey = null;
+                schNode = null;
+            }
+            if (!schema.equalsIgnoreCase(schKey)) {
+                schNode = newSchema(catalog, schema);
+                children(dsNode).add(schNode);
+                schKey = schema;
+            }
+            children(schNode).add(newTable(row));
+            schNode.put("tableCount", children(schNode).size());
+            dsNode.put("tableCount", countTables(dsNode));
         }
         return tree;
     }
@@ -110,7 +141,7 @@ public class CpQueryAssetCatalog {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("assetId", asset.getId());
         out.put("assetCode", asset.getAssetCode());
-        out.put("fqn", platformFqn(asset));
+        out.put("platformFqn", platformFqn(asset));
         String layer = StrUtil.blankToDefault(asset.getLayer(), "");
         if (StrUtil.isNotBlank(layer)) {
             out.put("layer", layer.toUpperCase(Locale.ROOT));
@@ -119,6 +150,7 @@ public class CpQueryAssetCatalog {
             out.put("locked", true);
             out.put("source", "platform");
             out.put("columns", List.of());
+            out.put("runnable", false);
             out.put("message", "无查看权");
             return out;
         }
@@ -131,6 +163,19 @@ public class CpQueryAssetCatalog {
             out.put("message", "未挂接查询引擎");
             return out;
         }
+        out.put("gravFqn", gravFqn(ref));
+        CpTrinoQueryCatalogService.QueryFqn qf = queryCatalogService.resolveQueryFqn(asset, ref);
+        boolean runnable = qf != null;
+        out.put("runnable", runnable);
+        if (qf != null) {
+            out.put("fqn", qf.fqn());
+            out.put("queryFqn", qf.fqn());
+            out.put("queryCatalog", qf.catalog);
+        } else {
+            out.put("fqn", gravFqn(ref));
+            out.put("message", "已登记但未进入即席查询面（登记 catalog="
+                    + ref.getGravCatalog() + "；须映射到 Trino 实况 ∩ 白名单）");
+        }
         boolean drift = ref.getDriftFlag() != null && ref.getDriftFlag() == 1;
         List<Map<String, Object>> cols = parseColumns(ref.getColumnsJson());
         if (drift || cols.isEmpty()) {
@@ -138,7 +183,6 @@ public class CpQueryAssetCatalog {
         }
         out.put("source", "platform");
         out.put("columns", cols);
-        out.put("runnable", true);
         if (StrUtil.isNotBlank(ref.getRemark())) {
             out.put("comment", ref.getRemark());
         }
@@ -193,17 +237,37 @@ public class CpQueryAssetCatalog {
         if (byPlatform != null) {
             return byPlatform;
         }
-        CbGravAssetRef ref = gravAssetRefMapper.selectOne(new QueryWrapper<CbGravAssetRef>().lambda()
-                .eq(CbGravAssetRef::getGravCatalog, parts[0].trim())
-                .eq(CbGravAssetRef::getGravSchema, parts[1].trim())
-                .eq(CbGravAssetRef::getGravTable, parts[2].trim())
-                .eq(CbGravAssetRef::getDeleteFlag, NOT_DELETE)
-                .last("limit 1"));
-        if (ref == null) {
+        String catHint = parts[0].trim();
+        String schema = parts[1].trim();
+        String table = parts[2].trim();
+        List<CbGravAssetRef> candidates = gravAssetRefMapper.selectList(new QueryWrapper<CbGravAssetRef>().lambda()
+                .eq(CbGravAssetRef::getGravSchema, schema)
+                .eq(CbGravAssetRef::getGravTable, table)
+                .eq(CbGravAssetRef::getDeleteFlag, NOT_DELETE));
+        CbGravAssetRef chosen = null;
+        for (CbGravAssetRef c : candidates) {
+            if (catHint.equalsIgnoreCase(c.getGravCatalog())) {
+                chosen = c;
+                break;
+            }
+        }
+        if (chosen == null) {
+            for (CbGravAssetRef c : candidates) {
+                String mapped = queryCatalogService.resolveQueryCatalog(c.getGravCatalog(), null, "default");
+                if (StrUtil.equalsIgnoreCase(catHint, mapped)) {
+                    chosen = c;
+                    break;
+                }
+            }
+        }
+        if (chosen == null && !candidates.isEmpty()) {
+            chosen = candidates.get(0);
+        }
+        if (chosen == null) {
             return null;
         }
         return assetMapper.selectOne(new QueryWrapper<GovAsset>().lambda()
-                .eq(GovAsset::getGravAssetId, ref.getId())
+                .eq(GovAsset::getGravAssetId, chosen.getId())
                 .eq(GovAsset::getDeleteFlag, NOT_DELETE)
                 .last("limit 1"));
     }
@@ -249,64 +313,91 @@ public class CpQueryAssetCatalog {
         return refs;
     }
 
-    /** 库 = 分层 + 业务域，例如 ods_trade。下面直接挂表。 */
-    private static Map<String, Object> newDatabase(String layer, String domain, boolean open) {
+    private static Map<String, Object> newDatasource(String catalog, String engine, boolean open, boolean runnableHint) {
         Map<String, Object> node = new LinkedHashMap<>();
-        String name = databaseName(layer, domain);
-        node.put("id", "db:" + name);
-        node.put("type", "database");
-        node.put("name", name);
-        node.put("layer", layer.toUpperCase(Locale.ROOT));
+        node.put("id", "ds:" + catalog);
+        node.put("type", "datasource");
+        node.put("name", catalog);
+        node.put("engine", StrUtil.blankToDefault(engine, inferEngine(catalog)));
         node.put("open", open);
+        node.put("locked", false);
+        node.put("runnable", runnableHint);
+        node.put("children", new ArrayList<Map<String, Object>>());
+        node.put("tableCount", 0);
+        return node;
+    }
+
+    private static Map<String, Object> newSchema(String catalog, String schema) {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("id", catalog + "." + schema);
+        node.put("type", "schema");
+        node.put("name", schema);
+        node.put("open", false);
         node.put("locked", false);
         node.put("children", new ArrayList<Map<String, Object>>());
         node.put("tableCount", 0);
         return node;
     }
 
-    private static String databaseName(String layer, String domain) {
-        String l = layer.toLowerCase(Locale.ROOT);
-        String d = domain.toLowerCase(Locale.ROOT);
-        if (d.equals(l) || d.startsWith(l + "_")) {
-            return d;
-        }
-        return l + "_" + d;
-    }
-
-    private static Map<String, Object> newTable(GovAsset asset, String layer, String domain,
-                                                boolean locked, boolean runnable, CbGravAssetRef ref) {
+    private static Map<String, Object> newTable(TreeRow row) {
         Map<String, Object> node = new LinkedHashMap<>();
-        String shown = displayName(asset);
-        node.put("id", asset.getId());
+        String shown = row.qf != null
+                ? row.qf.table
+                : StrUtil.blankToDefault(row.ref.getGravTable(), displayName(row.asset));
+        node.put("id", row.asset.getId());
         node.put("type", "table");
         node.put("name", shown);
-        node.put("assetId", asset.getId());
-        node.put("assetCode", asset.getAssetCode());
-        node.put("fqn", platformFqn(asset));
-        node.put("layer", layer.toUpperCase(Locale.ROOT));
-        node.put("locked", locked);
-        node.put("runnable", runnable);
-        node.put("columnsLazy", !locked && runnable);
-        if (asset.getIsGold() != null && asset.getIsGold() == 1) {
+        node.put("assetId", row.asset.getId());
+        node.put("assetCode", row.asset.getAssetCode());
+        node.put("gravFqn", gravFqn(row.ref));
+        node.put("locked", false);
+        node.put("runnable", row.runnable);
+        node.put("columnsLazy", true);
+        if (row.asset.getIsGold() != null && row.asset.getIsGold() == 1) {
             node.put("star", true);
         }
-        if (StrUtil.isNotBlank(asset.getAssetCode()) && !asset.getAssetCode().equals(shown)) {
-            node.put("hint", asset.getAssetCode());
+        String label = displayName(row.asset);
+        if (StrUtil.isNotBlank(label) && !label.equalsIgnoreCase(shown)) {
+            node.put("hint", label);
         }
-        if (!locked && runnable && ref != null) {
-            node.put("sampleSql", sampleSql(ref, layer));
+        if (row.qf != null) {
+            node.put("fqn", row.qf.fqn());
+            node.put("queryFqn", row.qf.fqn());
+            node.put("sampleSql", row.qf.sampleSql());
+        } else {
+            node.put("fqn", gravFqn(row.ref));
+            node.put("message", "未进入即席查询面");
         }
         return node;
     }
 
-    private static String sampleSql(CbGravAssetRef ref, String layer) {
-        String fqn = quoteIdent(ref.getGravCatalog()) + "."
-                + quoteIdent(ref.getGravSchema()) + "."
-                + quoteIdent(ref.getGravTable());
-        if (layer != null && layer.toLowerCase(Locale.ROOT).startsWith("ods")) {
-            return "SELECT *\nFROM " + fqn + "\nWHERE dt >= date_add('day', -7, current_date)\nLIMIT 100;";
+    private static String gravFqn(CbGravAssetRef ref) {
+        return ref.getGravCatalog() + "." + ref.getGravSchema() + "." + ref.getGravTable();
+    }
+
+    private static int countTables(Map<String, Object> dsNode) {
+        int n = 0;
+        for (Map<String, Object> sch : children(dsNode)) {
+            n += children(sch).size();
         }
-        return "SELECT *\nFROM " + fqn + "\nLIMIT 100;";
+        return n;
+    }
+
+    private static String inferEngine(String catalog) {
+        String c = catalog == null ? "" : catalog.toLowerCase(Locale.ROOT);
+        if (c.contains("clickhouse") || c.startsWith("ck")) {
+            return "ClickHouse";
+        }
+        if (c.contains("mysql")) {
+            return "MySQL";
+        }
+        if (c.contains("hive")) {
+            return "Hive";
+        }
+        if (c.contains("iceberg") || c.contains("lake")) {
+            return "Iceberg";
+        }
+        return "Trino";
     }
 
     private CbGravAssetRef resolveRef(GovAsset asset) {
@@ -314,10 +405,10 @@ public class CpQueryAssetCatalog {
             return null;
         }
         CbGravAssetRef ref = gravAssetRefMapper.selectById(asset.getGravAssetId());
-        return runnable(ref) ? ref : null;
+        return attached(ref) ? ref : null;
     }
 
-    private static boolean runnable(CbGravAssetRef ref) {
+    private static boolean attached(CbGravAssetRef ref) {
         if (ref == null) {
             return false;
         }
@@ -344,12 +435,6 @@ public class CpQueryAssetCatalog {
             return asset.getName().trim();
         }
         return StrUtil.blankToDefault(asset.getAssetCode(), asset.getId());
-    }
-
-    private static int layerRank(String layer) {
-        String key = StrUtil.blankToDefault(layer, "").trim().toLowerCase(Locale.ROOT);
-        int i = LAYER_ORDER.indexOf(key);
-        return i < 0 ? LAYER_ORDER.size() : i;
     }
 
     @SuppressWarnings("unchecked")
@@ -414,13 +499,17 @@ public class CpQueryAssetCatalog {
         return m;
     }
 
-    private static String quoteIdent(String id) {
-        if (id == null) {
-            return "\"\"";
+    private static final class TreeRow {
+        final GovAsset asset;
+        final CbGravAssetRef ref;
+        final CpTrinoQueryCatalogService.QueryFqn qf;
+        final boolean runnable;
+
+        TreeRow(GovAsset asset, CbGravAssetRef ref, CpTrinoQueryCatalogService.QueryFqn qf, boolean runnable) {
+            this.asset = asset;
+            this.ref = ref;
+            this.qf = qf;
+            this.runnable = runnable;
         }
-        if (id.matches("[A-Za-z_][A-Za-z0-9_]*")) {
-            return id;
-        }
-        return "\"" + id.replace("\"", "\"\"") + "\"";
     }
 }
