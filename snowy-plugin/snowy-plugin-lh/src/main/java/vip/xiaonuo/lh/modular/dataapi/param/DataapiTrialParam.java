@@ -13,6 +13,12 @@ public class DataapiTrialParam {
     private String sql;
     private String method;
     private List<Map<String, Object>> params;
+    /** SQLREST 数据源 id（已知时） */
     private Long datasourceId;
+    /** 门户数据源 id；优先投影解析为 SQLREST datasourceId */
+    private String portalDsId;
+    private String dsId;
+    /** SQL / GROOVY */
+    private String engine = "SQL";
     private String ws;
 }

@@ -239,7 +239,17 @@ public class SqlrestClient {
     public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
                                             String sql, List<Map<String, Object>> params,
                                             Long existingId, String contentType, Long datasourceId) {
+        return buildSaveBody(name, description, method, publicPath, sql, params, existingId, contentType, datasourceId, "SQL");
+    }
+
+    public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
+                                            String sqlOrScript, List<Map<String, Object>> params,
+                                            Long existingId, String contentType, Long datasourceId, String engine) {
         LhProperties.Sqlrest cfg = lhProperties.getSqlrest();
+        String eng = StrUtil.blankToDefault(engine, "SQL").trim().toUpperCase();
+        if (!"GROOVY".equals(eng)) {
+            eng = "SQL";
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         if (existingId != null) {
             body.put("id", existingId);
@@ -259,13 +269,14 @@ public class SqlrestClient {
         body.put("flowCount", 5);
         body.put("cacheKeyType", "NONE");
         body.put("cacheExpireSeconds", 0);
-        body.put("engine", "SQL");
+        body.put("engine", eng);
         body.put("namingStrategy", "CAMEL_CASE");
         body.put("formatMap", List.of(Map.of(
                 "key", "USE_SYSTEM_RESPONSE_FORMAT",
                 "value", "true",
                 "remark", "Response format")));
-        body.put("contextList", List.of(toSqlrestSql(sql)));
+        String ctx = "GROOVY".equals(eng) ? StrUtil.nullToDefault(sqlOrScript, "") : toSqlrestSql(sqlOrScript);
+        body.put("contextList", List.of(ctx));
         body.put("params", params != null ? params : List.of());
         body.put("outputs", List.of());
         return body;
@@ -275,7 +286,7 @@ public class SqlrestClient {
     public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
                                             String sql, List<Map<String, Object>> params,
                                             Long existingId, String contentType) {
-        return buildSaveBody(name, description, method, publicPath, sql, params, existingId, contentType, null);
+        return buildSaveBody(name, description, method, publicPath, sql, params, existingId, contentType, null, "SQL");
     }
 
     public List<Map<String, Object>> toSqlrestParams(List<Map<String, Object>> portalParams, String method) {

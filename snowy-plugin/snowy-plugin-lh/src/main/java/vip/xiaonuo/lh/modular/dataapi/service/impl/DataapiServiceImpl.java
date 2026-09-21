@@ -159,7 +159,7 @@ public class DataapiServiceImpl implements DataapiService {
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> build(DataapiBindingParam param) {
         if (StrUtil.isBlank(param.getSql()) && StrUtil.isBlank(param.getSqlrestApiId()) && StrUtil.isBlank(param.getId())) {
-            throw new CommonException("请提供 SQL 或已有 sqlrestApiId");
+            throw new CommonException("请提供 SQL/Groovy 脚本，或已有 sqlrestApiId");
         }
         DataapiApiBinding binding;
         if (StrUtil.isNotBlank(param.getId())) {
@@ -191,7 +191,12 @@ public class DataapiServiceImpl implements DataapiService {
             }
         }
         if (StrUtil.isBlank(sql)) {
-            throw new CommonException("简易草稿需要 SQL；Groovy / 复杂逻辑请在 SQLREST Manager 构建");
+            throw new CommonException("构建需要 SQL 或 Groovy 脚本正文（经 SQLREST Manager API 写入）");
+        }
+
+        String engine = StrUtil.blankToDefault(param.getEngine(), "SQL").trim().toUpperCase();
+        if (!"GROOVY".equals(engine)) {
+            engine = "SQL";
         }
 
         Long srDsId = resolveSqlrestDatasourceId(param, binding);
@@ -205,7 +210,8 @@ public class DataapiServiceImpl implements DataapiService {
                 srParams,
                 sqlrestId,
                 binding.getContentType(),
-                srDsId);
+                srDsId,
+                engine);
 
         Map<String, Object> srResp = sqlrestId == null
                 ? sqlrestClient.createAssignment(body)
@@ -250,7 +256,27 @@ public class DataapiServiceImpl implements DataapiService {
     public Map<String, Object> trial(DataapiTrialParam param) {
         String sql = param.getSql();
         List<Map<String, Object>> portalParams = param.getParams();
-        Long dsId = param.getDatasourceId() != null ? param.getDatasourceId() : sqlrestClient.defaultDatasourceId();
+        Long dsId = param.getDatasourceId();
+        String portalDsId = StrUtil.blankToDefault(param.getPortalDsId(), param.getDsId());
+        if (StrUtil.isNotBlank(portalDsId)) {
+            Long resolved = sqlrestProjector.resolveSqlrestDatasourceId(portalDsId);
+            if (resolved == null) {
+                LhDatasourceIdParam idp = new LhDatasourceIdParam();
+                idp.setId(portalDsId);
+                datasourceService.projectToSqlrest(List.of(idp));
+                resolved = sqlrestProjector.resolveSqlrestDatasourceId(portalDsId);
+            }
+            if (resolved != null) {
+                dsId = resolved;
+            }
+        }
+        if (dsId == null) {
+            dsId = sqlrestClient.defaultDatasourceId();
+        }
+        String engine = StrUtil.blankToDefault(param.getEngine(), "SQL").trim().toUpperCase();
+        if (!"GROOVY".equals(engine)) {
+            engine = "SQL";
+        }
 
         if (StrUtil.isNotBlank(param.getId())) {
             DataapiApiBinding b = requireBinding(param.getId());
@@ -265,14 +291,14 @@ public class DataapiServiceImpl implements DataapiService {
             }
         }
         if (StrUtil.isBlank(sql)) {
-            throw new CommonException("试跑需要 SQL");
+            throw new CommonException("试跑需要 SQL 或 Groovy 脚本");
         }
         Map<String, Object> req = new LinkedHashMap<>();
         req.put("dataSourceId", dsId);
-        req.put("engine", "SQL");
+        req.put("engine", engine);
         req.put("namingStrategy", "CAMEL_CASE");
         req.put("formatMap", List.of());
-        req.put("contextList", List.of(SqlrestClient.toSqlrestSql(sql)));
+        req.put("contextList", List.of("GROOVY".equals(engine) ? sql : SqlrestClient.toSqlrestSql(sql)));
         req.put("paramValues", sqlrestClient.toDebugParamValues(portalParams));
         return enrichTrial(sqlrestClient.debug(req));
     }
@@ -531,10 +557,7 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("assignments", sqlrestClient.listAssignments("", 1, 50));
         m.put("clients", sqlrestClient.listClients());
         m.put("authGroups", sqlrestClient.listAuthGroups());
-        m.put("hint", "SQL / Groovy 构建、认证、流量控制请在 SQLREST Manager 完成；"
-                + ("gateway".equals(sqlrestClient.edgeMode())
-                ? "对外边缘默认 SQLREST Gateway，APISIX 可选"
-                : "当前边缘模式=" + sqlrestClient.edgeMode()));
+        m.put("hint", "构建经 SQLREST Manager API（create/debug/publish/deploy）；默认边缘 SQLREST Gateway");
         return m;
     }
 
@@ -651,7 +674,7 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("ok", true);
         m.put("binding", toPortalCard(b, true));
         m.put("engine", data.getStr("engine"));
-        m.put("hint", "SQL/Groovy 继续在 Manager 编辑；此处只做绑定与 APISIX 发布");
+        m.put("hint", "SQL/Groovy 由门户经 SQLREST Manager API 构建；此处登记绑定与边缘发布");
         return m;
     }
 

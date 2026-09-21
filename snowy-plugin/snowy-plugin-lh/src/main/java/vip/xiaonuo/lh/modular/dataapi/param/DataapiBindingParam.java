@@ -43,4 +43,6 @@ public class DataapiBindingParam {
     private String responseFormat;
     private String responseShape;
     private String description;
+    /** SQL 或 GROOVY；写入 SQLREST assignment.engine */
+    private String engine = "SQL";
 }
