@@ -19,6 +19,8 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.param.*;
 import vip.xiaonuo.lh.modular.datasource.result.LhDatasourceVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhDsTableVo;
+import vip.xiaonuo.lh.modular.datasource.result.LhMetaColumnVo;
+import vip.xiaonuo.lh.modular.datasource.result.LhMetaObjectVo;
 
 import java.util.List;
 import java.util.Map;
@@ -45,6 +47,18 @@ public interface LhDatasourceService extends IService<LhDatasource> {
     Map<String, Object> test(LhDatasourceTestParam param);
 
     Map<String, Object> previewSchema(LhDatasourceIdParam param);
+
+    /** JDBC 分层元数据：schema 列表（非 JDBC 返回空列表，不抛错） */
+    List<String> listMetaSchemas(LhDatasourceMetaParam param);
+
+    /** JDBC 表列表（objectKind=TABLE）；非 JDBC 空列表 */
+    List<LhMetaObjectVo> listMetaTables(LhDatasourceMetaParam param);
+
+    /** JDBC 视图列表（objectKind=VIEW）；非 JDBC 空列表 */
+    List<LhMetaObjectVo> listMetaViews(LhDatasourceMetaParam param);
+
+    /** JDBC 列列表（name/type/remarks）；非 JDBC 空列表 */
+    List<LhMetaColumnVo> listMetaColumns(LhDatasourceMetaParam param);
 
     void updatePurposes(LhDatasourcePurposesParam param);
 

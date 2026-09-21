@@ -40,6 +40,7 @@ public class LhProperties {
     private Datax datax = new Datax();
     private Clickhouse clickhouse = new Clickhouse();
     private Sqlrest sqlrest = new Sqlrest();
+    private Dataapi dataapi = new Dataapi();
     private Apisix apisix = new Apisix();
     private Superset superset = new Superset();
     private Minio minio = new Minio();
@@ -49,6 +50,9 @@ public class LhProperties {
     private SchemaSync schemaSync = new SchemaSync();
     private Etl etl = new Etl();
     private Catalog catalog = new Catalog();
+    private Ai ai = new Ai();
+    private Lifecycle lifecycle = new Lifecycle();
+    private Compute compute = new Compute();
 
     @Getter
     @Setter
@@ -61,11 +65,18 @@ public class LhProperties {
     @Setter
     public static class Trino {
         private String url;
+        /** Trino Web UI 基址；空则同 url（去路径） */
+        private String uiUrl;
         private String vaultPath = LhVaultPaths.TRINO;
         /** bootstrap only */
         private String user;
         private String password;
         private boolean insecureSsl = true;
+        /**
+         * true：人查用 X-Trino-User 代执行已映射主体（Trino 须允许服务账号 impersonate）。
+         * false：人查直接拒绝，不会改用服务账号。
+         */
+        private boolean impersonate = true;
     }
 
     @Getter
@@ -170,6 +181,18 @@ public class LhProperties {
 
     @Getter
     @Setter
+    public static class Dataapi {
+        /**
+         * 发布是否强制已审批的 api_publish 单号。
+         * false=联调可直接 publish；true=须携带已通过的 API-xxx。
+         */
+        private boolean requirePublishTicket = false;
+        /** Gateway 联调探针超时毫秒 */
+        private int gatewayProbeTimeoutMs = 8000;
+    }
+
+    @Getter
+    @Setter
     public static class Apisix {
         private String adminUrl;
         private String vaultPath = LhVaultPaths.APISIX;
@@ -258,6 +281,47 @@ public class LhProperties {
         private boolean localTrialFallback = true;
     }
 
+    @Getter
+    @Setter
+    public static class Compute {
+        /** 每工作空间一个本地 Git 工作区，脚本正文只写这里 */
+        private String gitRoot = "./data/lh-git";
+    }
+
+    /**
+     * 生命周期 Iceberg Procedure → DS 接线
+     * @see doc/生命周期.md
+     */
+    @Getter
+    @Setter
+    public static class Lifecycle {
+        /**
+         * Spark 中 Iceberg catalog 名（CALL {catalog}.system.*）。
+         * 空则回退 {@code lh.gravitino.catalog}，再回退 {@code iceberg}。
+         */
+        private String sparkCatalog = "";
+        /** 流程名前缀（sanitize 后写入 DS） */
+        private String workflowPrefix = "lh_lc";
+        /** 单表动作超时（分钟） */
+        private int timeoutMinutes = 60;
+        /** 日作业超时（分钟） */
+        private int dailyTimeoutMinutes = 180;
+        /** L1 表日作业是否跳过 rewrite（假定 Flink auto-compaction） */
+        private boolean skipL1RewriteInDaily = true;
+        /** DS 不可达时是否仍登记 run（degraded），默认 true */
+        private boolean allowDegraded = true;
+        /** 日作业 DS 流程名（默认空间不加后缀） */
+        private String dailyWorkflowName = "job.iceberg.lifecycle";
+        /** 存储画像 DS 流程名 */
+        private String profileWorkflowName = "job.storage.profile_daily";
+        /** 作业身份标签。Trino 仍走服务账号的 JOB 身份，禁止代执行门户用户。 */
+        private String jobPrincipal = "job.lifecycle";
+        /** 为 true 时每天跑画像日批；默认关，手动走 POST /lh/lifecycle/storage/collect/rerun */
+        private boolean profileDailyEnabled = false;
+        private int profileTableTimeoutMs = 60_000;
+        private int profileMaxTables = 200;
+    }
+
     /**
      * 资产目录行为
      */
@@ -269,5 +333,37 @@ public class LhProperties {
          * false=注册时必须先同步表清单。
          */
         private boolean allowManualObjectName = false;
+    }
+
+    /**
+     * AI 平台能力（LiteLLM 网关 + Milvus 向量；未启用则启发式 / 关键词）
+     * @see doc/AI模型管理.md · doc/知识库.md
+     */
+    @Getter
+    @Setter
+    public static class Ai {
+        /** 是否启用真实 LLM 调用 */
+        private boolean enabled = false;
+        /** LiteLLM Proxy 根，如 http://litellm:4000 */
+        private String litellmUrl = "";
+        /** LiteLLM master key（可选） */
+        private String litellmMasterKey = "";
+        /** 默认 chat 模型别名（空则走路由表） */
+        private String defaultChatModel = "";
+        /** 默认 embedding 模型别名 */
+        private String defaultEmbedModel = "";
+        /**
+         * 向量库唯一选型：<b>Milvus</b>。未启用或不可达时知识检索降级为 MySQL 关键词。
+         */
+        private boolean milvusEnabled = false;
+        /** 例：http://milvus:19530 */
+        private String milvusUri = "";
+        private String milvusToken = "";
+        private String milvusDatabase = "default";
+        private String milvusCollection = "lh_kb_chunk";
+        /** Embedding 维度：openai text-embedding-3-small=1536；bge-m3=1024 */
+        private int embedDim = 1536;
+        /** 混合检索：向量权重 0~1，其余为关键词 */
+        private double vectorWeight = 0.7;
     }
 }

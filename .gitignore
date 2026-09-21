@@ -10,7 +10,7 @@ target/
 .settings/
 .classpath
 .project
-logs/
+data/lh-git/
 
 # idea
 .idea/

@@ -43,6 +43,7 @@ import vip.xiaonuo.lh.modular.catalog.param.GovAssetPageParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetPreviewParam;
 import vip.xiaonuo.lh.modular.catalog.preview.GovAssetPreviewContext;
 import vip.xiaonuo.lh.modular.catalog.preview.GovAssetPreviewRouter;
+import vip.xiaonuo.lh.modular.catalog.preview.PreviewAdapterSupport;
 import vip.xiaonuo.lh.modular.catalog.result.GovAssetSourceVo;
 import vip.xiaonuo.lh.modular.catalog.result.GovAssetVo;
 import vip.xiaonuo.lh.modular.catalog.service.GovAssetService;
@@ -103,6 +104,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     private OpenMetadataClient openMetadataClient;
     @Resource
     private vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService secAuthGrantService;
+    @Resource
+    private vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService trinoPrincipalService;
     @Resource
     private LhProperties lhProperties;
     @Resource
@@ -602,16 +605,6 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         base.put("assetId", asset.getId());
         base.put("assetCode", asset.getAssetCode());
         boolean authorized = secAuthGrantService.hasTableReadGrant(asset.getId());
-        if (!authorized) {
-            base.put("ok", false);
-            base.put("source", "denied");
-            base.put("message", "看见≠能查：非资产拥有者且无表级读授权，请走申请中心；目录接口不代查生产数据");
-            base.put("needApply", true);
-            base.put("columns", List.of());
-            base.put("rows", List.of());
-            base.put("rowCount", 0);
-            return base;
-        }
         int limit = param.getLimit() == null ? 20 : Math.max(1, Math.min(100, param.getLimit()));
         List<GovAssetSourceLink> links = linkMapper.selectList(new QueryWrapper<GovAssetSourceLink>().lambda()
                 .eq(GovAssetSourceLink::getAssetId, asset.getId())
@@ -632,6 +625,28 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
                 .limit(limit)
                 .base(base)
                 .build();
+        boolean lake = PreviewAdapterSupport.isLakeSource(ctx);
+        if (lake) {
+            if (trinoPrincipalService.findActive(LhLoginUsers.requireUserId()) == null) {
+                base.put("ok", false);
+                base.put("source", "denied");
+                base.put("message", "门户账号未映射 Gravitino 主体，不能预览湖表。表权限由 Gravitino 裁决，不使用服务账号");
+                base.put("needPrincipal", true);
+                base.put("columns", List.of());
+                base.put("rows", List.of());
+                base.put("rowCount", 0);
+                return base;
+            }
+        } else if (!authorized) {
+            base.put("ok", false);
+            base.put("source", "denied");
+            base.put("message", "看见≠能查：非资产拥有者且无表级读授权，请走申请中心；目录接口不代查生产数据");
+            base.put("needApply", true);
+            base.put("columns", List.of());
+            base.put("rows", List.of());
+            base.put("rowCount", 0);
+            return base;
+        }
         return previewRouter.preview(ctx);
     }
 
@@ -1505,6 +1520,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         vo.setEngine(a.getEngine());
         vo.setIsGold(a.getIsGold() != null && a.getIsGold() == 1);
         vo.setOmFqn(a.getOmFqn());
+        vo.setGravAssetId(a.getGravAssetId());
         vo.setLastSyncAt(a.getLastSyncAt());
         vo.setLastSyncStatus(a.getLastSyncStatus());
         vo.setWs(a.getWs());

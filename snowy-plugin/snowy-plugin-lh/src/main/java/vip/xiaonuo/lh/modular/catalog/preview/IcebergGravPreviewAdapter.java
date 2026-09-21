@@ -25,6 +25,7 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
+import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -50,6 +51,8 @@ public class IcebergGravPreviewAdapter implements GovAssetPreviewAdapter {
     private CbGravAssetRefMapper gravAssetRefMapper;
     @Resource
     private LhDatasourceGravitinoProjector gravitinoProjector;
+    @Resource
+    private LhTrinoPrincipalService principalService;
 
     @Override
     public int order() {
@@ -116,7 +119,11 @@ public class IcebergGravPreviewAdapter implements GovAssetPreviewAdapter {
         String sql = "SELECT * FROM " + qualified + " LIMIT " + ctx.getLimit();
         r.put("sql", sql);
         try {
-            Map<String, Object> exec = trinoClient.execute(sql);
+            var principal = principalService.requireCurrent();
+            TrinoClient.ExecuteOptions opts = TrinoClient.ExecuteOptions.human(principal.getTrinoUser(), ctx.getLimit());
+            opts.catalog = coord.catalog;
+            opts.schema = coord.schema;
+            Map<String, Object> exec = trinoClient.execute(sql, opts);
             if (Boolean.TRUE.equals(exec.get("degraded"))) {
                 trinoMsg = PreviewAdapterSupport.str(exec.get("message"));
             } else {

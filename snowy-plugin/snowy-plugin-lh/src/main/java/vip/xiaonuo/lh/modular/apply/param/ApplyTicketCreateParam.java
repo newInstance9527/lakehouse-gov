@@ -9,7 +9,7 @@ import lombok.Setter;
 @Setter
 public class ApplyTicketCreateParam {
 
-    @Schema(description = "类型：table_read（默认）| lake_export（出湖）；兼容前端 export/perm")
+    @Schema(description = "类型：table_read|lake_export|resource_manage|compliance_delete|api_publish；兼容前端 export/perm/manage/compliance/api")
     private String ticketType;
 
     @NotBlank
@@ -28,6 +28,9 @@ public class ApplyTicketCreateParam {
     @Schema(description = "时效文案，如 30天/长期")
     private String expireLabel;
 
+    @Schema(description = "行过滤条件，原样交给 Gravitino（table_read 可选）")
+    private String rowFilter;
+
     @Schema(description = "申请列（可选）")
     private String columns;
 
@@ -42,4 +45,22 @@ public class ApplyTicketCreateParam {
 
     @Schema(description = "资源 ID（resource_manage；asset 时亦可填 assetId）")
     private String resourceId;
+
+    @Schema(description = "合规删除请求号 gov_del_request.req_no（compliance_delete MUST）")
+    private String reqNo;
+
+    @Schema(description = "掩码主体标识（compliance_delete；禁止传明文）")
+    private String subjectMasked;
+
+    @Schema(description = "计划载体数（compliance_delete 展示用）")
+    private Integer targetCount;
+
+    @Schema(description = "数据服务绑定 id（api_publish）")
+    private String apiBindingId;
+
+    @Schema(description = "对外路径（api_publish）")
+    private String publicPath;
+
+    @Schema(description = "HTTP 方法（api_publish）")
+    private String method;
 }

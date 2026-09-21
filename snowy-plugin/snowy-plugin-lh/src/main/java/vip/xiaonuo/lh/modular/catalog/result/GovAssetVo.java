@@ -91,6 +91,9 @@ public class GovAssetVo {
     @Schema(description = "OM FQN")
     private String omFqn;
 
+    @Schema(description = "Gravitino 资产指针 id（cb_grav_asset_ref）")
+    private String gravAssetId;
+
     @Schema(description = "最近同步")
     private Date lastSyncAt;
 

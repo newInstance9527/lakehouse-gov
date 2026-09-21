@@ -26,6 +26,8 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhConsumerBinding;
 import vip.xiaonuo.lh.modular.datasource.param.*;
 import vip.xiaonuo.lh.modular.datasource.result.LhDatasourceVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhDsTableVo;
+import vip.xiaonuo.lh.modular.datasource.result.LhMetaColumnVo;
+import vip.xiaonuo.lh.modular.datasource.result.LhMetaObjectVo;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceService;
 
 import java.util.List;
@@ -89,6 +91,30 @@ public class LhDatasourceController {
     @GetMapping("/lh/datasource/previewSchema")
     public CommonResult<Map<String, Object>> previewSchema(@Valid LhDatasourceIdParam param) {
         return CommonResult.data(datasourceService.previewSchema(param));
+    }
+
+    @Operation(summary = "元数据：Schema 列表")
+    @GetMapping("/lh/datasource/meta/schemas")
+    public CommonResult<List<String>> metaSchemas(@Valid LhDatasourceMetaParam param) {
+        return CommonResult.data(datasourceService.listMetaSchemas(param));
+    }
+
+    @Operation(summary = "元数据：表列表")
+    @GetMapping("/lh/datasource/meta/tables")
+    public CommonResult<List<LhMetaObjectVo>> metaTables(@Valid LhDatasourceMetaParam param) {
+        return CommonResult.data(datasourceService.listMetaTables(param));
+    }
+
+    @Operation(summary = "元数据：视图列表")
+    @GetMapping("/lh/datasource/meta/views")
+    public CommonResult<List<LhMetaObjectVo>> metaViews(@Valid LhDatasourceMetaParam param) {
+        return CommonResult.data(datasourceService.listMetaViews(param));
+    }
+
+    @Operation(summary = "元数据：列列表")
+    @GetMapping("/lh/datasource/meta/columns")
+    public CommonResult<List<LhMetaColumnVo>> metaColumns(@Valid LhDatasourceMetaParam param) {
+        return CommonResult.data(datasourceService.listMetaColumns(param));
     }
 
     @Operation(summary = "更新用途")

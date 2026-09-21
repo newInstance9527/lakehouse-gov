@@ -11,7 +11,7 @@ import java.util.Map;
 
 public interface SecAuthGrantService {
 
-    /** 表级读/预览：拥有者或有效 SELECT 类 grant（超管不短路） */
+    /** 表级查看：拥有者或未过期的 SELECT 投影。不含 EDIT/DELETE/MANAGE，执行鉴权不读这里。 */
     boolean hasTableReadGrant(String assetId);
 
     /** 资产管理权：拥有者或 MANAGE grant（兼容旧 assetId） */
@@ -19,6 +19,11 @@ public interface SecAuthGrantService {
 
     /** 通用：当前用户是否持有某资源的 MANAGE grant（或资产拥有者） */
     boolean hasManageGrant(String resourceType, String resourceId);
+
+    /**
+     * 数据服务构建：是否可用该数据源（拥有者或 EDIT/MANAGE grant）。
+     */
+    boolean canUseDatasource(String datasourceId);
 
     /**
      * 是否具备所需操作能力（owner 或 privilege 满足；MANAGE 覆盖 EDIT/DELETE）。
@@ -81,6 +86,17 @@ public interface SecAuthGrantService {
      */
     Map<String, Object> projectGravAcl(SecAuthGrant grant);
 
-    /** 将 expires_at 已过且仍为 active 的 grant 标为 expired；返回更新条数 */
+    /** 将 expires_at 已过且仍为 active 的操作权标为 expired。SELECT 投影留给 Gravitino 回收成功后再标。 */
     int expireDueGrants();
+
+    /**
+     * Gravitino 表读授权已成功之后，写一条门户 SELECT 投影，只给目录上锁用。
+     * 不调用引擎。已有同主体同资产的 active SELECT 则更新。
+     */
+    SecAuthGrant recordSelectProjection(String ticketId, String subjectId, String assetId,
+                                        String gravAssetId, Date expiresAt, String rowFilter,
+                                        String policyId, String ws, String remark);
+
+    /** Gravitino 回收成功后，把该申请单的 SELECT 投影标为 expired。 */
+    int expireSelectProjection(String ticketId);
 }

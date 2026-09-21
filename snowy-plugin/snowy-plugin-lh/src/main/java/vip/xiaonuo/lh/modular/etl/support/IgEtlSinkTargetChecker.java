@@ -365,6 +365,13 @@ public class IgEtlSinkTargetChecker {
         }
     }
 
+    /**
+     * 解析 sink 目标坐标（校验 / 发布 / 试跑结果预览共用）。
+     */
+    public TargetRef resolveSinkTarget(String sinkType, JSONObject conf) {
+        return resolveTarget(sinkType, conf);
+    }
+
     private TargetRef resolveTarget(String sinkType, JSONObject conf) {
         String catalog;
         String schema;
@@ -531,14 +538,14 @@ public class IgEtlSinkTargetChecker {
         return o == null ? null : String.valueOf(o);
     }
 
-    static final class TargetRef {
-        String metalake;
-        String catalog;
-        String schema;
-        String table;
-        boolean rdb;
+    public static final class TargetRef {
+        public String metalake;
+        public String catalog;
+        public String schema;
+        public String table;
+        public boolean rdb;
 
-        String fqn() {
+        public String fqn() {
             if (rdb) {
                 return StrUtil.blankToDefault(catalog, "rdb") + "." + schema + "." + table;
             }

@@ -245,7 +245,19 @@ public class SqlrestClient {
     public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
                                             String sqlOrScript, List<Map<String, Object>> params,
                                             Long existingId, String contentType, Long datasourceId, String engine) {
+        return buildSaveBody(name, description, method, publicPath, sqlOrScript, params,
+                existingId, contentType, datasourceId, engine, null);
+    }
+
+    /**
+     * @param opts 可选覆盖：open、alarm、flowStatus、cacheKeyType、namingStrategy、formatMap、outputs、contextList、moduleId、groupId
+     */
+    public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
+                                            String sqlOrScript, List<Map<String, Object>> params,
+                                            Long existingId, String contentType, Long datasourceId, String engine,
+                                            Map<String, Object> opts) {
         LhProperties.Sqlrest cfg = lhProperties.getSqlrest();
+        Map<String, Object> o = opts != null ? opts : Map.of();
         String eng = StrUtil.blankToDefault(engine, "SQL").trim().toUpperCase();
         if (!"GROOVY".equals(eng)) {
             eng = "SQL";
@@ -254,31 +266,56 @@ public class SqlrestClient {
         if (existingId != null) {
             body.put("id", existingId);
         }
-        body.put("groupId", cfg.getDefaultGroupId());
-        body.put("moduleId", cfg.getDefaultModuleId());
+        Object moduleId = o.get("moduleId") != null ? o.get("moduleId") : cfg.getDefaultModuleId();
+        Object groupId = o.get("groupId") != null ? o.get("groupId") : cfg.getDefaultGroupId();
+        body.put("groupId", groupId);
+        body.put("moduleId", moduleId);
         body.put("datasourceId", datasourceId != null ? datasourceId : cfg.getDatasourceId());
         body.put("name", name);
         body.put("description", StrUtil.blankToDefault(description, name));
         body.put("method", StrUtil.blankToDefault(method, "GET").toUpperCase());
         body.put("contentType", StrUtil.blankToDefault(contentType, "application/x-www-form-urlencoded"));
         body.put("path", toSqlrestPath(publicPath));
-        body.put("open", true);
-        body.put("alarm", false);
-        body.put("flowStatus", false);
-        body.put("flowGrade", 1);
-        body.put("flowCount", 5);
-        body.put("cacheKeyType", "NONE");
-        body.put("cacheExpireSeconds", 0);
+        body.put("open", o.get("open") != null ? o.get("open") : true);
+        body.put("alarm", o.get("alarm") != null ? o.get("alarm") : false);
+        body.put("flowStatus", o.get("flowStatus") != null ? o.get("flowStatus") : false);
+        body.put("flowGrade", o.get("flowGrade") != null ? o.get("flowGrade") : 1);
+        body.put("flowCount", o.get("flowCount") != null ? o.get("flowCount") : 5);
+        body.put("cacheKeyType", StrUtil.blankToDefault(
+                o.get("cacheKeyType") == null ? null : String.valueOf(o.get("cacheKeyType")), "NONE"));
+        if (o.get("cacheKeyExpr") != null) {
+            body.put("cacheKeyExpr", o.get("cacheKeyExpr"));
+        }
+        body.put("cacheExpireSeconds", o.get("cacheExpireSeconds") != null ? o.get("cacheExpireSeconds") : 0);
         body.put("engine", eng);
-        body.put("namingStrategy", "CAMEL_CASE");
-        body.put("formatMap", List.of(Map.of(
-                "key", "USE_SYSTEM_RESPONSE_FORMAT",
-                "value", "true",
-                "remark", "Response format")));
-        String ctx = "GROOVY".equals(eng) ? StrUtil.nullToDefault(sqlOrScript, "") : toSqlrestSql(sqlOrScript);
-        body.put("contextList", List.of(ctx));
+        body.put("namingStrategy", StrUtil.blankToDefault(
+                o.get("namingStrategy") == null ? null : String.valueOf(o.get("namingStrategy")), "CAMEL_CASE"));
+        if (o.get("formatMap") instanceof List<?> fm && !fm.isEmpty()) {
+            body.put("formatMap", fm);
+        } else {
+            body.put("formatMap", List.of(Map.of(
+                    "key", "USE_SYSTEM_RESPONSE_FORMAT",
+                    "value", "true",
+                    "remark", "Response format")));
+        }
+        List<String> contextList;
+        if (o.get("contextList") instanceof List<?> cl && !cl.isEmpty()) {
+            contextList = new ArrayList<>();
+            for (Object item : cl) {
+                String raw = item == null ? "" : String.valueOf(item);
+                contextList.add("GROOVY".equals(eng) ? raw : toSqlrestSql(raw));
+            }
+        } else {
+            String ctx = "GROOVY".equals(eng) ? StrUtil.nullToDefault(sqlOrScript, "") : toSqlrestSql(sqlOrScript);
+            contextList = List.of(ctx);
+        }
+        body.put("contextList", contextList);
         body.put("params", params != null ? params : List.of());
-        body.put("outputs", List.of());
+        if (o.get("outputs") instanceof List<?> outs) {
+            body.put("outputs", outs);
+        } else {
+            body.put("outputs", List.of());
+        }
         return body;
     }
 
@@ -289,12 +326,30 @@ public class SqlrestClient {
         return buildSaveBody(name, description, method, publicPath, sql, params, existingId, contentType, null, "SQL");
     }
 
+    public Map<String, Object> parseParams(String sql) {
+        String q = StrUtil.nullToDefault(sql, "");
+        return postJson("/sqlrest/manager/api/v1/assignment/parse?sql=" + java.net.URLEncoder.encode(q, java.nio.charset.StandardCharsets.UTF_8),
+                Map.of());
+    }
+
+    public Map<String, Object> responseNamingStrategies() {
+        return getJson("/sqlrest/manager/api/v1/assignment/response-naming-strategy");
+    }
+
+    public Map<String, Object> responseTypeFormats() {
+        return getJson("/sqlrest/manager/api/v1/assignment/response-type-format");
+    }
+
+    public Map<String, Object> completions() {
+        return getJson("/sqlrest/manager/api/v1/assignment/completions");
+    }
+
     public List<Map<String, Object>> toSqlrestParams(List<Map<String, Object>> portalParams, String method) {
         List<Map<String, Object>> out = new ArrayList<>();
         if (portalParams == null) {
             return out;
         }
-        String location = "GET".equalsIgnoreCase(method) ? "REQUEST_FORM" : "REQUEST_BODY";
+        String defaultLocation = "GET".equalsIgnoreCase(method) ? "REQUEST_FORM" : "REQUEST_BODY";
         for (Map<String, Object> p : portalParams) {
             if (p == null || StrUtil.isBlank(String.valueOf(p.getOrDefault("name", "")))) {
                 continue;
@@ -302,12 +357,13 @@ public class SqlrestClient {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("name", String.valueOf(p.get("name")).trim());
             item.put("type", mapParamType(p.get("type")));
-            item.put("location", location);
-            item.put("isArray", false);
+            String loc = p.get("location") != null ? String.valueOf(p.get("location")).trim() : "";
+            item.put("location", StrUtil.isNotBlank(loc) ? loc : defaultLocation);
+            item.put("isArray", Boolean.TRUE.equals(p.get("isArray")) || "true".equalsIgnoreCase(String.valueOf(p.get("isArray"))));
             item.put("required", Boolean.TRUE.equals(p.get("required")) || "true".equalsIgnoreCase(String.valueOf(p.get("required"))));
-            item.put("defaultValue", null);
+            item.put("defaultValue", p.get("defaultValue") != null ? p.get("defaultValue") : p.get("default"));
             item.put("remark", p.get("desc") != null ? p.get("desc") : p.get("remark"));
-            item.put("children", List.of());
+            item.put("children", p.get("children") instanceof List<?> ch ? ch : List.of());
             out.add(item);
         }
         return out;
@@ -421,14 +477,36 @@ public class SqlrestClient {
         m.put("ok", code != null && code == 0);
         m.put("code", code);
         m.put("message", json.getStr("message"));
-        m.put("data", json.get("data"));
-        if (json.get("pagination") != null) {
-            m.put("pagination", json.get("pagination"));
+        // Hutool 把 JSON null 存成 JSONNull；直接放进响应会被 Jackson 拒绝
+        m.put("data", plain(json.get("data")));
+        Object pagination = plain(json.get("pagination"));
+        if (pagination != null) {
+            m.put("pagination", pagination);
         }
         if (code == null || code != 0) {
             m.put("degraded", true);
         }
         return m;
+    }
+
+    /** JSONObject/JSONArray/JSONNull → Map/List/null，避免 HttpMessageConversionException。 */
+    private static Object plain(Object v) {
+        if (v == null || v instanceof cn.hutool.json.JSONNull) {
+            return null;
+        }
+        if (v instanceof JSONObject jo) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            jo.forEach((k, val) -> out.put(k, plain(val)));
+            return out;
+        }
+        if (v instanceof JSONArray ja) {
+            List<Object> out = new ArrayList<>(ja.size());
+            for (Object item : ja) {
+                out.add(plain(item));
+            }
+            return out;
+        }
+        return v;
     }
 
     private Map<String, Object> degraded(String message) {

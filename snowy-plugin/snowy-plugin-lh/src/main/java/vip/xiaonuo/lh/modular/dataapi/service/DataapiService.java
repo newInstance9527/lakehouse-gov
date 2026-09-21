@@ -3,8 +3,10 @@ package vip.xiaonuo.lh.modular.dataapi.service;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiBindingParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiGatewayProbeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 
 import java.util.List;
@@ -50,4 +52,13 @@ public interface DataapiService {
 
     /** 登记已有 SQLREST 接口为门户绑定（不写 SQL） */
     Map<String, Object> register(DataapiBindingParam param);
+
+    /** 入参解析：代理 SQLREST assignment/parse */
+    Map<String, Object> parseParams(DataapiParseParam param);
+
+    /** 命名策略 / 类型格式 / 补全片段聚合 */
+    Map<String, Object> sqlrestOptions();
+
+    /** Gateway 联调探针（edgeMode=gateway 时） */
+    Map<String, Object> gatewayProbe(DataapiGatewayProbeParam param);
 }

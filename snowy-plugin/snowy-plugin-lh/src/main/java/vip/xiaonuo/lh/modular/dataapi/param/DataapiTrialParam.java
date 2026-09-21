@@ -20,5 +20,8 @@ public class DataapiTrialParam {
     private String dsId;
     /** SQL / GROOVY */
     private String engine = "SQL";
+    private String namingStrategy;
+    private List<Map<String, Object>> formatMap;
+    private List<String> contextList;
     private String ws;
 }

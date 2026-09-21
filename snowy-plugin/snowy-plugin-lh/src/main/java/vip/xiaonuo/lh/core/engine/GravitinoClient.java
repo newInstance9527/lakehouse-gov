@@ -63,6 +63,15 @@ public class GravitinoClient {
     }
 
     /**
+     * 列出 metalake 下 catalog 名
+     */
+    public List<String> listCatalogs(String metalake) {
+        String path = "/api/metalakes/" + enc(metalake) + "/catalogs";
+        JSONObject root = JSONUtil.parseObj(authGet(path));
+        return extractNames(root);
+    }
+
+    /**
      * 列出 catalog 下 schema 名
      */
     public List<String> listSchemas(String metalake, String catalog) {
@@ -185,20 +194,41 @@ public class GravitinoClient {
     }
 
     /**
-     * soft-fail：尝试向 Gravitino 授权用户对表的 SELECT（门户审批通过后投影）。
-     * 不同 Grav 版本路径可能不同；失败由调用方记门户 grant。
+     * 向 Gravitino 授予表权限。失败由调用方决定是否中断；本方法不写门户 ACL。
      */
     public Map<String, Object> grantTablePrivilege(String metalake, String catalog, String schema, String table,
                                                    String subjectId, String privilege) {
+        return grantTablePrivilege(metalake, catalog, schema, table, subjectId, privilege, null);
+    }
+
+    public Map<String, Object> grantTablePrivilege(String metalake, String catalog, String schema, String table,
+                                                   String subjectId, String privilege, String rowFilter) {
+        return mutateTablePrivilege("POST", metalake, catalog, schema, table, subjectId, privilege, rowFilter);
+    }
+
+    /** 回收 Gravitino 表权限。 */
+    public Map<String, Object> revokeTablePrivilege(String metalake, String catalog, String schema, String table,
+                                                    String subjectId, String privilege) {
+        return mutateTablePrivilege("DELETE", metalake, catalog, schema, table, subjectId, privilege, null);
+    }
+
+    private Map<String, Object> mutateTablePrivilege(String method, String metalake, String catalog, String schema,
+                                                     String table, String subjectId, String privilege, String rowFilter) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", false);
         String priv = StrUtil.blankToDefault(privilege, "SELECT");
         String fullName = metalake + "." + catalog + "." + schema + "." + table;
-        // Apache Gravitino authorization API（metalake 级 privilege grant）
         String path = "/api/metalakes/" + enc(metalake) + "/permissions/" + enc("user") + "/" + enc(subjectId);
         JSONObject body = new JSONObject();
         JSONArray privileges = new JSONArray();
-        privileges.add(priv);
+        if (StrUtil.isNotBlank(rowFilter)) {
+            JSONObject one = new JSONObject();
+            one.set("name", priv);
+            one.set("condition", rowFilter.trim());
+            privileges.add(one);
+        } else {
+            privileges.add(priv);
+        }
         body.set("privileges", privileges);
         JSONObject securable = new JSONObject();
         securable.set("type", "TABLE");
@@ -207,9 +237,11 @@ public class GravitinoClient {
         objects.add(securable);
         body.set("securableObjects", objects);
         try {
-            String resp = authPost(path, body.toString());
+            String resp = "DELETE".equalsIgnoreCase(method)
+                    ? authDelete(path, body.toString())
+                    : authPost(path, body.toString());
             out.put("ok", true);
-            out.put("policyId", "grav:" + fullName + ":" + priv);
+            out.put("policyId", "grav:" + fullName + ":" + priv + ":" + subjectId);
             out.put("response", resp);
         } catch (Exception e) {
             out.put("ok", false);
@@ -291,6 +323,10 @@ public class GravitinoClient {
         return authRequest("PUT", path, json);
     }
 
+    private String authDelete(String path, String json) {
+        return authRequest("DELETE", path, json);
+    }
+
     private String authRequest(String method, String path, String json) {
         String base = trim(lhProperties.getGravitino().getUrl());
         Map<String, String> cred = credentialResolver.gravitino();
@@ -301,6 +337,8 @@ public class GravitinoClient {
             req = HttpRequest.post(base + path).body(json);
         } else if ("PUT".equalsIgnoreCase(method)) {
             req = HttpRequest.put(base + path).body(json);
+        } else if ("DELETE".equalsIgnoreCase(method)) {
+            req = HttpRequest.delete(base + path).body(json);
         } else {
             req = HttpRequest.get(base + path);
         }

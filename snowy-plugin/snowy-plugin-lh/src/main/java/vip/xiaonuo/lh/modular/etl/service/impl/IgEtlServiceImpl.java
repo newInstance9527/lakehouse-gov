@@ -46,6 +46,7 @@ import vip.xiaonuo.lh.modular.etl.support.IgEtlLocalTrialExecutor;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlOpenLineageProjector;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlPublishSideEffects;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlRunAlertBuilder;
+import vip.xiaonuo.lh.modular.etl.support.IgEtlRunResultPreview;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlSinkTargetChecker;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlVaultInjector;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
@@ -96,6 +97,8 @@ public class IgEtlServiceImpl implements IgEtlService {
     private IgEtlVaultInjector vaultInjector;
     @Resource
     private IgEtlSinkTargetChecker sinkTargetChecker;
+    @Resource
+    private IgEtlRunResultPreview resultPreviewHelper;
     @Resource
     private IgEtlOpenLineageProjector openLineageProjector;
     @Resource
@@ -948,6 +951,11 @@ public class IgEtlServiceImpl implements IgEtlService {
             m.put("alert", runAlertBuilder.build(dag, run.getRunId(), run.getStatus(), run.getMessage(), "P1"));
         }
         return m;
+    }
+
+    @Override
+    public Map<String, Object> runResultPreview(String runId, String nodeKey, Integer limit) {
+        return resultPreviewHelper.preview(runId, nodeKey, limit);
     }
 
     @Override

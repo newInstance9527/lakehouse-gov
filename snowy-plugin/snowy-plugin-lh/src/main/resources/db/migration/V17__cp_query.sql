@@ -1,0 +1,33 @@
+-- 即席查询审计（Phase A：Trino 接入层）
+
+CREATE TABLE IF NOT EXISTS `cp_query_exec` (
+  `id`                varchar(20)   NOT NULL COMMENT '主键',
+  `query_id`          varchar(64)   NOT NULL COMMENT '对外查询号 / Trino query id',
+  `ws`                varchar(64)   NOT NULL DEFAULT 'default' COMMENT '工作空间',
+  `user_id`           varchar(20)   DEFAULT NULL COMMENT '门户用户 id',
+  `user_name`         varchar(64)   DEFAULT NULL COMMENT '展示名',
+  `sql_text`          mediumtext    COMMENT 'SQL 原文',
+  `sql_hash`          varchar(64)   DEFAULT NULL COMMENT 'SQL sha256 前缀',
+  `sql_summary`       varchar(512)  DEFAULT NULL COMMENT '摘要',
+  `status`            varchar(32)   NOT NULL DEFAULT 'running' COMMENT 'running/ok/failed/blocked/cancelled',
+  `status_label`      varchar(128)  DEFAULT NULL COMMENT '展示标签',
+  `engine`            varchar(32)   NOT NULL DEFAULT 'trino' COMMENT '引擎',
+  `catalog_name`      varchar(128)  DEFAULT NULL COMMENT '默认 catalog',
+  `schema_name`       varchar(128)  DEFAULT NULL COMMENT '默认 schema',
+  `row_count`         int           DEFAULT NULL COMMENT '返回行数',
+  `scan_bytes`        bigint        DEFAULT NULL COMMENT '扫描字节',
+  `dur_ms`            bigint        DEFAULT NULL COMMENT '耗时毫秒',
+  `mask_cols`         varchar(512)  DEFAULT NULL COMMENT '脱敏列名 JSON 数组或逗号分隔',
+  `error_msg`         varchar(1024) DEFAULT NULL COMMENT '错误/阻断原因',
+  `trino_query_id`    varchar(128)  DEFAULT NULL COMMENT 'Trino 原生 id',
+  `delete_flag`       varchar(32)   DEFAULT 'NOT_DELETE' COMMENT '删除标志',
+  `create_time`       datetime      DEFAULT NULL COMMENT '创建时间',
+  `create_user`       varchar(20)   DEFAULT NULL COMMENT '创建用户',
+  `update_time`       datetime      DEFAULT NULL COMMENT '修改时间',
+  `update_user`       varchar(20)   DEFAULT NULL COMMENT '修改用户',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uq_cp_query_exec_qid` (`query_id`) USING BTREE,
+  KEY `idx_cp_query_exec_user` (`user_id`,`create_time`) USING BTREE,
+  KEY `idx_cp_query_exec_ws` (`ws`,`create_time`) USING BTREE,
+  KEY `idx_cp_query_exec_status` (`status`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='计算：即席查询执行审计';

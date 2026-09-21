@@ -146,6 +146,15 @@ public class IgEtlController {
         return CommonResult.data(igEtlService.runNodeLog(runId, nodeKey, skipLineNum, limit));
     }
 
+    @Operation(summary = "试跑成功后预览 sink 目标表样本（核对结果）")
+    @GetMapping("/lh/etl/dags/runs/resultPreview")
+    public CommonResult<Map<String, Object>> runResultPreview(
+            @RequestParam String runId,
+            @RequestParam String nodeKey,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(igEtlService.runResultPreview(runId, nodeKey, limit));
+    }
+
     @Operation(summary = "运行态回调（DS/Worker 回写）")
     @CommonLog("ETL运行回调")
     @PostMapping("/lh/etl/dags/runs/callback")

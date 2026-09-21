@@ -22,6 +22,7 @@ import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
+import vip.xiaonuo.lh.modular.sec.service.GravTableAccessService;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.Calendar;
@@ -37,6 +38,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public static final String TYPE_TABLE_READ = "table_read";
     public static final String TYPE_LAKE_EXPORT = "lake_export";
     public static final String TYPE_RESOURCE_MANAGE = "resource_manage";
+    public static final String TYPE_COMPLIANCE_DELETE = "compliance_delete";
+    public static final String TYPE_API_PUBLISH = "api_publish";
 
     @Resource
     private ApplyTicketMapper ticketMapper;
@@ -46,6 +49,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     private GovAssetMapper govAssetMapper;
     @Resource
     private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private GravTableAccessService gravTableAccessService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -58,7 +63,69 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (TYPE_RESOURCE_MANAGE.equals(type)) {
             return createResourceManage(param, userId);
         }
+        if (TYPE_COMPLIANCE_DELETE.equals(type)) {
+            return createComplianceDelete(param, userId);
+        }
+        if (TYPE_API_PUBLISH.equals(type)) {
+            return createApiPublish(param, userId);
+        }
         return createTableRead(param, userId, type);
+    }
+
+    private ApplyTicket createApiPublish(ApplyTicketCreateParam param, String userId) {
+        String bindingId = StrUtil.trim(param.getApiBindingId());
+        if (StrUtil.isBlank(bindingId)) {
+            throw new CommonException("API 发布申请须携带 apiBindingId（先保存草稿绑定）");
+        }
+        ApplyTicket t = newTicketShell(userId, TYPE_API_PUBLISH, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("API-"));
+        JSONObject payload = new JSONObject();
+        payload.set("apiBindingId", bindingId);
+        payload.set("publicPath", param.getPublicPath());
+        payload.set("method", StrUtil.blankToDefault(param.getMethod(), "GET"));
+        payload.set("expireLabel", param.getExpireLabel());
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            t.setTitle("API 发布 · " + StrUtil.blankToDefault(param.getPublicPath(), bindingId));
+        }
+        ticketMapper.insert(t);
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAssetId(null);
+        item.setAction("API_PUBLISH");
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
+    }
+
+    /**
+     * 合规删除审批单（doc/合规删除.md）：只承载审批意图与痕迹，
+     * 请求/计划/执行/证据仍在 {@code gov_del_*}；审批通过不写任何 grant。
+     */
+    private ApplyTicket createComplianceDelete(ApplyTicketCreateParam param, String userId) {
+        String reqNo = StrUtil.trim(param.getReqNo());
+        if (StrUtil.isBlank(reqNo)) {
+            throw new CommonException("合规删除审批须携带 reqNo（gov_del_request.req_no）");
+        }
+        ApplyTicket t = newTicketShell(userId, TYPE_COMPLIANCE_DELETE, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("CD-"));
+        JSONObject payload = new JSONObject();
+        payload.set("reqNo", reqNo);
+        payload.set("subjectMasked", param.getSubjectMasked());
+        payload.set("targetCount", param.getTargetCount());
+        payload.set("legalBasis", param.getReason());
+        payload.set("approvalChain", "安全岗 → 法务 → 表 Owner");
+        payload.set("rollbackWindowNotice", "执行将对目标表定向 expire_snapshots(retain_last=1)，该表短期失去回滚窗口");
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            t.setTitle("合规删除 · " + reqNo);
+        }
+        ticketMapper.insert(t);
+
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAction("COMPLIANCE_DELETE");
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
     }
 
     private ApplyTicket createResourceManage(ApplyTicketCreateParam param, String userId) {
@@ -123,6 +190,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         payload.set("assetId", asset.getId());
         payload.set("assetCode", asset.getAssetCode());
         payload.set("privilege", StrUtil.blankToDefault(param.getPrivilege(), "SELECT"));
+        payload.set("rowFilter", param.getRowFilter());
         payload.set("expireLabel", param.getExpireLabel());
         payload.set("columns", param.getColumns());
         t.setPayload(payload.toString());
@@ -240,7 +308,10 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
 
         Map<String, Object> r = new LinkedHashMap<>();
-        if (TYPE_LAKE_EXPORT.equals(t.getTicketType())) {
+        // 出湖 / 合规删除 / API 发布：仅改状态，不写 sec_auth_grant
+        if (TYPE_LAKE_EXPORT.equals(t.getTicketType())
+                || TYPE_COMPLIANCE_DELETE.equals(t.getTicketType())
+                || TYPE_API_PUBLISH.equals(t.getTicketType())) {
             t.setStatus("approved");
             t.setApprovedBy(LhLoginUsers.requireUserId());
             t.setApprovedAt(new Date());
@@ -270,6 +341,25 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         String resourceId = StrUtil.blankToDefault(payload.getStr("resourceId"), item.getAssetId());
         if (TYPE_RESOURCE_MANAGE.equals(t.getTicketType()) && StrUtil.isBlank(resourceId)) {
             throw new CommonException("操作权限申请缺少 resourceId");
+        }
+        if (TYPE_TABLE_READ.equals(t.getTicketType())) {
+            Map<String, Object> grav = gravTableAccessService.grantTableRead(
+                    t, item, privilege, payload.getStr("rowFilter"));
+            Object grantId = grav.get("grantId");
+            item.setResultGrantId(grantId == null ? null : String.valueOf(grantId));
+            item.setUpdateTime(new Date());
+            itemMapper.updateById(item);
+            t.setStatus("approved");
+            t.setApprovedBy(LhLoginUsers.requireUserId());
+            t.setApprovedAt(new Date());
+            t.setRemark(param.getRemark());
+            t.setUpdateTime(new Date());
+            t.setUpdateUser(LhLoginUsers.requireUserId());
+            ticketMapper.updateById(t);
+            r.put("ticket", t);
+            r.put("ticketNo", t.getTicketNo());
+            r.putAll(grav);
+            return r;
         }
         SecAuthGrant grant = secAuthGrantService.createFromApproval(
                 t.getId(),
@@ -345,6 +435,60 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
     }
 
+    @Override
+    public void assertApprovedComplianceTicket(String ticketNo) {
+        String no = StrUtil.trim(ticketNo);
+        if (StrUtil.isBlank(no)) {
+            throw new CommonException("合规删除须先提交审批（缺少 ticketNo）");
+        }
+        ApplyTicket t = ticketMapper.selectOne(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getTicketNo, no)
+                .last("LIMIT 1"));
+        if (t == null) {
+            throw new CommonException("合规删除审批单不存在: " + no);
+        }
+        if (!TYPE_COMPLIANCE_DELETE.equals(t.getTicketType())) {
+            throw new CommonException("单号 " + no + " 不是合规删除审批（ticket_type=" + t.getTicketType() + "）");
+        }
+        if (!"approved".equals(t.getStatus())) {
+            throw new CommonException("合规删除审批未通过: " + no + "（status=" + t.getStatus() + "）");
+        }
+    }
+
+    @Override
+    public void assertApprovedApiPublishTicket(String ticketNo, String apiBindingId) {
+        String no = StrUtil.trim(ticketNo);
+        if (StrUtil.isBlank(no)) {
+            throw new CommonException("发布须填写已审批单号 publishTicketNo（申请中心 api_publish）");
+        }
+        ApplyTicket t = ticketMapper.selectOne(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getTicketNo, no)
+                .last("LIMIT 1"));
+        if (t == null) {
+            throw new CommonException("API 发布申请单不存在: " + no);
+        }
+        if (!TYPE_API_PUBLISH.equals(t.getTicketType())) {
+            throw new CommonException("单号 " + no + " 不是 API 发布申请（ticket_type=" + t.getTicketType() + "）");
+        }
+        if (!"approved".equals(t.getStatus())) {
+            throw new CommonException("API 发布申请尚未通过审批: " + no + "（status=" + t.getStatus() + "）");
+        }
+        if (StrUtil.isNotBlank(apiBindingId) && StrUtil.isNotBlank(t.getPayload())) {
+            try {
+                String bound = JSONUtil.parseObj(t.getPayload()).getStr("apiBindingId");
+                if (StrUtil.isNotBlank(bound) && !bound.equals(apiBindingId)) {
+                    throw new CommonException("发布单 " + no + " 与当前绑定 id 不匹配");
+                }
+            } catch (CommonException e) {
+                throw e;
+            } catch (Exception ignored) {
+                /* payload 损坏时仅告警式放行类型校验 */
+            }
+        }
+    }
+
     private ApplyTicket newTicketShell(String userId, String type, ApplyTicketCreateParam param, String ws) {
         ApplyTicket t = new ApplyTicket();
         t.setId(IdUtil.getSnowflakeNextIdStr());
@@ -373,18 +517,22 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     }
 
     private synchronized String nextExportTicketNo() {
-        // EXP- + 雪花末 9 位；冲突极少，若撞 uq 则再生成
+        return nextPrefixedTicketNo("EXP-");
+    }
+
+    private synchronized String nextPrefixedTicketNo(String prefix) {
+        // 前缀 + 雪花末 9 位；冲突极少，若撞 uq 则再生成
         for (int i = 0; i < 5; i++) {
             String id = IdUtil.getSnowflakeNextIdStr();
             String suffix = id.length() <= 9 ? id : id.substring(id.length() - 9);
-            String no = "EXP-" + suffix;
+            String no = prefix + suffix;
             Long cnt = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                     .eq(ApplyTicket::getTicketNo, no));
             if (cnt == null || cnt == 0) {
                 return no;
             }
         }
-        return "EXP-" + IdUtil.getSnowflakeNextIdStr();
+        return prefix + IdUtil.getSnowflakeNextIdStr();
     }
 
     /**
@@ -400,6 +548,12 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
         if ("manage".equals(t) || "resource_manage".equals(t) || "owner".equals(t)) {
             return TYPE_RESOURCE_MANAGE;
+        }
+        if ("compliance".equals(t) || "compliance_delete".equals(t) || "erase".equals(t)) {
+            return TYPE_COMPLIANCE_DELETE;
+        }
+        if ("api".equals(t) || "api_publish".equals(t) || "dataapi".equals(t) || "publish_api".equals(t)) {
+            return TYPE_API_PUBLISH;
         }
         return t;
     }

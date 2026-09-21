@@ -60,6 +60,12 @@ public interface IgEtlService {
      */
     Map<String, Object> runNodeLog(String runId, String nodeKey, Integer skipLineNum, Integer limit);
 
+    /**
+     * 试跑/运行成功后预览 sink 目标表样本（核对结果）。
+     * @param limit 默认 20，上限 50
+     */
+    Map<String, Object> runResultPreview(String runId, String nodeKey, Integer limit);
+
     /** DS/Worker 回调回写运行态 */
     Map<String, Object> applyRunCallback(Map<String, Object> body);
 

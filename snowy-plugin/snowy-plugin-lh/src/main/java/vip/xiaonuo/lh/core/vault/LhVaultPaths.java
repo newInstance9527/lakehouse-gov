@@ -53,4 +53,11 @@ public final class LhVaultPaths {
 
     /** MinIO AK/SK */
     public static final String MINIO = "platform/minio/s3";
+
+    /** AI 模型 API Key 前缀：{@code secret/lakehouse/ai/{modelId}} */
+    public static final String AI_MODEL_PREFIX = "secret/lakehouse/ai/";
+
+    public static String aiModel(String modelId) {
+        return AI_MODEL_PREFIX + modelId;
+    }
 }

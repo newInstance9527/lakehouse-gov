@@ -49,6 +49,9 @@ import vip.xiaonuo.lh.modular.datasource.mapper.LhDsTableMapper;
 import vip.xiaonuo.lh.modular.datasource.param.*;
 import vip.xiaonuo.lh.modular.datasource.result.LhDatasourceVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhDsTableVo;
+import vip.xiaonuo.lh.modular.datasource.result.LhMetaColumnVo;
+import vip.xiaonuo.lh.modular.datasource.result.LhMetaObjectVo;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcMetaBrowser;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourcePostRegisterBridge;
@@ -99,6 +102,8 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     private vip.xiaonuo.lh.modular.catalog.support.GovAssetSourceReconcile govAssetSourceReconcile;
     @Resource
     private vip.xiaonuo.lh.modular.datasource.support.LhDatasourceLinkedAssetFiller linkedAssetFiller;
+    @Resource
+    private LhJdbcMetaBrowser jdbcMetaBrowser;
     /** ? @Order?Hive/Kafka/ES/Redis/RMQ/MinIO ????????? */
     @Resource
     private List<LhInventoryDiscoverer> inventoryDiscoverers;
@@ -599,6 +604,44 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             }
         }
         return Map.of("dsId", ds.getId(), "type", ds.getType(), "columns", columns);
+    }
+
+    @Override
+    public List<String> listMetaSchemas(LhDatasourceMetaParam param) {
+        LhDatasource ds = queryEntity(param.getId());
+        if (!jdbcMetaBrowser.supportsJdbc(ds)) {
+            log.info("meta schemas skipped (non-jdbc) dsId={} type={}: {}",
+                    ds.getId(), ds.getType(), jdbcMetaBrowser.unsupportedMessage(ds));
+            return Collections.emptyList();
+        }
+        return jdbcMetaBrowser.listSchemas(ds);
+    }
+
+    @Override
+    public List<LhMetaObjectVo> listMetaTables(LhDatasourceMetaParam param) {
+        LhDatasource ds = queryEntity(param.getId());
+        if (!jdbcMetaBrowser.supportsJdbc(ds)) {
+            return Collections.emptyList();
+        }
+        return jdbcMetaBrowser.listTables(ds, param.getSchema());
+    }
+
+    @Override
+    public List<LhMetaObjectVo> listMetaViews(LhDatasourceMetaParam param) {
+        LhDatasource ds = queryEntity(param.getId());
+        if (!jdbcMetaBrowser.supportsJdbc(ds)) {
+            return Collections.emptyList();
+        }
+        return jdbcMetaBrowser.listViews(ds, param.getSchema());
+    }
+
+    @Override
+    public List<LhMetaColumnVo> listMetaColumns(LhDatasourceMetaParam param) {
+        LhDatasource ds = queryEntity(param.getId());
+        if (!jdbcMetaBrowser.supportsJdbc(ds)) {
+            return Collections.emptyList();
+        }
+        return jdbcMetaBrowser.listColumns(ds, param.getSchema(), param.getTable());
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -1421,9 +1464,20 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                     row.put("sqlrestDatasourceId", p.get("sqlrestDatasourceId"));
                     row.put("sqlrestName", p.get("sqlrestName"));
                     row.put("sqlrestType", p.get("sqlrestType"));
+                    row.put("projected", p.get("sqlrestDatasourceId") != null);
                 }
             } else {
                 row.put("syncState", projectable ? "never" : "unsupported");
+                row.put("projected", false);
+            }
+            // 平台权限：仅返回当前用户可用源（拥有者或 EDIT/MANAGE）
+            try {
+                if (!secAuthGrantService.canUseDatasource(ds.getId())) {
+                    continue;
+                }
+            } catch (Exception e) {
+                // 未登录等：不返回
+                continue;
             }
             out.add(row);
         }

@@ -23,7 +23,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
-final class PreviewAdapterSupport {
+public final class PreviewAdapterSupport {
 
     private PreviewAdapterSupport() {
     }
@@ -58,7 +58,7 @@ final class PreviewAdapterSupport {
      * <p>已知非湖源（ES/Kafka/RDB/…）即使误挂 {@code gravAssetId} 也不走 Grav；
      * 仅 Iceberg/Hive（及引擎/指针明确为湖表）才命中。</p>
      */
-    static boolean isLakeSource(GovAssetPreviewContext ctx) {
+    public static boolean isLakeSource(GovAssetPreviewContext ctx) {
         LhDatasource ds = ctx.getPrimaryDs();
         String raw = dsType(ds);
         GovAsset asset = ctx.getAsset();

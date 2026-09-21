@@ -46,4 +46,6 @@ public class DataapiApiBinding extends CommonEntity {
     private String responseJson;
     private Date lastPublishAt;
     private String lastError;
+    /** 发布审批单号 API-xxx */
+    private String publishTicketNo;
 }

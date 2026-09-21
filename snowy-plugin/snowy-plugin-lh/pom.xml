@@ -70,6 +70,18 @@
             <artifactId>mongodb-driver-sync</artifactId>
             <version>5.1.1</version>
         </dependency>
+        <!-- Milvus 向量库（知识库混合检索；未启用时软降级关键词） -->
+        <dependency>
+            <groupId>io.milvus</groupId>
+            <artifactId>milvus-sdk-java</artifactId>
+            <version>2.4.4</version>
+        </dependency>
+        <!-- 开发脚本正文的 Git 工作区（不依赖本机 git 命令） -->
+        <dependency>
+            <groupId>org.eclipse.jgit</groupId>
+            <artifactId>org.eclipse.jgit</artifactId>
+            <version>6.10.0.202406032230-r</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

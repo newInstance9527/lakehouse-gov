@@ -24,4 +24,14 @@ public interface ApplyTicketService {
      * ETL 出湖校验：ticketNo 必须存在、类型 lake_export、状态 approved。
      */
     void assertApprovedExportTicket(String ticketNo);
+
+    /**
+     * 合规删除执行门闩：ticketNo 必须存在、类型 compliance_delete、状态 approved。
+     */
+    void assertApprovedComplianceTicket(String ticketNo);
+
+    /**
+     * 数据服务发布门闩：ticketNo 须为 api_publish 且 approved；可选校验绑定 id。
+     */
+    void assertApprovedApiPublishTicket(String ticketNo, String apiBindingId);
 }

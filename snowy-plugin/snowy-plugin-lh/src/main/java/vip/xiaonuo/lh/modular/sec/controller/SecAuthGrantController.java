@@ -12,6 +12,7 @@ import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsResourceTypeEnum;
+import vip.xiaonuo.lh.modular.sec.service.GravTableAccessService;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 @Tag(name = "表级/操作授权")
@@ -21,6 +22,8 @@ public class SecAuthGrantController {
 
     @Resource
     private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private GravTableAccessService gravTableAccessService;
 
     @Operation(summary = "检查当前用户读/操作权限；privilege=EDIT|DELETE|MANAGE 为操作权，缺省或其它为表读（仅 asset）")
     @GetMapping("/lh/sec/grants/check")
@@ -45,6 +48,6 @@ public class SecAuthGrantController {
         if (!LhOpsResourceTypeEnum.ASSET.getValue().equals(type)) {
             throw new CommonException("表级读权限仅支持 resourceType=asset");
         }
-        return CommonResult.data(secAuthGrantService.hasTableReadGrant(id));
+        return CommonResult.data(gravTableAccessService.canCurrentSelect(id));
     }
 }

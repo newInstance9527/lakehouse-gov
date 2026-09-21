@@ -61,7 +61,7 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         if (asset != null && isAssetOwner(asset, user)) {
             return true;
         }
-        return hasActivePrivilege(user.getId(), LhOpsResourceTypeEnum.ASSET.getValue(), assetId, null);
+        return hasActivePrivilege(user.getId(), LhOpsResourceTypeEnum.ASSET.getValue(), assetId, "SELECT");
     }
 
     @Override
@@ -85,6 +85,14 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             return true;
         }
         return hasActiveOpsPrivilege(user.getId(), type, resourceId, needed);
+    }
+
+    @Override
+    public boolean canUseDatasource(String datasourceId) {
+        if (StrUtil.isBlank(datasourceId)) {
+            return false;
+        }
+        return hasOpsPrivilege(LhOpsResourceTypeEnum.DATASOURCE.getValue(), datasourceId, LhOpsPrivilegeEnum.EDIT);
     }
 
     @Override
@@ -181,7 +189,7 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         return false;
     }
 
-    /** 表读：任意 active grant（含 SELECT）；操作权：按 needed 匹配 EDIT/DELETE/MANAGE */
+    /** 表查看只认 privilege=SELECT。操作权走 {@link #hasActiveOpsPrivilege}。 */
     private boolean hasActivePrivilege(String userId, String resourceType, String resourceId, String privilegeExact) {
         Date now = new Date();
         var qw = baseActiveGrantQw(userId, now);
@@ -246,6 +254,10 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         if (StrUtil.isBlank(resourceId)) {
             throw new CommonException("resourceId 不能为空");
         }
+        if (typeEnum == LhOpsResourceTypeEnum.ASSET
+                && "SELECT".equalsIgnoreCase(StrUtil.blankToDefault(privilege, ""))) {
+            throw new CommonException("表 SELECT 只写入 Gravitino，不写入门户授权表");
+        }
         SecAuthGrant g = new SecAuthGrant();
         g.setId(IdUtil.getSnowflakeNextIdStr());
         g.setRevision(1);
@@ -269,9 +281,90 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         g.setCreateTime(new Date());
         g.setCreateUser(LhLoginUsers.requireUserId());
         grantMapper.insert(g);
-        // 门户 sec_auth_grant 为授权 SoT；审批通过不投影 Grav（引擎 ACL 另册）。
-        // resource_manage(EDIT|DELETE|MANAGE) 与 table_read(SELECT) 均仅写门户。
+        // 门户操作权只承接 EDIT/DELETE/MANAGE。表 SELECT 由 recordSelectProjection 在引擎授权成功后写入。
         return g;
+    }
+
+    @Override
+    public SecAuthGrant recordSelectProjection(String ticketId, String subjectId, String assetId,
+                                               String gravAssetId, Date expiresAt, String rowFilter,
+                                               String policyId, String ws, String remark) {
+        if (StrUtil.hasBlank(subjectId, assetId)) {
+            throw new CommonException("SELECT 投影缺少主体或资产");
+        }
+        Date now = new Date();
+        SecAuthGrant existing = grantMapper.selectOne(new QueryWrapper<SecAuthGrant>().lambda()
+                .eq(SecAuthGrant::getDeleteFlag, NOT_DELETE)
+                .eq(SecAuthGrant::getStatus, "active")
+                .eq(SecAuthGrant::getSubjectType, "user")
+                .eq(SecAuthGrant::getSubjectId, subjectId)
+                .eq(SecAuthGrant::getPrivilege, "SELECT")
+                .and(w -> w.eq(SecAuthGrant::getAssetId, assetId)
+                        .or().eq(SecAuthGrant::getResourceId, assetId))
+                .last("limit 1"));
+        if (existing != null) {
+            existing.setTicketId(StrUtil.blankToDefault(ticketId, existing.getTicketId()));
+            existing.setAssetId(assetId);
+            existing.setResourceType(LhOpsResourceTypeEnum.ASSET.getValue());
+            existing.setResourceId(assetId);
+            existing.setGravAssetId(StrUtil.blankToDefault(gravAssetId, existing.getGravAssetId()));
+            existing.setRowFilter(StrUtil.maxLength(StrUtil.nullToEmpty(rowFilter), 1024));
+            if (StrUtil.isNotBlank(policyId)) {
+                existing.setGravPolicyId(policyId);
+            }
+            existing.setGravProjected(1);
+            existing.setExpiresAt(expiresAt);
+            existing.setWs(StrUtil.blankToDefault(ws, existing.getWs()));
+            existing.setRemark(StrUtil.blankToDefault(remark, existing.getRemark()));
+            existing.setUpdateTime(now);
+            existing.setRevision(existing.getRevision() == null ? 1 : existing.getRevision() + 1);
+            grantMapper.updateById(existing);
+            return existing;
+        }
+        SecAuthGrant g = new SecAuthGrant();
+        g.setId(IdUtil.getSnowflakeNextIdStr());
+        g.setRevision(1);
+        g.setStatus("active");
+        g.setWs(StrUtil.blankToDefault(ws, "default"));
+        g.setRemark(StrUtil.blankToDefault(remark, "SELECT projection; catalog only"));
+        g.setTicketId(ticketId);
+        g.setSubjectType("user");
+        g.setSubjectId(subjectId);
+        g.setResourceType(LhOpsResourceTypeEnum.ASSET.getValue());
+        g.setResourceId(assetId);
+        g.setAssetId(assetId);
+        g.setGravAssetId(gravAssetId);
+        g.setPrivilege("SELECT");
+        g.setRowFilter(StrUtil.maxLength(StrUtil.nullToEmpty(rowFilter), 1024));
+        g.setGravPolicyId(StrUtil.blankToDefault(policyId, null));
+        g.setGravProjected(1);
+        g.setEffectiveAt(now);
+        g.setExpiresAt(expiresAt);
+        g.setDeleteFlag(NOT_DELETE);
+        g.setCreateTime(now);
+        try {
+            g.setCreateUser(LhLoginUsers.requireUserId());
+        } catch (Exception ignored) {
+            g.setCreateUser(subjectId);
+        }
+        grantMapper.insert(g);
+        return g;
+    }
+
+    @Override
+    public int expireSelectProjection(String ticketId) {
+        if (StrUtil.isBlank(ticketId)) {
+            return 0;
+        }
+        Date now = new Date();
+        UpdateWrapper<SecAuthGrant> uw = new UpdateWrapper<>();
+        uw.eq("delete_flag", NOT_DELETE)
+                .eq("status", "active")
+                .eq("privilege", "SELECT")
+                .eq("ticket_id", ticketId)
+                .set("status", "expired")
+                .set("update_time", now);
+        return grantMapper.update(null, uw);
     }
 
     @Override
@@ -318,6 +411,7 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
                 .eq("status", "active")
                 .isNotNull("expires_at")
                 .le("expires_at", now)
+                .apply("NOT (privilege = 'SELECT' AND grav_projected = 1)")
                 .set("status", "expired")
                 .set("update_time", now);
         return grantMapper.update(null, uw);

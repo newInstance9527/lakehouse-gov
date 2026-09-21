@@ -5,6 +5,8 @@ lh:
     aes-key: ""
   trino:
     url: https://127.0.0.1:18080
+    # Web UI 根（Explain / 慢查询外链；缺省回退为 url）
+    ui-url: https://127.0.0.1:18080
     vault-path: platform/trino/query
     user: admin
     password: ""
@@ -53,6 +55,10 @@ lh:
     gateway-url: http://127.0.0.1:18091
     # 仅 edge-mode=apisix|both 时作为 APISIX upstream
     executor-upstream: "127.0.0.1:18091"
+  dataapi:
+    # true=发布必须携带已审批 API-xxx；联调可先 false
+    require-publish-ticket: false
+    gateway-probe-timeout-ms: 8000
   apisix:
     admin-url: http://127.0.0.1:9180
     vault-path: platform/apisix/admin

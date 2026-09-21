@@ -34,8 +34,9 @@ import java.sql.ResultSet;
 import java.util.*;
 
 /**
- * 数据源登记后编排：Grav Catalog（可映射）→ 门户表清单 → JDBC/Grav→OM 或 门户清单→OM 直通
- * <p>各步独立 soft-fail，不回滚门户登记；不写引擎 ACL。</p>
+ * 数据源登记后编排：Grav Catalog（可映射）→ SQLREST 投影 → 门户表清单 → JDBC/Grav→OM 或 门户清单→OM 直通
+ * <p>各步独立 soft-fail，不回滚门户登记；不写引擎 ACL（权限 SoT 仍在平台）。</p>
+ * <p>SQLREST：可投影类型在登记/连接变更时写入 Manager，保证构建 API 左栏可选「全部已投影源」。</p>
  * <p>P0 门户+Vault；P1 库表/Hive→Grav+OM；P2 RMQ/Redis/ES/Kafka/MinIO 等门户→OM（不经 Grav）。</p>
  *
  * @author lakehouse
@@ -47,6 +48,8 @@ public class LhDatasourcePostRegisterBridge {
 
     @Resource
     private LhDatasourceGravitinoProjector gravitinoProjector;
+    @Resource
+    private LhDatasourceSqlrestProjector sqlrestProjector;
     @Resource
     private LhSchemaSyncService schemaSyncService;
     @Resource
@@ -72,15 +75,36 @@ public class LhDatasourcePostRegisterBridge {
         Map<String, Object> grav = gravitinoProjector.project(ds);
         out.put("gravitino", grav);
 
+        // 数据服务：登记即投影到 SQLREST（不可投影类型 skipped；失败 soft-fail）
+        Map<String, Object> sqlrest = projectSqlrest(ds);
+        out.put("sqlrest", sqlrest);
+
         Map<String, Object> tables = syncPortalTables(ds);
         out.put("tables", tables);
 
         // JDBC / Grav→OM：不支持 Grav 的类型或投影已 skipped 时，禁止再调 Grav listSchemas（否则 500 被当成同步失败）
         Map<String, Object> om = syncOmPreferJdbc(ds, catalog, tables, grav);
         out.put("openmetadata", om);
-        log.info("Post-register bridge done dsId={} catalog={} gravSkipped={} tablesOk={} omOk={}",
-                ds.getId(), catalog, grav.get("skipped"), tables.get("ok"), om.get("ok"));
+        log.info("Post-register bridge done dsId={} catalog={} gravSkipped={} sqlrestOk={} sqlrestSkipped={} tablesOk={} omOk={}",
+                ds.getId(), catalog, grav.get("skipped"), sqlrest.get("ok"), sqlrest.get("skipped"),
+                tables.get("ok"), om.get("ok"));
         return out;
+    }
+
+    private Map<String, Object> projectSqlrest(LhDatasource ds) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        try {
+            Map<String, Object> one = sqlrestProjector.project(ds);
+            r.putAll(one);
+            if (!r.containsKey("ok")) {
+                r.put("ok", Boolean.TRUE.equals(one.get("ok")));
+            }
+        } catch (Exception e) {
+            log.warn("SQLREST project failed for {}: {}", ds.getId(), e.getMessage());
+            r.put("ok", false);
+            r.put("error", e.getMessage());
+        }
+        return r;
     }
 
     private Map<String, Object> syncPortalTables(LhDatasource ds) {

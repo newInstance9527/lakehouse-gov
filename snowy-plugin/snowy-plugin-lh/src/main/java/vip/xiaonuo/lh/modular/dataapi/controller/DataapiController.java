@@ -15,8 +15,10 @@ import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiBindingParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiGatewayProbeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
 
@@ -85,7 +87,7 @@ public class DataapiController {
         return CommonResult.data(dataapiService.trial(param));
     }
 
-    @Operation(summary = "发布：SQLREST 上线 + APISIX 路由")
+    @Operation(summary = "发布：SQLREST 上线；APISIX 仅 edgeMode=apisix|both")
     @CommonLog("数据服务发布")
     @PostMapping("/lh/dataapi/publish")
     public CommonResult<Map<String, Object>> publish(@RequestBody @Valid DataapiIdParam param) {
@@ -150,5 +152,23 @@ public class DataapiController {
     @PostMapping("/lh/dataapi/register")
     public CommonResult<Map<String, Object>> register(@RequestBody @Valid DataapiBindingParam param) {
         return CommonResult.data(dataapiService.register(param));
+    }
+
+    @Operation(summary = "入参解析（SQLREST assignment/parse）")
+    @PostMapping("/lh/dataapi/parseParams")
+    public CommonResult<Map<String, Object>> parseParams(@RequestBody DataapiParseParam param) {
+        return CommonResult.data(dataapiService.parseParams(param));
+    }
+
+    @Operation(summary = "SQLREST 选项聚合（命名策略/类型格式/补全）")
+    @GetMapping("/lh/dataapi/sqlrest/options")
+    public CommonResult<Map<String, Object>> sqlrestOptions() {
+        return CommonResult.data(dataapiService.sqlrestOptions());
+    }
+
+    @Operation(summary = "Gateway 联调探针")
+    @PostMapping("/lh/dataapi/gatewayProbe")
+    public CommonResult<Map<String, Object>> gatewayProbe(@RequestBody DataapiGatewayProbeParam param) {
+        return CommonResult.data(dataapiService.gatewayProbe(param));
     }
 }
