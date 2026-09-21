@@ -156,6 +156,9 @@ public final class DsTaskScriptBuilder {
             return CleanSqlCompiler.compile(conf, conf.getStr("_lhUpstreamTable"));
         }
         if (type.startsWith("sink_")) {
+            if ("sink_iceberg".equals(type) && isFlinkEngine(conf)) {
+                return FlinkIcebergSinkSqlCompiler.compile(n, conf);
+            }
             // 汇：Iceberg/湖表才默认 catalog；RDB sink 用 database.table
             String fq = qualifyForSink(type, conf, table);
             String selectSql = firstNonBlank(conf.getStr("selectSql"), conf.getStr("fromSql"));
@@ -250,8 +253,8 @@ public final class DsTaskScriptBuilder {
             String database = firstNonBlank(conf.getStr("database"), conf.getStr("schema"), conf.getStr("lhDatabase"));
             return qualifyRdb(database, bareTable(table), table);
         }
-        String catalog = firstNonBlank(conf.getStr("catalog"), conf.getStr("gravCatalog"), "iceberg");
-        String schema = firstNonBlank(conf.getStr("schema"), conf.getStr("database"), conf.getStr("layer"), "default");
+        String catalog = FlinkIcebergSinkSqlCompiler.lakeCatalog(conf);
+        String schema = firstNonBlank(conf.getStr("schema"), conf.getStr("database"), conf.getStr("layer"), "ods");
         return qualify(catalog, schema, table);
     }
 
@@ -270,7 +273,7 @@ public final class DsTaskScriptBuilder {
         if (StrUtil.isNotBlank(tableOnly)) {
             return quoteIdent(tableOnly);
         }
-        return "\"_lh_probe\"";
+        return "`_lh_probe`";
     }
 
     /** 仅 conf.previewLimit / conf.limit 显式指定时追加；发布全量不加 LIMIT */
@@ -451,11 +454,20 @@ public final class DsTaskScriptBuilder {
         return sb.toString();
     }
 
+    /** Flink SQL 用反引号；双引号会 ParseException Encountered {@code "\""}。 */
     private static String quoteIdent(String s) {
         if (StrUtil.isBlank(s)) {
-            return "\"_\"";
+            return "`_`";
         }
-        return "\"" + s.replace("\"", "\"\"") + "\"";
+        return "`" + s.replace("`", "") + "`";
+    }
+
+    private static boolean isFlinkEngine(JSONObject conf) {
+        if (conf == null) {
+            return false;
+        }
+        String e = StrUtil.blankToDefault(conf.getStr("_lhEngine"), conf.getStr("engine")).toLowerCase();
+        return e.startsWith("flink") || StrUtil.isBlank(e);
     }
 
     private static boolean isQuery(String sql) {

@@ -45,3 +45,8 @@ tmp/
 !**/allatori/**
 .cursor/
 
+# 禁止提交本机 Maven 路径。.mvn/maven.config 会被拼进所有人的 mvn 命令行，
+# 写 -s / maven.repo.local 等个人盘符会直接导致 Error executing Maven。
+.mvn/maven.config
+
+

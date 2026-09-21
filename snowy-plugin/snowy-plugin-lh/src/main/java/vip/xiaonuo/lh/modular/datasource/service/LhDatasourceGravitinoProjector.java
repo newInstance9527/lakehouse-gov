@@ -21,8 +21,12 @@ import vip.xiaonuo.lh.core.engine.GravitinoClient;
 import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
+import vip.xiaonuo.lh.modular.datasource.support.LhIcebergNamespaceNames;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -74,6 +78,9 @@ public class LhDatasourceGravitinoProjector {
             out.put("skipped", false);
             out.put("gravSupported", true);
             out.put("provider", p.provider);
+            if ("iceberg".equalsIgnoreCase(StrUtil.blankToDefault(ds.getType(), ""))) {
+                out.putAll(ensureIcebergNamespaces(ds, List.of()));
+            }
             log.info("Datasource {} projected to Grav catalog {}.{}", ds.getId(), metalake, catalogName);
         } catch (Exception e) {
             log.warn("Project datasource {} to Gravitino failed: {}", ds.getId(), e.getMessage());
@@ -114,6 +121,36 @@ public class LhDatasourceGravitinoProjector {
             return StrUtil.blankToDefault(lhProperties.getGravitino().getCatalog(), "iceberg");
         }
         return sanitizeCatalogName(ds == null ? null : ds.getDsCode());
+    }
+
+    /**
+     * 按数据源命名空间清单在 Grav 湖 catalog 上 ensureSchema（幂等；失败写入 schemaErrors，不抛）。
+     */
+    public Map<String, Object> ensureIcebergNamespaces(LhDatasource ds, Collection<String> extraObjectNames) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (ds == null || !"iceberg".equalsIgnoreCase(StrUtil.blankToDefault(ds.getType(), ""))) {
+            out.put("skipped", true);
+            return out;
+        }
+        String metalake = lhProperties.getGravitino().getMetalake();
+        String catalog = catalogNameOf(ds);
+        List<String> names = LhIcebergNamespaceNames.resolve(ds, extraObjectNames);
+        List<String> ensured = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        for (String ns : names) {
+            try {
+                gravitinoClient.ensureSchema(metalake, catalog, ns,
+                        "created by lakehouse datasource namespace");
+                ensured.add(ns);
+            } catch (Exception e) {
+                log.warn("Ensure Iceberg schema {}.{} failed: {}", catalog, ns, e.getMessage());
+                errors.add(ns + ": " + e.getMessage());
+            }
+        }
+        out.put("schemas", names);
+        out.put("ensured", ensured);
+        out.put("schemaErrors", errors);
+        return out;
     }
 
     private Map<String, String> buildProperties(LhDatasource ds, ProviderSpec p) {

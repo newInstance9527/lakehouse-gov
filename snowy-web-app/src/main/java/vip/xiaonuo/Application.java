@@ -18,6 +18,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.mongo.MongoReactiveDataAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.mongo.MongoReactiveRepositoriesAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.mongo.MongoRepositoriesAutoConfiguration;
+import org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration;
+import org.springframework.boot.autoconfigure.mongo.MongoReactiveAutoConfiguration;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.Environment;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -31,7 +37,16 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @Slf4j
 @RestController
-@SpringBootApplication(exclude = {Knife4jAutoConfiguration.class})
+@SpringBootApplication(exclude = {
+        Knife4jAutoConfiguration.class,
+        // mongodb-driver-sync 只给资产预览按需建连，禁止启动时默认连 localhost:27017
+        MongoAutoConfiguration.class,
+        MongoReactiveAutoConfiguration.class,
+        MongoDataAutoConfiguration.class,
+        MongoRepositoriesAutoConfiguration.class,
+        MongoReactiveDataAutoConfiguration.class,
+        MongoReactiveRepositoriesAutoConfiguration.class
+})
 public class Application {
 
     /* 解决druid 日志报错：discard long time none received connection:xxx */

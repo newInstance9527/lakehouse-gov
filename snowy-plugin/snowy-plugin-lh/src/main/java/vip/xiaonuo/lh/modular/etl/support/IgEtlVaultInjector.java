@@ -131,6 +131,7 @@ public class IgEtlVaultInjector {
             }
 
             String dsId = conf.getStr("dsId");
+            boolean icebergSink = "sink_iceberg".equals(nodeType);
             // clean/transform 常无本节点 dsId：用上游源库读写 lh_ods_*/lh_clean_*
             if (StrUtil.isBlank(dsId) && ("clean".equals(nodeType) || "transform".equals(nodeType)
                     || "mapping".equals(nodeType))) {
@@ -142,17 +143,25 @@ public class IgEtlVaultInjector {
             }
             if (StrUtil.isBlank(dsId)) {
                 noDsId++;
-                continue;
+                // Iceberg 汇可只配 catalog.schema.table，读端走上游 JDBC 落表
+                if (!icebergSink) {
+                    continue;
+                }
+            } else {
+                taskParams.put("lhDsId", dsId);
             }
-            taskParams.put("lhDsId", dsId);
 
-            LhDatasource ds = datasourceMapper.selectById(dsId);
-            if (ds == null) {
+            LhDatasource ds = StrUtil.isBlank(dsId) ? null : datasourceMapper.selectById(dsId);
+            if (StrUtil.isNotBlank(dsId) && ds == null) {
                 missingDs++;
                 notes.add(nodeKey + ": dsId 不存在 " + dsId);
-                continue;
+                if (!icebergSink) {
+                    continue;
+                }
             }
-            fillDsIntoConf(ds, conf, taskParams, sinkSide ? "writer" : "primary");
+            if (ds != null) {
+                fillDsIntoConf(ds, conf, taskParams, sinkSide ? "writer" : "primary", nodeType);
+            }
 
             // 上游数据源（汇节点 DataX 读端）
             LhDatasource readerDs = null;
@@ -162,7 +171,7 @@ public class IgEtlVaultInjector {
             String writerDsId = sinkSide
                     ? dsId
                     : firstNonBlank(conf.getStr("writerDsId"), conf.getStr("targetDsId"));
-            if (StrUtil.isNotBlank(readerDsId) && !readerDsId.equals(dsId)) {
+            if (StrUtil.isNotBlank(readerDsId) && (dsId == null || !readerDsId.equals(dsId))) {
                 readerDs = datasourceMapper.selectById(readerDsId);
                 if (readerDs != null) {
                     conf.set("lhUpstreamDsType", readerDs.getType());
@@ -171,6 +180,9 @@ public class IgEtlVaultInjector {
                     taskParams.put("lhReaderDsId", readerDsId);
                     taskParams.put("lhReaderDsType", readerDs.getType());
                     taskParams.put("lhUpstreamDsId", readerDsId);
+                    if (icebergSink) {
+                        fillReaderConn(readerDs, conf, taskParams);
+                    }
                 }
             } else if (sinkSide && StrUtil.isNotBlank(readerDsId) && readerDsId.equals(dsId)) {
                 // 汇点 reader 不能与写端同 ds（否则 mysqlreader 会吃到 postgres URL）
@@ -180,7 +192,7 @@ public class IgEtlVaultInjector {
                 readerDs = ds;
                 readerDsId = dsId;
             }
-            if (sinkSide) {
+            if (sinkSide && ds != null) {
                 conf.set("lhWriterDsType", ds.getType());
                 taskParams.put("lhWriterDsId", dsId);
             } else if (StrUtil.isNotBlank(writerDsId)) {
@@ -253,7 +265,8 @@ public class IgEtlVaultInjector {
                     || "clean".equals(nodeType)
                     || "transform".equals(nodeType)
                     || "mapping".equals(nodeType)
-                    || "sink_rdb".equals(nodeType) || "sink_ck".equals(nodeType))) {
+                    || "sink_rdb".equals(nodeType) || "sink_ck".equals(nodeType)
+                    || icebergSink)) {
                 String rebuilt = DsTaskScriptBuilder.resolveSql(node, conf);
                 taskParams.put("lhSql", rebuilt);
                 if ("spark".equalsIgnoreCase(engine) || "SPARK".equals(String.valueOf(task.get("taskType")))) {
@@ -291,21 +304,35 @@ public class IgEtlVaultInjector {
                 }
             }
 
-            // Vault：本节点 ds（写端或源）
-            String vaultPath = ds.getVaultPath();
-            if (StrUtil.isBlank(vaultPath)) {
+            // Vault：写端 ds；Iceberg 无写端 ds 时用上游读端 JDBC
+            String vaultPath = ds == null ? null : ds.getVaultPath();
+            Map<String, Object> secret = null;
+            if (StrUtil.isBlank(vaultPath) && icebergSink && readerDs != null
+                    && StrUtil.isNotBlank(readerDs.getVaultPath())) {
+                vaultPath = readerDs.getVaultPath();
+                secret = vaultClient.readOrEmpty(vaultPath);
+            } else if (StrUtil.isBlank(vaultPath)) {
                 missingVault++;
                 notes.add(nodeKey + ": 数据源无 vaultPath");
-                continue;
+                if (!icebergSink) {
+                    continue;
+                }
+            } else {
+                taskParams.put("lhVaultPath", vaultPath);
+                taskParams.put("secretRef", "vault://" + vaultPath);
+                secret = vaultClient.readOrEmpty(vaultPath);
+                if (secret == null || secret.isEmpty()) {
+                    missingVault++;
+                    notes.add(nodeKey + ": Vault 空 " + vaultPath);
+                    if (!icebergSink) {
+                        continue;
+                    }
+                    secret = null;
+                }
             }
-            taskParams.put("lhVaultPath", vaultPath);
-            taskParams.put("secretRef", "vault://" + vaultPath);
-
-            Map<String, Object> secret = vaultClient.readOrEmpty(vaultPath);
-            if (secret == null || secret.isEmpty()) {
-                missingVault++;
-                notes.add(nodeKey + ": Vault 空 " + vaultPath);
-                continue;
+            if (icebergSink && StrUtil.isNotBlank(vaultPath) && secret != null) {
+                taskParams.put("lhVaultPath", vaultPath);
+                taskParams.put("secretRef", "vault://" + vaultPath);
             }
 
             // Flink/Spark/DataX：脚本/JSON 保留 ${LH_JDBC_*} 占位；凭证只进 env + localParams（运行时由 DS 参数替换或 shell 展开）
@@ -319,7 +346,8 @@ public class IgEtlVaultInjector {
                 }
                 // 有界落表：用 Vault 凭证建 lh_ods_*/lh_clean_*（仅发布侧 DDL，不写入任务脚本）
                 if (IgEtlNodeTypes.SOURCE.contains(nodeType) && StrUtil.isNotBlank(landingTable)
-                        && !Boolean.TRUE.equals(taskParams.get("_lhStagingColsReady"))) {
+                        && !Boolean.TRUE.equals(taskParams.get("_lhStagingColsReady"))
+                        && ds != null && secret != null) {
                     Object url = secret.get("jdbcUrl") != null ? secret.get("jdbcUrl") : secret.get("url");
                     Object u = secret.get("username") != null ? secret.get("username") : secret.get("user");
                     Object p = secret.get("password");
@@ -347,30 +375,33 @@ public class IgEtlVaultInjector {
             // 每次节点重建，避免重复累加 localParams
             List<Map<String, Object>> localParams = new ArrayList<>();
 
-            // Vault 原文：仅 connSafe + 审计用 vault 引用（不进 localParams，避免与 JDBC 别名重复）
-            injectSecretToEnv(secret, vaultPath, env, connSafe);
-
-            // JDBC 别名：只注入任务实际需要的前缀，避免 LH_JDBC + READER + WRITER 三套重复
-            putJdbcAliases(env, secret, vaultPath, "LH_JDBC", localParams);
+            if (secret != null && StrUtil.isNotBlank(vaultPath) && !icebergSink) {
+                injectSecretToEnv(secret, vaultPath, env, connSafe);
+                putJdbcAliases(env, secret, vaultPath, "LH_JDBC", localParams);
+            }
             if (sinkSide) {
-                putJdbcAliases(env, secret, vaultPath, "LH_WRITER_JDBC", localParams);
+                if (secret != null && StrUtil.isNotBlank(vaultPath) && ds != null) {
+                    injectSecretToEnv(secret, vaultPath, env, connSafe);
+                    putJdbcAliases(env, secret, vaultPath, "LH_WRITER_JDBC", localParams);
+                }
                 if (readerDs != null && StrUtil.isNotBlank(readerDs.getVaultPath())) {
                     Map<String, Object> readerSecret = vaultClient.readOrEmpty(readerDs.getVaultPath());
                     if (readerSecret != null && !readerSecret.isEmpty()) {
                         putJdbcAliases(env, readerSecret, readerDs.getVaultPath(), "LH_READER_JDBC", localParams);
+                        // Iceberg/Flink JDBC 源读 lh_ods_*，SQL 占位是 LH_JDBC_*
+                        if (icebergSink) {
+                            putJdbcAliases(env, readerSecret, readerDs.getVaultPath(), "LH_JDBC", localParams);
+                        }
                         taskParams.put("lhReaderVaultPath", readerDs.getVaultPath());
                     } else {
                         notes.add(nodeKey + ": 上游读端 Vault 空 " + readerDs.getVaultPath());
                     }
                 } else if (StrUtil.isNotBlank(readerDsId) && readerDs == null) {
                     notes.add(nodeKey + ": 上游 readerDsId 不存在 " + readerDsId);
-                } else if (!sinkSide) {
-                    putJdbcAliases(env, secret, vaultPath, "LH_READER_JDBC", localParams);
-                } else {
-                    // sink 无上游 ds：禁止把写端 Vault 填到 LH_READER（mysqlreader + postgres URL → No suitable driver）
+                } else if (!icebergSink) {
                     notes.add(nodeKey + ": sink 缺少上游 readerDsId/_lhUpstreamDsId，未注入 LH_READER_*");
                 }
-            } else if (StrUtil.isNotBlank(writerDsId)) {
+            } else if (StrUtil.isNotBlank(writerDsId) && secret != null && StrUtil.isNotBlank(vaultPath)) {
                 // 源节点另配写端
                 putJdbcAliases(env, secret, vaultPath, "LH_READER_JDBC", localParams);
                 LhDatasource wds = datasourceMapper.selectById(writerDsId);
@@ -402,7 +433,8 @@ public class IgEtlVaultInjector {
         return summary;
     }
 
-    private void fillDsIntoConf(LhDatasource ds, JSONObject conf, Map<String, Object> taskParams, String role) {
+    private void fillDsIntoConf(LhDatasource ds, JSONObject conf, Map<String, Object> taskParams, String role,
+                               String nodeType) {
         taskParams.put("lhDsCode", ds.getDsCode());
         taskParams.put("lhDsType", ds.getType());
         taskParams.put("lhDsName", ds.getName());
@@ -418,14 +450,40 @@ public class IgEtlVaultInjector {
         }
         if (StrUtil.isNotBlank(ds.getDatabaseName())) {
             taskParams.put("lhDatabase", ds.getDatabaseName());
-            conf.set("database", ds.getDatabaseName());
             conf.set("lhDatabase", ds.getDatabaseName());
+            // Iceberg 汇的 database 是湖 schema，不能被数据源库名覆盖
+            if (!"sink_iceberg".equals(nodeType) || StrUtil.isBlank(conf.getStr("database"))) {
+                conf.set("database", ds.getDatabaseName());
+            }
         }
         conf.set("lhDsType", ds.getType());
         if (StrUtil.isNotBlank(ds.getType())) {
             conf.set("dbType", ds.getType());
         }
         taskParams.put("lhDsRole", role);
+    }
+
+    /** 只填 JDBC 读连接，不覆盖 sink 的 catalog/database/table。 */
+    private void fillReaderConn(LhDatasource ds, JSONObject conf, Map<String, Object> taskParams) {
+        if (StrUtil.isNotBlank(ds.getEndpointHost())) {
+            conf.set("host", ds.getEndpointHost());
+            conf.set("lhHost", ds.getEndpointHost());
+            taskParams.put("lhHost", ds.getEndpointHost());
+        }
+        if (StrUtil.isNotBlank(ds.getEndpointPort())) {
+            conf.set("port", ds.getEndpointPort());
+            conf.set("lhPort", ds.getEndpointPort());
+            taskParams.put("lhPort", ds.getEndpointPort());
+        }
+        if (StrUtil.isNotBlank(ds.getDatabaseName())) {
+            conf.set("lhDatabase", ds.getDatabaseName());
+            taskParams.put("lhDatabase", ds.getDatabaseName());
+        }
+        if (StrUtil.isNotBlank(ds.getType())) {
+            conf.set("lhReaderDsType", ds.getType());
+            conf.set("dbType", ds.getType());
+            conf.set("lhDsType", ds.getType());
+        }
     }
 
     /** Vault 原文：env 审计引用 + connSafe；不进 localParams（避免与 JDBC 别名重复、direct 非法） */

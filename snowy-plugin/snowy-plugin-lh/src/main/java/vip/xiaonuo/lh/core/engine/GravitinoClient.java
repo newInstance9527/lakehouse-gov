@@ -146,6 +146,10 @@ public class GravitinoClient {
      * 确保 schema 存在（不存在则创建，soft 路径由调用方捕获）
      */
     public void ensureSchema(String metalake, String catalog, String schema) {
+        ensureSchema(metalake, catalog, schema, "created by lakehouse etl autoCreate");
+    }
+
+    public void ensureSchema(String metalake, String catalog, String schema, String comment) {
         String path = "/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog)
                 + "/schemas/" + enc(schema);
         try {
@@ -153,7 +157,7 @@ public class GravitinoClient {
         } catch (Exception e) {
             JSONObject body = new JSONObject();
             body.set("name", schema);
-            body.set("comment", "created by lakehouse etl autoCreate");
+            body.set("comment", StrUtil.blankToDefault(comment, "created by lakehouse"));
             authPost("/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog) + "/schemas",
                     body.toString());
         }

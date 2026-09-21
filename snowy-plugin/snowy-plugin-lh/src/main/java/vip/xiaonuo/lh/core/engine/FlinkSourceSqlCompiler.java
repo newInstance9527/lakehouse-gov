@@ -133,6 +133,63 @@ public final class FlinkSourceSqlCompiler {
         return sb.toString();
     }
 
+    /**
+     * 仅生成 JDBC {@code CREATE TABLE}，供 sink 读 {@code lh_ods_*} / {@code lh_clean_*}。
+     * {@code conf.database} 必须是 RDB 库名（Iceberg schema 请放在别的字段）。
+     */
+    public static String compileJdbcCreateTable(JSONObject conf, String alias, String tableBare, List<Column> columns) {
+        if (conf == null) {
+            conf = new JSONObject();
+        }
+        String dbType = StrUtil.blankToDefault(firstNonBlank(
+                conf.getStr("dbType"), conf.getStr("lhDsType"), conf.getStr("dsType"), conf.getStr("lhReaderDsType"),
+                conf.getStr("type")), "mysql");
+        String database = firstNonBlank(conf.getStr("lhDatabase"), conf.getStr("database"), conf.getStr("schema"));
+        String host = firstNonBlank(conf.getStr("host"), conf.getStr("lhHost"), conf.getStr("endpointHost"));
+        String port = portOf(conf);
+        Dialect d = Dialect.of(dbType);
+        String schema = firstNonBlank(conf.getStr("pgSchema"), conf.getStr("schemaName"),
+                isPg(dbType) ? "public" : null);
+        String h = StrUtil.blankToDefault(host, "${LH_HOST}");
+        String p = StrUtil.blankToDefault(port, d.defaultPort());
+        String db = StrUtil.blankToDefault(database, "${LH_DATABASE}");
+        String tz = firstNonBlank(conf.getStr("serverTimeZone"), "Asia/Shanghai");
+        List<Column> cols = columns == null ? List.of() : columns;
+        if (cols.isEmpty()) {
+            cols = columnsFromConf(conf);
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("CREATE TABLE IF NOT EXISTS `").append(safeIdent(alias)).append("` (\n");
+        List<Column> usable = new ArrayList<>();
+        for (Column c : cols) {
+            if (c != null && StrUtil.isNotBlank(c.name())) {
+                usable.add(c);
+            }
+        }
+        Set<String> pkNames = new LinkedHashSet<>();
+        for (Column c : usable) {
+            if (c.primaryKey()) {
+                pkNames.add(c.name().replace("`", ""));
+            }
+        }
+        if (pkNames.isEmpty() && StrUtil.isNotBlank(conf.getStr("pk"))) {
+            for (String pkn : conf.getStr("pk").split("[,;\\s]+")) {
+                if (StrUtil.isNotBlank(pkn)) {
+                    pkNames.add(pkn.trim().replace("`", ""));
+                }
+            }
+        }
+        if (usable.isEmpty()) {
+            usable = List.of(new Column("id", "STRING", true));
+            pkNames.add("id");
+        }
+        appendColDefs(sb, usable, pkNames);
+        sb.append(") WITH (\n");
+        appendJdbcOptions(sb, d, h, p, db, schema, tableBare, tz);
+        sb.append(");\n");
+        return sb.toString();
+    }
+
     private static void appendColDefs(StringBuilder sb, List<Column> usable, Set<String> pkNames) {
         for (int i = 0; i < usable.size(); i++) {
             Column c = usable.get(i);

@@ -27,7 +27,7 @@ public class LhInventoryDiscoverResult {
     /** true=远端真实拉取；false=手工摘要等降级 */
     public boolean fromRemote;
     /**
-     * 发现路径：jdbc / hive_grav / kafka_admin / es_cat / redis_prefix / redis_scan
+     * 发现路径：jdbc / hive_grav / iceberg_grav / kafka_admin / es_cat / redis_prefix / redis_scan
      * / rabbitmq_mgmt / minio_s3 / manual / fallback
      */
     public String path = "unknown";

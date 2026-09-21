@@ -41,7 +41,6 @@ public class LhManualSummaryInventoryDiscoverer implements LhInventoryDiscoverer
             "http_api",
             "pulsar",
             "hbase",
-            "iceberg",
             "tableau",
             "superset",
             "airflow"
