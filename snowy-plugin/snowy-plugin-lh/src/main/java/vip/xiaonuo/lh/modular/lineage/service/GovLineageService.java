@@ -35,7 +35,18 @@ public interface GovLineageService {
 
     Map<String, Object> changeEval(String table, String field, String toType, String ws);
 
+    /** 评估单审批：decision=approved|rejected */
+    Map<String, Object> decideChangeEval(String id, String decision, String ws);
+
     Map<String, Object> blockDdl(String table, String field, String reason, String ws);
+
+    /**
+     * 发布门禁：读 {@code gov_lineage_ddl_block} / 待审评估单；命中 active 阻断则 fail。
+     */
+    Map<String, Object> assessPublishGate(String ws, String tableHint);
+
+    /** 血缘解析是否已入库（门禁 gate 2）：表相关字段边计数。 */
+    Map<String, Object> assessLineageIngestGate(String ws, String tableHint);
 
     Map<String, Object> marquezNamespaces();
 }

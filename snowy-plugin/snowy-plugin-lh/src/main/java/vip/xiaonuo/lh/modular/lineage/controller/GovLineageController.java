@@ -95,7 +95,7 @@ public class GovLineageController {
         return CommonResult.data(govLineageService.syncStatus(ws));
     }
 
-    @Operation(summary = "生成变更评估")
+    @Operation(summary = "生成变更评估（落库）")
     @CommonLog("血缘变更评估")
     @PostMapping("/lh/lineage/change-eval")
     public CommonResult<Map<String, Object>> changeEval(@RequestBody Map<String, String> body) {
@@ -103,7 +103,15 @@ public class GovLineageController {
                 body.get("table"), body.get("field"), body.get("toType"), body.get("ws")));
     }
 
-    @Operation(summary = "登记阻断 DDL 意图")
+    @Operation(summary = "变更评估审批（approved/rejected）")
+    @CommonLog("血缘变更评估审批")
+    @PostMapping("/lh/lineage/change-eval/decide")
+    public CommonResult<Map<String, Object>> decideChangeEval(@RequestBody Map<String, String> body) {
+        return CommonResult.data(govLineageService.decideChangeEval(
+                body.get("id"), body.get("decision"), body.get("ws")));
+    }
+
+    @Operation(summary = "登记阻断 DDL（落库，接入发布门禁）")
     @CommonLog("血缘阻断DDL")
     @PostMapping("/lh/lineage/block-ddl")
     public CommonResult<Map<String, Object>> blockDdl(@RequestBody Map<String, String> body) {

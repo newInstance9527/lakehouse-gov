@@ -28,6 +28,7 @@ import vip.xiaonuo.lh.modular.compute.param.CpScriptRunParam;
 import vip.xiaonuo.lh.modular.compute.param.CpScriptSaveParam;
 import vip.xiaonuo.lh.modular.compute.support.CpScriptGitStore;
 import vip.xiaonuo.lh.modular.compute.support.CpScriptLint;
+import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
 import vip.xiaonuo.lh.modular.quality.service.GovDqService;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExecParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
@@ -78,6 +79,8 @@ public class CpDevelopService {
     private CpQueryService cpQueryService;
     @Resource
     private GovDqService govDqService;
+    @Resource
+    private GovLineageService govLineageService;
 
     public Map<String, Object> tree(String ws) {
         String workspace = ws(ws);
@@ -809,14 +812,20 @@ public class CpDevelopService {
         boolean lintFail = CpScriptLint.hasError(lint);
         String lintDetail = lint.isEmpty() ? "无检查项" : lint.get(0).get("label");
         Map<String, Object> qualityGate = assessQualityGate(script);
+        Map<String, Object> lineageIngest = assessLineageIngestGate(script);
+        Map<String, Object> lineageImpact = assessLineageImpactGate(script);
         List<Map<String, Object>> gates = new ArrayList<>();
         gates.add(gate(1, "静态检查", lintDetail, lintFail ? "fail" : "pass"));
-        gates.add(gate(2, "血缘解析入库", "未接线", "skip"));
+        gates.add(gate(2, "血缘解析入库",
+                String.valueOf(lineageIngest.getOrDefault("detail", "未接线")),
+                String.valueOf(lineageIngest.getOrDefault("status", "skip"))));
         gates.add(gate(3, "质量规则绑定",
                 String.valueOf(qualityGate.getOrDefault("detail", "未接线")),
                 String.valueOf(qualityGate.getOrDefault("status", "skip"))));
         gates.add(gate(4, "stg 试跑", trialOk ? "已有成功或运行中的试跑" : "尚无成功试跑", trialOk ? "pass" : "fail"));
-        gates.add(gate(5, "变更影响", "未接线，不阻断", "skip"));
+        gates.add(gate(5, "变更影响",
+                String.valueOf(lineageImpact.getOrDefault("detail", "未接线，不阻断")),
+                String.valueOf(lineageImpact.getOrDefault("status", "skip"))));
         gates.add(gate(6, "生产发布", "等待门禁通过后发布 " + script.getName(), "wait"));
         return gates;
     }
@@ -832,6 +841,34 @@ public class CpDevelopService {
             Map<String, Object> soft = new LinkedHashMap<>();
             soft.put("status", "skip");
             soft.put("detail", "质量门禁 soft-fail: " + e.getMessage());
+            soft.put("blocked", false);
+            return soft;
+        }
+    }
+
+    private Map<String, Object> assessLineageIngestGate(CpScriptIndex script) {
+        try {
+            String path = StrUtil.blankToDefault(script.getPath(), script.getName());
+            String tableHint = guessTableFromPath(path);
+            return govLineageService.assessLineageIngestGate(script.getWs(), tableHint);
+        } catch (Exception e) {
+            Map<String, Object> soft = new LinkedHashMap<>();
+            soft.put("status", "skip");
+            soft.put("detail", "血缘入库门禁 soft-fail: " + e.getMessage());
+            soft.put("blocked", false);
+            return soft;
+        }
+    }
+
+    private Map<String, Object> assessLineageImpactGate(CpScriptIndex script) {
+        try {
+            String path = StrUtil.blankToDefault(script.getPath(), script.getName());
+            String tableHint = guessTableFromPath(path);
+            return govLineageService.assessPublishGate(script.getWs(), tableHint);
+        } catch (Exception e) {
+            Map<String, Object> soft = new LinkedHashMap<>();
+            soft.put("status", "skip");
+            soft.put("detail", "变更影响门禁 soft-fail: " + e.getMessage());
             soft.put("blocked", false);
             return soft;
         }

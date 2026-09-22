@@ -2,6 +2,7 @@ package vip.xiaonuo.lh.modular.lineage.service.impl;
 
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.annotation.Resource;
@@ -21,14 +22,19 @@ import vip.xiaonuo.lh.modular.etl.mapper.IgEtlEdgeMapper;
 import vip.xiaonuo.lh.modular.etl.mapper.IgEtlNodeMapper;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlPublishSideEffects;
 import vip.xiaonuo.lh.modular.lineage.entity.CbLineageSyncWatermark;
+import vip.xiaonuo.lh.modular.lineage.entity.GovLineageChangeEval;
+import vip.xiaonuo.lh.modular.lineage.entity.GovLineageDdlBlock;
 import vip.xiaonuo.lh.modular.lineage.entity.GovLineageFieldEdge;
 import vip.xiaonuo.lh.modular.lineage.mapper.CbLineageSyncWatermarkMapper;
+import vip.xiaonuo.lh.modular.lineage.mapper.GovLineageChangeEvalMapper;
+import vip.xiaonuo.lh.modular.lineage.mapper.GovLineageDdlBlockMapper;
 import vip.xiaonuo.lh.modular.lineage.mapper.GovLineageFieldEdgeMapper;
 import vip.xiaonuo.lh.modular.lineage.param.GovLineageEdgeUpsertParam;
 import vip.xiaonuo.lh.modular.lineage.param.GovLineageIdParam;
 import vip.xiaonuo.lh.modular.lineage.param.GovLineagePageParam;
 import vip.xiaonuo.lh.modular.lineage.result.GovLineageEdgeVo;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
+import vip.xiaonuo.lh.modular.lineage.support.OmColumnLineageExtractor;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -60,6 +66,10 @@ public class GovLineageServiceImpl implements GovLineageService {
     private GovLineageFieldEdgeMapper edgeMapper;
     @Resource
     private CbLineageSyncWatermarkMapper watermarkMapper;
+    @Resource
+    private GovLineageChangeEvalMapper changeEvalMapper;
+    @Resource
+    private GovLineageDdlBlockMapper ddlBlockMapper;
     @Resource
     private OpenMetadataClient openMetadataClient;
     @Resource
@@ -356,6 +366,11 @@ public class GovLineageServiceImpl implements GovLineageService {
             upsertWatermark("marquez", markKey, markValue);
         }
 
+        Map<String, Object> omMerge = mergeOmColumnEdges(workspace);
+        if (Boolean.TRUE.equals(omMerge.get("ok")) || toInt(omMerge.get("merged")) > 0) {
+            upsertWatermark("om", markKey, markValue);
+        }
+
         long edges = edgeMapper.selectCount(new QueryWrapper<GovLineageFieldEdge>().lambda()
                 .eq(GovLineageFieldEdge::getWs, workspace)
                 .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE));
@@ -366,13 +381,25 @@ public class GovLineageServiceImpl implements GovLineageService {
         r.put("lineageOk", lineageOk);
         r.put("lineageFail", lineageFail);
         r.put("topologyOk", topologyOk);
+        r.put("omColumnMerged", omMerge.get("merged"));
+        r.put("omColumnTables", omMerge.get("tables"));
+        r.put("omColumnDegraded", omMerge.get("degraded"));
         r.put("edgeCount", edges);
         r.put("markKey", markKey);
         r.put("markValue", markValue);
         r.put("marquez", mz);
-        r.put("hint", "已重扫 ETL fieldMaps/拓扑写入 gov_lineage_field_edge；OM 表级图 soft-fail；Marquez 作业血缘待全量投影");
-        if (!notes.isEmpty()) {
-            r.put("notes", notes);
+        r.put("hint", "已重扫 ETL fieldMaps/拓扑 + OM 列级合并写入 gov_lineage_field_edge；Marquez 作业血缘待全量投影");
+        List<String> allNotes = new ArrayList<>(notes);
+        Object omNotes = omMerge.get("notes");
+        if (omNotes instanceof List<?> list) {
+            for (Object o : list) {
+                if (allNotes.size() < 12) {
+                    allNotes.add(String.valueOf(o));
+                }
+            }
+        }
+        if (!allNotes.isEmpty()) {
+            r.put("notes", allNotes);
         }
         return r;
     }
@@ -430,6 +457,7 @@ public class GovLineageServiceImpl implements GovLineageService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> changeEval(String table, String field, String toType, String ws) {
         if (StrUtil.isBlank(table) || StrUtil.isBlank(field)) {
             throw new CommonException("table/field 不能为空");
@@ -437,38 +465,368 @@ public class GovLineageServiceImpl implements GovLineageService {
         String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
         List<GovLineageFieldEdge> all = listActiveEdges(workspace);
         List<Map<String, Object>> downstream = propagateFields(table, field, all, 8);
+        boolean noImpact = downstream.isEmpty();
+        boolean typeBlank = StrUtil.isBlank(toType);
+        boolean passed = noImpact || typeBlank;
+        String status = passed ? "approved" : "pending";
+        String id = IdUtil.getSnowflakeNextIdStr();
+        String ticketId = "LE-" + id.substring(Math.max(0, id.length() - 10));
+        String message = noImpact
+                ? "暂无下游字段边"
+                : ("影响 " + downstream.size() + " 个下游字段对象"
+                + (passed ? "" : " · 待审批"));
+
+        Date now = new Date();
+        GovLineageChangeEval row = new GovLineageChangeEval();
+        row.setId(id);
+        row.setRevision(1);
+        row.setWs(workspace);
+        row.setTableName(table.trim());
+        row.setFieldName(field.trim());
+        row.setToType(toType);
+        row.setImpactCount(downstream.size());
+        row.setImpactJson(JSONUtil.toJsonStr(downstream.size() > 40 ? downstream.subList(0, 40) : downstream));
+        row.setStatus(status);
+        row.setPassed(passed ? 1 : 0);
+        row.setTicketId(ticketId);
+        row.setMessage(message);
+        row.setDeleteFlag(NOT_DELETE);
+        row.setCreateTime(now);
+        row.setUpdateTime(now);
+        changeEvalMapper.insert(row);
+
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("id", IdUtil.getSnowflakeNextIdStr());
+        r.put("id", id);
+        r.put("ticketId", ticketId);
         r.put("table", table);
         r.put("field", field);
         r.put("toType", toType);
         r.put("impactCount", downstream.size());
         r.put("downstream", downstream);
-        r.put("passed", downstream.isEmpty() || StrUtil.isBlank(toType));
-        r.put("status", "draft");
-        r.put("message", downstream.isEmpty()
-                ? "暂无下游字段边"
-                : ("影响 " + downstream.size() + " 个下游字段对象"));
+        r.put("passed", passed);
+        r.put("status", status);
+        r.put("message", message);
+        r.put("persisted", true);
         return r;
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> decideChangeEval(String id, String decision, String ws) {
+        if (StrUtil.isBlank(id)) {
+            throw new CommonException("id 不能为空");
+        }
+        String dec = StrUtil.blankToDefault(decision, "").trim().toLowerCase(Locale.ROOT);
+        if (!"approved".equals(dec) && !"rejected".equals(dec)) {
+            throw new CommonException("decision 须为 approved 或 rejected");
+        }
+        GovLineageChangeEval row = changeEvalMapper.selectById(id);
+        if (row == null || !NOT_DELETE.equals(row.getDeleteFlag())) {
+            throw new CommonException("评估单不存在");
+        }
+        if (StrUtil.isNotBlank(ws) && !StrUtil.blankToDefault(ws, WS_DEFAULT).equals(row.getWs())) {
+            throw new CommonException("评估单不属于该工作空间");
+        }
+        Date now = new Date();
+        row.setStatus(dec);
+        row.setPassed("approved".equals(dec) ? 1 : 0);
+        row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
+        row.setUpdateTime(now);
+        row.setMessage(("approved".equals(dec) ? "审批通过" : "审批驳回")
+                + " · " + StrUtil.blankToDefault(row.getMessage(), ""));
+        changeEvalMapper.updateById(row);
+
+        if ("approved".equals(dec)) {
+            // 通过后关闭同表字段上的活跃阻断
+            List<GovLineageDdlBlock> blocks = ddlBlockMapper.selectList(new QueryWrapper<GovLineageDdlBlock>().lambda()
+                    .eq(GovLineageDdlBlock::getWs, row.getWs())
+                    .eq(GovLineageDdlBlock::getTableName, row.getTableName())
+                    .eq(GovLineageDdlBlock::getActive, 1)
+                    .eq(GovLineageDdlBlock::getDeleteFlag, NOT_DELETE)
+                    .and(w -> w.eq(GovLineageDdlBlock::getFieldName, row.getFieldName())
+                            .or().isNull(GovLineageDdlBlock::getFieldName)
+                            .or().eq(GovLineageDdlBlock::getFieldName, "")));
+            for (GovLineageDdlBlock b : blocks) {
+                b.setActive(0);
+                b.setUpdateTime(now);
+                b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
+                ddlBlockMapper.updateById(b);
+            }
+        }
+
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("id", row.getId());
+        r.put("ticketId", row.getTicketId());
+        r.put("status", row.getStatus());
+        r.put("passed", Integer.valueOf(1).equals(row.getPassed()));
+        r.put("table", row.getTableName());
+        r.put("field", row.getFieldName());
+        return r;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> blockDdl(String table, String field, String reason, String ws) {
+        if (StrUtil.isBlank(table)) {
+            throw new CommonException("table 不能为空");
+        }
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String reasonText = StrUtil.blankToDefault(reason, "变更评估未通过");
+        String ticketId = IdUtil.getSnowflakeNextIdStr();
+        Date now = new Date();
+
+        // 关联最近一张未删评估单（同表字段）
+        String evalId = null;
+        if (StrUtil.isNotBlank(field)) {
+            GovLineageChangeEval latest = changeEvalMapper.selectOne(new QueryWrapper<GovLineageChangeEval>().lambda()
+                    .eq(GovLineageChangeEval::getWs, workspace)
+                    .eq(GovLineageChangeEval::getTableName, table.trim())
+                    .eq(GovLineageChangeEval::getFieldName, field.trim())
+                    .eq(GovLineageChangeEval::getDeleteFlag, NOT_DELETE)
+                    .orderByDesc(GovLineageChangeEval::getCreateTime)
+                    .last("LIMIT 1"));
+            if (latest != null) {
+                evalId = latest.getId();
+                if (StrUtil.isNotBlank(latest.getTicketId())) {
+                    ticketId = latest.getTicketId();
+                }
+            }
+        }
+
+        GovLineageDdlBlock existing = ddlBlockMapper.selectOne(new QueryWrapper<GovLineageDdlBlock>().lambda()
+                .eq(GovLineageDdlBlock::getWs, workspace)
+                .eq(GovLineageDdlBlock::getTableName, table.trim())
+                .eq(GovLineageDdlBlock::getFieldName, StrUtil.blankToDefault(field, ""))
+                .eq(GovLineageDdlBlock::getDeleteFlag, NOT_DELETE)
+                .eq(GovLineageDdlBlock::getActive, 1)
+                .last("LIMIT 1"));
+        if (existing == null) {
+            existing = new GovLineageDdlBlock();
+            existing.setId(IdUtil.getSnowflakeNextIdStr());
+            existing.setRevision(1);
+            existing.setWs(workspace);
+            existing.setTableName(table.trim());
+            existing.setFieldName(StrUtil.blankToDefault(field, ""));
+            existing.setDeleteFlag(NOT_DELETE);
+            existing.setCreateTime(now);
+            ddlBlockMapper.insert(existing);
+        } else {
+            existing.setRevision(existing.getRevision() == null ? 1 : existing.getRevision() + 1);
+        }
+        existing.setReason(reasonText);
+        existing.setActive(1);
+        existing.setEvalId(evalId);
+        existing.setTicketId(ticketId);
+        existing.setUpdateTime(now);
+        ddlBlockMapper.updateById(existing);
+
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("ok", true);
         r.put("blocked", true);
+        r.put("id", existing.getId());
         r.put("table", table);
         r.put("field", field);
-        r.put("reason", StrUtil.blankToDefault(reason, "变更评估未通过"));
-        r.put("ws", StrUtil.blankToDefault(ws, WS_DEFAULT));
-        r.put("ticketId", IdUtil.getSnowflakeNextIdStr());
-        r.put("hint", "已登记阻断意图；正式对接 Schema 契约 / 发布门禁");
+        r.put("reason", reasonText);
+        r.put("ws", workspace);
+        r.put("evalId", evalId);
+        r.put("ticketId", ticketId);
+        r.put("persisted", true);
+        r.put("hint", "已落库 gov_lineage_ddl_block；发布门禁 gate5 将阻断命中表");
         return r;
+    }
+
+    @Override
+    public Map<String, Object> assessPublishGate(String ws, String tableHint) {
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String table = StrUtil.trim(tableHint);
+        List<GovLineageDdlBlock> active = ddlBlockMapper.selectList(new QueryWrapper<GovLineageDdlBlock>().lambda()
+                .eq(GovLineageDdlBlock::getWs, workspace)
+                .eq(GovLineageDdlBlock::getActive, 1)
+                .eq(GovLineageDdlBlock::getDeleteFlag, NOT_DELETE));
+        if (active.isEmpty()) {
+            // 无活跃阻断：若有待审评估且表匹配则仍 fail
+            if (StrUtil.isNotBlank(table)) {
+                List<GovLineageChangeEval> pendingRows = changeEvalMapper.selectList(
+                        new QueryWrapper<GovLineageChangeEval>().lambda()
+                                .eq(GovLineageChangeEval::getWs, workspace)
+                                .eq(GovLineageChangeEval::getStatus, "pending")
+                                .eq(GovLineageChangeEval::getDeleteFlag, NOT_DELETE));
+                for (GovLineageChangeEval e : pendingRows) {
+                    if (tableMatches(e.getTableName(), table)) {
+                        Map<String, Object> fail = new LinkedHashMap<>();
+                        fail.put("status", "fail");
+                        fail.put("detail", "变更评估待审 pending · " + e.getTableName() + "." + e.getFieldName()
+                                + " · " + e.getTicketId());
+                        fail.put("blocked", true);
+                        fail.put("evalId", e.getId());
+                        return fail;
+                    }
+                }
+            }
+            Map<String, Object> skip = new LinkedHashMap<>();
+            skip.put("status", "skip");
+            skip.put("detail", "无活跃 DDL 阻断");
+            skip.put("blocked", false);
+            return skip;
+        }
+        for (GovLineageDdlBlock b : active) {
+            if (StrUtil.isBlank(table) || tableMatches(b.getTableName(), table)) {
+                Map<String, Object> fail = new LinkedHashMap<>();
+                fail.put("status", "fail");
+                fail.put("detail", "血缘 DDL 阻断生效 · " + b.getTableName()
+                        + (StrUtil.isNotBlank(b.getFieldName()) ? ("." + b.getFieldName()) : "")
+                        + " · " + StrUtil.blankToDefault(b.getReason(), "变更评估未通过"));
+                fail.put("blocked", true);
+                fail.put("blockId", b.getId());
+                fail.put("ticketId", b.getTicketId());
+                return fail;
+            }
+        }
+        Map<String, Object> pass = new LinkedHashMap<>();
+        pass.put("status", "pass");
+        pass.put("detail", "有阻断登记但未命中当前脚本表（active=" + active.size() + "）");
+        pass.put("blocked", false);
+        return pass;
+    }
+
+    @Override
+    public Map<String, Object> assessLineageIngestGate(String ws, String tableHint) {
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String table = StrUtil.trim(tableHint);
+        long total = edgeMapper.selectCount(new QueryWrapper<GovLineageFieldEdge>().lambda()
+                .eq(GovLineageFieldEdge::getWs, workspace)
+                .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE));
+        if (total <= 0) {
+            Map<String, Object> skip = new LinkedHashMap<>();
+            skip.put("status", "skip");
+            skip.put("detail", "无门户字段边");
+            skip.put("blocked", false);
+            return skip;
+        }
+        if (StrUtil.isBlank(table)) {
+            Map<String, Object> pass = new LinkedHashMap<>();
+            pass.put("status", "pass");
+            pass.put("detail", "已有字段边 " + total + " 条");
+            pass.put("blocked", false);
+            pass.put("edgeCount", total);
+            return pass;
+        }
+        long matched = edgeMapper.selectCount(new QueryWrapper<GovLineageFieldEdge>().lambda()
+                .eq(GovLineageFieldEdge::getWs, workspace)
+                .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE)
+                .and(w -> w.like(GovLineageFieldEdge::getFromTable, table)
+                        .or().like(GovLineageFieldEdge::getToTable, table)));
+        if (matched > 0) {
+            Map<String, Object> pass = new LinkedHashMap<>();
+            pass.put("status", "pass");
+            pass.put("detail", "脚本相关字段边 " + matched + " 条");
+            pass.put("blocked", false);
+            pass.put("edgeCount", matched);
+            return pass;
+        }
+        Map<String, Object> skip = new LinkedHashMap<>();
+        skip.put("status", "skip");
+        skip.put("detail", "字段边未覆盖当前脚本表（总边=" + total + "）");
+        skip.put("blocked", false);
+        return skip;
     }
 
     @Override
     public Map<String, Object> marquezNamespaces() {
         return marquezClient.listNamespaces();
+    }
+
+    /**
+     * soft-fail：对门户边涉及的表拉取 OM 表级 lineage，投影 columnsLineage → gov_lineage_field_edge(etl_job_id=om_column)。
+     */
+    private Map<String, Object> mergeOmColumnEdges(String workspace) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        int merged = 0;
+        int tables = 0;
+        boolean degraded = false;
+        List<String> notes = new ArrayList<>();
+        Set<String> focusFqns = new LinkedHashSet<>();
+        for (GovLineageFieldEdge e : listActiveEdges(workspace)) {
+            if (StrUtil.isNotBlank(e.getOmFromFqn())) {
+                String[] p = OmColumnLineageExtractor.splitColumnFqn(e.getOmFromFqn());
+                if (p != null) {
+                    focusFqns.add(p[0]);
+                }
+            }
+            if (StrUtil.isNotBlank(e.getOmToFqn())) {
+                String[] p = OmColumnLineageExtractor.splitColumnFqn(e.getOmToFqn());
+                if (p != null) {
+                    focusFqns.add(p[0]);
+                }
+            }
+            if (StrUtil.isNotBlank(e.getFromTable()) && !"*".equals(e.getFromField())) {
+                focusFqns.add(e.getFromTable());
+            }
+            if (StrUtil.isNotBlank(e.getToTable()) && !"*".equals(e.getToField())) {
+                focusFqns.add(e.getToTable());
+            }
+        }
+        // 限流：最多扫 12 张表
+        int n = 0;
+        for (String fqn : focusFqns) {
+            if (n++ >= 12) {
+                notes.add("om_column: 表数截断至 12");
+                break;
+            }
+            tables++;
+            try {
+                Map<String, Object> om = openMetadataClient.getTableLineage(fqn, 2, 2);
+                if (!Boolean.TRUE.equals(om.get("ok"))) {
+                    degraded = true;
+                    if (notes.size() < 6) {
+                        notes.add("om soft-fail " + fqn + ": " + om.get("message"));
+                    }
+                    continue;
+                }
+                List<Map<String, String>> cols = OmColumnLineageExtractor.extractColumnEdges(om.get("data"));
+                for (Map<String, String> c : cols) {
+                    GovLineageEdgeUpsertParam p = new GovLineageEdgeUpsertParam();
+                    p.setWs(workspace);
+                    p.setFromTable(c.get("fromTable"));
+                    p.setFromField(c.get("fromField"));
+                    p.setToTable(c.get("toTable"));
+                    p.setToField(c.get("toField"));
+                    p.setTransformText(c.get("transform"));
+                    p.setConfidence("explicit");
+                    p.setEtlJobId(OmColumnLineageExtractor.ETL_JOB_OM_COLUMN);
+                    p.setOmFromFqn(c.get("omFromFqn"));
+                    p.setOmToFqn(c.get("omToFqn"));
+                    p.setRemark("om_column_merge");
+                    upsertField(p);
+                    merged++;
+                }
+            } catch (Exception ex) {
+                degraded = true;
+                if (notes.size() < 6) {
+                    notes.add("om merge " + fqn + ": " + ex.getMessage());
+                }
+            }
+        }
+        r.put("ok", !degraded || merged > 0);
+        r.put("merged", merged);
+        r.put("tables", tables);
+        r.put("degraded", degraded);
+        if (!notes.isEmpty()) {
+            r.put("notes", notes);
+        }
+        return r;
+    }
+
+    private static boolean tableMatches(String stored, String hint) {
+        if (StrUtil.isBlank(hint)) {
+            return true;
+        }
+        if (StrUtil.isBlank(stored)) {
+            return false;
+        }
+        String a = stored.toLowerCase(Locale.ROOT);
+        String b = hint.toLowerCase(Locale.ROOT);
+        return a.equals(b) || a.endsWith("." + b) || a.contains(b) || b.contains(a);
     }
 
     private Map<String, Object> buildGraphFromEdges(String focus, int up, int down, String ws) {
