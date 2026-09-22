@@ -19,7 +19,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * ClickHouse HTTP 只读客户端（凭证来自 Vault）。用于合规 dry-run COUNT 等轻量查询。
+ * ClickHouse HTTP 客户端（凭证来自 Vault）。
+ * dry-run COUNT 用平台只读 SA；合规 mutation 用 {@code sa_compliance}。
  */
 @Component
 public class ClickHouseClient {
@@ -34,10 +35,22 @@ public class ClickHouseClient {
     }
 
     /**
-     * 执行单条只读 SQL，期望 {@code FORMAT JSON} 结果。
+     * 执行 SQL（默认追加 {@code FORMAT JSON}），平台 ClickHouse 凭证。
      * 返回结构对齐 TrinoClient：{@code rows}/{@code degraded}/{@code message}。
      */
     public Map<String, Object> query(String sql) {
+        return query(sql, credentialResolver.clickhouse(), false);
+    }
+
+    /**
+     * 合规 mutation / 校验：使用 {@code sa_compliance}（缺省回退平台 CK 凭证）。
+     * {@code rawResult=true} 时不强制 FORMAT JSON（ALTER 无结果集）。
+     */
+    public Map<String, Object> queryAsComplianceSa(String sql, boolean rawResult) {
+        return query(sql, credentialResolver.complianceSa(), rawResult);
+    }
+
+    public Map<String, Object> query(String sql, Map<String, String> cred, boolean rawResult) {
         Map<String, Object> out = new LinkedHashMap<>();
         String url = baseUrl();
         if (StrUtil.isBlank(url)) {
@@ -57,15 +70,17 @@ public class ClickHouseClient {
             out.put("message", "SQL 为空");
             return out;
         }
-        if (!body.toUpperCase(java.util.Locale.ROOT).contains("FORMAT")) {
+        if (!rawResult && !body.toUpperCase(java.util.Locale.ROOT).contains("FORMAT")) {
             body = body + " FORMAT JSON";
         }
-        Map<String, String> cred = credentialResolver.clickhouse();
-        String user = StrUtil.blankToDefault(cred.get("username"), cred.get("user"));
-        String password = StrUtil.blankToDefault(cred.get("password"), "");
+        Map<String, String> c = cred == null ? Map.of() : cred;
+        String user = StrUtil.blankToDefault(c.get("username"), c.get("user"));
+        String password = StrUtil.blankToDefault(c.get("password"), "");
         try {
+            // mutation 可能较久；mutations_sync=2 时阻塞至本副本完成
+            int timeout = rawResult ? 300_000 : 60_000;
             HttpRequest req = HttpRequest.post(trimSlash(url) + "/")
-                    .timeout(60_000)
+                    .timeout(timeout)
                     .header("Content-Type", "text/plain; charset=UTF-8")
                     .body(body);
             if (StrUtil.isNotBlank(user)) {
@@ -84,6 +99,15 @@ public class ClickHouseClient {
                 out.put("degraded", true);
                 out.put("message", "ClickHouse HTTP " + code + ": "
                         + StrUtil.maxLength(StrUtil.blankToDefault(raw, ""), 200));
+                return out;
+            }
+            if (rawResult || StrUtil.isBlank(raw) || !StrUtil.trim(raw).startsWith("{")) {
+                out.put("columns", List.of());
+                out.put("rows", List.of());
+                out.put("rowCount", 0);
+                out.put("degraded", false);
+                out.put("message", "ok");
+                out.put("raw", StrUtil.maxLength(StrUtil.blankToDefault(raw, ""), 200));
                 return out;
             }
             JSONObject json = JSONUtil.parseObj(raw);
@@ -132,6 +156,12 @@ public class ClickHouseClient {
     private String baseUrl() {
         LhProperties.Clickhouse c = lhProperties.getClickhouse();
         return c == null ? null : StrUtil.trimToNull(c.getUrl());
+    }
+
+    /** 可选 ON CLUSTER 名（yml {@code lh.clickhouse.cluster}）。 */
+    public String cluster() {
+        LhProperties.Clickhouse c = lhProperties.getClickhouse();
+        return c == null ? null : StrUtil.trimToNull(c.getCluster());
     }
 
     private static String trimSlash(String url) {

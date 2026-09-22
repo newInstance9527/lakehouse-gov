@@ -3,6 +3,7 @@ package vip.xiaonuo.lh.modular.lifecycle.support;
 import org.junit.jupiter.api.Test;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelSinkSql;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcPolicy;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -70,6 +71,36 @@ class GovLcProfileSqlTest {
         assertEquals("SELECT count(*) AS cnt FROM `ads`.`user_tags_local` WHERE `user_key` = '" + hash + "'", sql);
         assertThrows(IllegalArgumentException.class,
                 () -> GovDelCkSql.count("ads", "user_tags_local", "user_key", "user_88241"));
+    }
+
+    @Test
+    void ckAlterDeleteUsesMutationSyncAndOptionalCluster() {
+        String hash = "a1f3c8de42b7105f9c3b6a77d0e21c48f5b9042a6c1d8e37f4a05b6c7d8e9f01";
+        String sql = GovDelCkSql.alterDelete("ads", "user_tags_local", "user_key", hash, null);
+        assertEquals("ALTER TABLE `ads`.`user_tags_local` DELETE WHERE `user_key` = '" + hash
+                + "' SETTINGS mutations_sync = 2", sql);
+        String clustered = GovDelCkSql.alterDelete("ads", "user_tags_local", "user_key", hash, "lh");
+        assertTrue(clustered.contains("ON CLUSTER lh"));
+        assertTrue(clustered.contains("mutations_sync = 2"));
+        String status = GovDelCkSql.mutationStatus("lh", "user_tags_local", "0000000001");
+        assertTrue(status.contains("clusterAllReplicas('lh', system.mutations)"));
+        assertTrue(status.contains("mutation_id = '0000000001'"));
+        assertThrows(IllegalArgumentException.class,
+                () -> GovDelCkSql.alterDelete("ads", "user_tags_local", "user_key", "user_88241", null));
+    }
+
+    @Test
+    void sinkFqnParseAndRdbPreview() {
+        GovDelSinkSql.SinkRef ref = GovDelSinkSql.parse("mysql.crm.user_profile");
+        assertEquals("mysql", ref.engine());
+        assertEquals("crm", ref.dsHint());
+        assertEquals("user_profile", ref.table());
+        assertTrue(GovDelSinkSql.isRdb("mysql"));
+        assertTrue(GovDelSinkSql.isRedis("redis"));
+        String hash = "a1f3c8de42b7105f9c3b6a77d0e21c48f5b9042a6c1d8e37f4a05b6c7d8e9f01";
+        assertTrue(GovDelSinkSql.deletePreview("crm", "user_profile", "user_id", hash).startsWith("DELETE FROM"));
+        assertThrows(IllegalArgumentException.class,
+                () -> GovDelSinkSql.parse("mysql.crm"));
     }
 
     @Test

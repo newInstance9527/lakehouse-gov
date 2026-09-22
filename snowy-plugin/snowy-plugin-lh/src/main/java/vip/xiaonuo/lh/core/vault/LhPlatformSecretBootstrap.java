@@ -129,6 +129,38 @@ public class LhPlatformSecretBootstrap implements ApplicationRunner {
             }
         }
 
+        if (compliance != null && StrUtil.isNotBlank(compliance.getSaVaultPath())
+                && (StrUtil.isNotBlank(compliance.getSaUser())
+                || StrUtil.isNotBlank(compliance.getSaPassword())
+                || (lhProperties.getClickhouse() != null
+                && StrUtil.isNotBlank(lhProperties.getClickhouse().getUser())))) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            String user = compliance.getSaUser();
+            if (StrUtil.isBlank(user) && lhProperties.getClickhouse() != null) {
+                user = lhProperties.getClickhouse().getUser();
+            }
+            if (StrUtil.isBlank(user)) {
+                user = "sa_compliance";
+            }
+            m.put("username", user.trim());
+            String pass = compliance.getSaPassword();
+            if (StrUtil.isBlank(pass) && lhProperties.getClickhouse() != null) {
+                pass = lhProperties.getClickhouse().getPassword();
+            }
+            if (StrUtil.isNotBlank(pass)) {
+                m.put("password", pass);
+            }
+            if (StrUtil.isNotBlank(compliance.getSaGravitinoUser())) {
+                m.put("gravitinoUser", compliance.getSaGravitinoUser().trim());
+            } else {
+                m.put("gravitinoUser", "sa_compliance");
+            }
+            if (vaultClient.writeIfAbsent(compliance.getSaVaultPath(), m)) {
+                n++;
+                log.info("[LhVault] seeded {}", compliance.getSaVaultPath());
+            }
+        }
+
         log.info("[LhVault] platform secret bootstrap done, newly seeded={}", n);
     }
 

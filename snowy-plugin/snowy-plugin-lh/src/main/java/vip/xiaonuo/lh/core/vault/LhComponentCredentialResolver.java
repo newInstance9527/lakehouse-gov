@@ -17,6 +17,7 @@ import jakarta.annotation.Resource;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -102,6 +103,31 @@ public class LhComponentCredentialResolver {
     public Map<String, String> clickhouse() {
         LhProperties.Clickhouse c = lhProperties.getClickhouse();
         return resolveUserPass(c.getVaultPath(), c.getUser(), c.getPassword(), null);
+    }
+
+    /**
+     * 合规删除专用 SA。Vault 缺用户时回退平台 ClickHouse 凭证（联调）。
+     */
+    public Map<String, String> complianceSa() {
+        LhProperties.Compliance c = lhProperties.getCompliance();
+        String path = c == null || StrUtil.isBlank(c.getSaVaultPath())
+                ? LhVaultPaths.COMPLIANCE_SA
+                : c.getSaVaultPath().trim();
+        String bootUser = c == null ? null : c.getSaUser();
+        String bootPass = c == null ? null : c.getSaPassword();
+        Map<String, String> sa = resolveUserPass(path, bootUser, bootPass, null);
+        if (StrUtil.isBlank(sa.get("username")) && StrUtil.isBlank(sa.get("password"))) {
+            return clickhouse();
+        }
+        return sa;
+    }
+
+    public String complianceSaVaultPath() {
+        LhProperties.Compliance c = lhProperties.getCompliance();
+        if (c != null && StrUtil.isNotBlank(c.getSaVaultPath())) {
+            return c.getSaVaultPath().trim();
+        }
+        return LhVaultPaths.COMPLIANCE_SA;
     }
 
     /** APISIX Admin Key */

@@ -173,6 +173,8 @@ public class LhProperties {
         private String vaultPath = LhVaultPaths.CLICKHOUSE;
         private String user;
         private String password;
+        /** 可选；非空时合规 ALTER DELETE 追加 ON CLUSTER，校验走 clusterAllReplicas */
+        private String cluster;
     }
 
     @Getter
@@ -436,8 +438,8 @@ public class LhProperties {
     }
 
     /**
-     * 合规删除：主体 ID HMAC 密钥。
-     * <p>运行时优先读 Vault {@code vault-path}；yml 明文仅 bootstrap 种子。</p>
+     * 合规删除：主体 ID HMAC 密钥 + 删除专用 SA {@code sa_compliance}。
+     * <p>运行时优先读 Vault；yml 明文仅 bootstrap 种子。</p>
      */
     @Getter
     @Setter
@@ -449,5 +451,13 @@ public class LhProperties {
          * 生产导入后应清空本字段，仅保留 vault-path。
          */
         private String subjectHmacKey = "";
+        /** 删除专用 SA Vault 路径 */
+        private String saVaultPath = LhVaultPaths.COMPLIANCE_SA;
+        /** bootstrap：sa_compliance 用户名；空则复用 ClickHouse bootstrap 用户 */
+        private String saUser = "";
+        /** bootstrap：sa_compliance 口令；空则复用 ClickHouse bootstrap 口令 */
+        private String saPassword = "";
+        /** Gravitino 主体名（审批发放写权限后登记）；身份名固定 sa_compliance */
+        private String saGravitinoUser = "sa_compliance";
     }
 }

@@ -73,6 +73,12 @@ public final class LhVaultPaths {
     public static final String COMPLIANCE_SUBJECT_HMAC = "platform/compliance/subject-hmac";
 
     /**
+     * 合规删除专用 SA（CK mutation / 回流 sink JDBC·Redis）。
+     * 字段约定：{@code username}/{@code password}；可选 {@code gravitinoUser}（审批发放写权限）。
+     */
+    public static final String COMPLIANCE_SA = "platform/compliance/sa_compliance";
+
+    /**
      * 合规删除主体 ID 明文：{@code lh/compliance/subject/{reqNo}}
      * 字段约定：{@code subjectId} / {@code subjectType} / {@code reqNo}
      */

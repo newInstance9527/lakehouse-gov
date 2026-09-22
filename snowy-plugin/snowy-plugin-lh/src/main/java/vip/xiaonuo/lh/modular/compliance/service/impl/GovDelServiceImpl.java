@@ -48,6 +48,7 @@ import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelSinkExecutor;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcTableActionParam;
 import vip.xiaonuo.lh.modular.lifecycle.result.GovLcRunVo;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcService;
@@ -67,8 +68,9 @@ import java.util.Set;
 
 /**
  * 合规删除 P0：请求/计划/执行流水/证据落库。
- * Iceberg 硬删走独立 DS DAG {@code job.compliance.delete.iceberg}
- *（delete → compact → 定向 expire）；dry-run COUNT 仍走 Trino；CK dry-run COUNT 走 HTTP。
+ * Iceberg：独立 DAG {@code job.compliance.delete.iceberg}；
+ * CK：{@code ALTER DELETE} + mutation 校验（{@code sa_compliance}）；
+ * 回流/源端：sink 删除器（JDBC/Redis，{@code sa_compliance}）。
  */
 @Service
 public class GovDelServiceImpl implements GovDelService {
@@ -170,6 +172,8 @@ public class GovDelServiceImpl implements GovDelService {
     private TrinoClient trinoClient;
     @Resource
     private ClickHouseClient clickHouseClient;
+    @Resource
+    private GovDelSinkExecutor sinkExecutor;
     @Resource
     private LhProperties lhProperties;
     @Resource
@@ -632,6 +636,8 @@ public class GovDelServiceImpl implements GovDelService {
                 .sorted(Comparator.comparingInt(t -> nvlInt(t.getCarrierOrder())))
                 .toList();
         int icebergRunning = 0;
+        int ckRunning = 0;
+        int sinkRunning = 0;
         int failed = 0;
         int pending = 0;
         for (GovDelTarget t : targets) {
@@ -643,10 +649,19 @@ public class GovDelServiceImpl implements GovDelService {
                         failed++;
                     }
                 }
-                case "ck", "source", "sink" -> {
-                    logExec(req, t, t.getCarrier() + ".skip", "skipped", execKey, null,
-                            t.getCarrier() + " 未接线，未删除，不标完成");
-                    pending++;
+                case "ck" -> {
+                    if (executeCk(req, t, execKey)) {
+                        ckRunning++;
+                    } else {
+                        failed++;
+                    }
+                }
+                case "source", "sink" -> {
+                    if (executeSink(req, t, execKey)) {
+                        sinkRunning++;
+                    } else {
+                        failed++;
+                    }
                 }
                 case "export" -> {
                     finishTarget(req, t, "pending_receipt", "export.notify",
@@ -679,14 +694,17 @@ public class GovDelServiceImpl implements GovDelService {
             }
         }
 
+        int engineRunning = icebergRunning + ckRunning + sinkRunning;
         req.setExecutedAt(new Date());
-        req.setStatus(failed > 0 && icebergRunning == 0 ? "partial_failed" : "verifying");
+        req.setStatus(failed > 0 && engineRunning == 0 ? "partial_failed" : "verifying");
         req.setRevision(nvlInt(req.getRevision()) + 1);
         req.setUpdateTime(new Date());
         requestMapper.updateById(req);
         logExec(req, null, "exec.finish", failed > 0 ? "warn" : "success", execKey, null,
-                "Iceberg 已提交待验证 " + icebergRunning + " 项，未接线跳过 " + pending
-                        + " 项，失败 " + failed + " 项；未反查为 0 的载体不标完成");
+                "已提交待验证 Iceberg=" + icebergRunning + " CK=" + ckRunning + " sink=" + sinkRunning
+                        + "，回执/登记等待 " + pending + " 项，失败 " + failed
+                        + " 项；未反查为 0 的载体不标完成");
+        addEvidence(req, "execute", "sa_compliance", JSONUtil.toJsonStr(sinkExecutor.saSummary()));
         return detail(req.getId());
     }
 
@@ -735,6 +753,113 @@ public class GovDelServiceImpl implements GovDelService {
             targetMapper.updateById(t);
             logExec(req, t, "iceberg.delete", "failed", execKey, null,
                     StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "Iceberg 硬删 DAG 提交失败"), 500));
+            return false;
+        }
+    }
+
+    /**
+     * CK：{@code ALTER … DELETE … mutations_sync=2}（sa_compliance），登记 mutation_id；
+     * 全副本 is_done + COUNT=0 在 verify 里完成才标 done。
+     */
+    private boolean executeCk(GovDelRequest req, GovDelTarget t, String execKey) {
+        String column = subjectColumn(t);
+        try {
+            if (StrUtil.isBlank(column)) {
+                throw new IllegalArgumentException("主体索引缺少 idColumn，拒绝执行");
+            }
+            if (StrUtil.isBlank(req.getSubjectIdHash())) {
+                throw new IllegalArgumentException("主体摘要缺失，拒绝执行");
+            }
+            if (!clickHouseClient.configured()) {
+                throw new IllegalStateException("lh.clickhouse.url 未配置");
+            }
+            GovLcMetadataSql.TableRef ref = GovDelCkSql.parse(t.getObjectFqn());
+            String cluster = clickHouseClient.cluster();
+            String alter = GovDelCkSql.alterDelete(ref.schema(), ref.table(), column,
+                    req.getSubjectIdHash(), cluster);
+            Map<String, Object> exec = clickHouseClient.queryAsComplianceSa(alter, true);
+            if (Boolean.TRUE.equals(exec.get("degraded"))) {
+                throw new IllegalStateException(StrUtil.blankToDefault(str(exec.get("message")),
+                        "CK ALTER DELETE 失败"));
+            }
+            String mutationId = fetchLatestMutationId(ref.table());
+            String engineRef = "mutation:" + StrUtil.blankToDefault(mutationId, "sync2");
+            t.setStatus("running");
+            t.setEngineRef(engineRef);
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "ck.mutate", "submitted", execKey, mutationId,
+                    "ALTER DELETE mutations_sync=2（sa_compliance）"
+                            + (StrUtil.isNotBlank(cluster) ? " ON CLUSTER " + cluster : ""));
+            return true;
+        } catch (Exception e) {
+            t.setStatus("failed");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "ck.mutate", "failed", execKey, null,
+                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "CK mutation 失败"), 500));
+            return false;
+        }
+    }
+
+    private String fetchLatestMutationId(String table) {
+        try {
+            Map<String, Object> q = clickHouseClient.queryAsComplianceSa(
+                    GovDelCkSql.latestMutation(table), false);
+            if (Boolean.TRUE.equals(q.get("degraded"))) {
+                return null;
+            }
+            Object rows = q.get("rows");
+            if (!(rows instanceof List<?> list) || list.isEmpty() || !(list.get(0) instanceof Map<?, ?> map)) {
+                return null;
+            }
+            Object id = map.get("mutation_id");
+            if (id == null) {
+                for (Map.Entry<?, ?> e : map.entrySet()) {
+                    if ("mutation_id".equalsIgnoreCase(String.valueOf(e.getKey()))) {
+                        id = e.getValue();
+                        break;
+                    }
+                }
+            }
+            return id == null ? null : String.valueOf(id).trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 回流 / 源端：sa_compliance JDBC（或 Redis DEL）。COUNT=0 才在 verify 标 done。
+     */
+    private boolean executeSink(GovDelRequest req, GovDelTarget t, String execKey) {
+        String column = subjectColumn(t);
+        try {
+            if (StrUtil.isBlank(column)) {
+                throw new IllegalArgumentException("主体索引缺少 idColumn，拒绝执行");
+            }
+            if (StrUtil.isBlank(req.getSubjectIdHash())) {
+                throw new IllegalArgumentException("主体摘要缺失，拒绝执行");
+            }
+            GovDelSinkExecutor.SinkResult r = sinkExecutor.delete(
+                    t.getObjectFqn(), column, req.getSubjectIdHash());
+            if (!r.ok()) {
+                throw new IllegalStateException(StrUtil.blankToDefault(r.detail(), "sink 删除失败"));
+            }
+            t.setStatus("running");
+            t.setEngineRef(StrUtil.blankToDefault(r.engineRef(), "sa:sa_compliance"));
+            if (r.rowsLeft() != null) {
+                t.setRowsVerified(r.rowsLeft());
+            }
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "sink.delete", "submitted", execKey, r.engineRef(), r.detail());
+            return true;
+        } catch (Exception e) {
+            t.setStatus("failed");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "sink.delete", "failed", execKey, null,
+                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "sink 删除失败"), 500));
             return false;
         }
     }
@@ -826,6 +951,148 @@ public class GovDelServiceImpl implements GovDelService {
         return "failed";
     }
 
+    /**
+     * mutation is_done（全副本若配了 cluster）且 COUNT=0 才标 done。
+     */
+    private String advanceCk(GovDelRequest req, GovDelTarget t) {
+        EngineRef refs = EngineRef.parse(t.getEngineRef());
+        String mutationId = refs.mutationId;
+        GovLcMetadataSql.TableRef ref;
+        try {
+            ref = GovDelCkSql.parse(t.getObjectFqn());
+        } catch (Exception e) {
+            t.setStatus("failed");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            return "failed";
+        }
+        if (StrUtil.isNotBlank(mutationId) && !"sync2".equals(mutationId)) {
+            if (!mutationAllDone(ref.table(), mutationId)) {
+                t.setStatus("running");
+                t.setUpdateTime(new Date());
+                targetMapper.updateById(t);
+                logExec(req, t, "ck.mutation", "warn", null, mutationId, "mutation 尚未全副本 is_done");
+                return "running";
+            }
+        }
+        long remaining = countClickHouse(req, t);
+        if (remaining < 0) {
+            t.setStatus("running");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "ck.verify", "failed", null, mutationId, "CK 反查失败，不把残留当成 0 行");
+            return "running";
+        }
+        t.setRowsVerified(remaining);
+        t.setUpdateTime(new Date());
+        if (remaining == 0) {
+            t.setStatus("done");
+            targetMapper.updateById(t);
+            logExec(req, t, "ck.verify", "success", null, mutationId,
+                    "mutation is_done 且反查 0 行");
+            return "done";
+        }
+        t.setStatus("failed");
+        targetMapper.updateById(t);
+        logExec(req, t, "ck.verify", "failed", null, mutationId,
+                "反查仍有 " + remaining + " 行，不标完成");
+        return "failed";
+    }
+
+    private boolean mutationAllDone(String table, String mutationId) {
+        try {
+            String sql = GovDelCkSql.mutationStatus(clickHouseClient.cluster(), table, mutationId);
+            Map<String, Object> q = clickHouseClient.queryAsComplianceSa(sql, false);
+            if (Boolean.TRUE.equals(q.get("degraded"))) {
+                return false;
+            }
+            Object rows = q.get("rows");
+            if (!(rows instanceof List<?> list) || list.isEmpty()) {
+                // mutations_sync=2 已完成但查不到记录时，放行交给 COUNT
+                return true;
+            }
+            for (Object row : list) {
+                if (!(row instanceof Map<?, ?> map)) {
+                    continue;
+                }
+                Object done = map.get("is_done");
+                if (done == null) {
+                    for (Map.Entry<?, ?> e : map.entrySet()) {
+                        if ("is_done".equalsIgnoreCase(String.valueOf(e.getKey()))) {
+                            done = e.getValue();
+                            break;
+                        }
+                    }
+                }
+                int v = parseDoneFlag(done);
+                if (v != 1) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static int parseDoneFlag(Object done) {
+        if (done instanceof Number n) {
+            return n.intValue();
+        }
+        if (done instanceof Boolean b) {
+            return b ? 1 : 0;
+        }
+        if (done == null) {
+            return 0;
+        }
+        String s = String.valueOf(done).trim();
+        if ("1".equals(s) || "true".equalsIgnoreCase(s)) {
+            return 1;
+        }
+        try {
+            return Integer.parseInt(s);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private String advanceSink(GovDelRequest req, GovDelTarget t) {
+        String column = subjectColumn(t);
+        if (StrUtil.isBlank(column)) {
+            t.setStatus("failed");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            return "failed";
+        }
+        long remaining;
+        try {
+            remaining = sinkExecutor.countRemaining(t.getObjectFqn(), column, req.getSubjectIdHash());
+        } catch (Exception e) {
+            remaining = -1L;
+        }
+        if (remaining < 0) {
+            t.setStatus("running");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "sink.verify", "failed", null, t.getEngineRef(),
+                    "sink 反查失败，不把残留当成 0 行");
+            return "running";
+        }
+        t.setRowsVerified(remaining);
+        t.setUpdateTime(new Date());
+        if (remaining == 0) {
+            t.setStatus("done");
+            targetMapper.updateById(t);
+            logExec(req, t, "sink.verify", "success", null, t.getEngineRef(), "反查 0 行");
+            return "done";
+        }
+        t.setStatus("failed");
+        targetMapper.updateById(t);
+        logExec(req, t, "sink.verify", "failed", null, t.getEngineRef(),
+                "反查仍有 " + remaining + " 行，不标完成");
+        return "failed";
+    }
+
     private long countRemaining(GovDelRequest req, GovDelTarget t) {
         try {
             String column = subjectColumn(t);
@@ -908,6 +1175,7 @@ public class GovDelServiceImpl implements GovDelService {
         private String compactRunId;
         private String expireRunId;
         private String dagRunId;
+        private String mutationId;
 
         static EngineRef parse(String raw) {
             EngineRef r = new EngineRef();
@@ -926,6 +1194,7 @@ public class GovDelServiceImpl implements GovDelService {
                     case "compact" -> r.compactRunId = v;
                     case "expire" -> r.expireRunId = v;
                     case "dag" -> r.dagRunId = v;
+                    case "mutation" -> r.mutationId = v;
                     default -> {
                     }
                 }
@@ -936,6 +1205,9 @@ public class GovDelServiceImpl implements GovDelService {
         String format() {
             if (StrUtil.isNotBlank(dagRunId)) {
                 return "dag:" + dagRunId;
+            }
+            if (StrUtil.isNotBlank(mutationId)) {
+                return "mutation:" + mutationId;
             }
             return "delete:" + StrUtil.blankToDefault(deleteRef, "-")
                     + ";compact:" + StrUtil.blankToDefault(compactRunId, "-")
@@ -968,6 +1240,11 @@ public class GovDelServiceImpl implements GovDelService {
             String status = StrUtil.blankToDefault(t.getStatus(), "planned");
             if ("iceberg".equals(t.getCarrier()) && "running".equals(status)) {
                 status = advanceIceberg(req, t);
+            } else if ("ck".equals(t.getCarrier()) && "running".equals(status)) {
+                status = advanceCk(req, t);
+            } else if (("sink".equals(t.getCarrier()) || "source".equals(t.getCarrier()))
+                    && "running".equals(status)) {
+                status = advanceSink(req, t);
             }
             switch (status) {
                 case "done" -> {
@@ -1003,7 +1280,7 @@ public class GovDelServiceImpl implements GovDelService {
         req.setUpdateTime(now);
         requestMapper.updateById(req);
 
-        String detail = "Iceberg 反查为 0 的载体 " + verified + " 项；未完成 " + waiting
+        String detail = "反查为 0 的载体 " + verified + " 项；未完成 " + waiting
                 + " 项；失败 " + failed + " 项。未反查为 0 不标完成";
         logExec(req, null, "verify.residual", failed > 0 ? "failed" : (waiting > 0 ? "warn" : "success"),
                 param.getExecKey(), null, detail);
@@ -1011,7 +1288,7 @@ public class GovDelServiceImpl implements GovDelService {
                 "verifiedTargets", verified,
                 "waiting", waiting,
                 "failed", failed,
-                "note", "iceberg done only when Trino count is 0 after retain_last=1"
+                "note", "iceberg COUNT=0; ck mutation is_done+COUNT=0; sink COUNT=0"
         )));
         return detail(req.getId());
     }

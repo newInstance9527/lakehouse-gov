@@ -53,6 +53,8 @@ lh:
     vault-path: platform/clickhouse/default
     user: default
     password: ""
+    # 非空则合规 ALTER DELETE 带 ON CLUSTER，校验走 clusterAllReplicas
+    cluster: ""
   sqlrest:
     manager-url: http://127.0.0.1:18090
     username: admin
@@ -140,7 +142,12 @@ lh:
     profile-daily-enabled: false
     profile-table-timeout-ms: 60000
     profile-max-tables: 200
-  # 合规删除：HMAC key 进 Vault；yml 明文仅 bootstrap，导入后可清空
+  # 合规删除：HMAC key + sa_compliance 进 Vault；yml 明文仅 bootstrap，导入后可清空
   compliance:
     hmac-vault-path: platform/compliance/subject-hmac
     subject-hmac-key: 
+    sa-vault-path: platform/compliance/sa_compliance
+    # 空则 bootstrap 复用 clickhouse.user/password；生产改为独立账号
+    sa-user: ""
+    sa-password: ""
+    sa-gravitino-user: sa_compliance
