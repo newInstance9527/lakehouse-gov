@@ -111,6 +111,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     private vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService secAuthGrantService;
     @Resource
     private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
+    @Resource
+    private vip.xiaonuo.lh.modular.datasource.support.LhSqlrestBindingEnricher sqlrestBindingEnricher;
+    @Resource
+    private vip.xiaonuo.lh.modular.datasource.support.ApiBuildTableAccess apiBuildTableAccess;
 
     @Override
     public Page<LhDatasourceVo> page(LhDatasourcePageParam param) {
@@ -168,8 +172,17 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         Page<LhDatasource> raw = this.page(CommonPageRequest.defaultPage(), qw);
         Page<LhDatasourceVo> page = new Page<>(raw.getCurrent(), raw.getSize(), raw.getTotal());
         List<LhDatasourceVo> vos = raw.getRecords().stream().map(viewAssembler::toVo).collect(Collectors.toList());
+        // 非超管：只返回 canUse（Owner / EDIT / MANAGE）的源
+        if (!LhLoginUsers.isSuperAdmin()) {
+            vos = vos.stream()
+                    .filter(v -> v != null && StrUtil.isNotBlank(v.getId())
+                            && secAuthGrantService.canUseDatasource(v.getId()))
+                    .collect(Collectors.toList());
+            page.setTotal(vos.size());
+        }
         linkedAssetFiller.fill(vos);
         userNameResolver.fillDatasources(vos);
+        sqlrestBindingEnricher.fill(vos);
         page.setRecords(vos);
         return page;
     }
@@ -344,6 +357,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public LhDatasourceVo detail(LhDatasourceIdParam param) {
         LhDatasourceVo vo = viewAssembler.toVo(queryEntity(param.getId()));
         linkedAssetFiller.fill(vo);
+        sqlrestBindingEnricher.fill(vo);
         return enrichVo(vo);
     }
 
@@ -608,6 +622,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Override
     public List<String> listMetaSchemas(LhDatasourceMetaParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanUseDs(ds);
         if (!jdbcMetaBrowser.supportsJdbc(ds)) {
             log.info("meta schemas skipped (non-jdbc) dsId={} type={}: {}",
                     ds.getId(), ds.getType(), jdbcMetaBrowser.unsupportedMessage(ds));
@@ -619,28 +634,36 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     @Override
     public List<LhMetaObjectVo> listMetaTables(LhDatasourceMetaParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanUseDs(ds);
         if (!jdbcMetaBrowser.supportsJdbc(ds)) {
             return Collections.emptyList();
         }
-        return jdbcMetaBrowser.listTables(ds, param.getSchema());
+        List<LhMetaObjectVo> raw = jdbcMetaBrowser.listTables(ds, param.getSchema());
+        return apiBuildTableAccess.filterReadableObjects(ds.getId(), param.getSchema(), raw);
     }
 
     @Override
     public List<LhMetaObjectVo> listMetaViews(LhDatasourceMetaParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanUseDs(ds);
         if (!jdbcMetaBrowser.supportsJdbc(ds)) {
             return Collections.emptyList();
         }
-        return jdbcMetaBrowser.listViews(ds, param.getSchema());
+        List<LhMetaObjectVo> raw = jdbcMetaBrowser.listViews(ds, param.getSchema());
+        return apiBuildTableAccess.filterReadableObjects(ds.getId(), param.getSchema(), raw);
     }
 
     @Override
     public List<LhMetaColumnVo> listMetaColumns(LhDatasourceMetaParam param) {
         LhDatasource ds = queryEntity(param.getId());
+        assertCanUseDs(ds);
+        apiBuildTableAccess.assertCanReadTableForMeta(ds.getId(), param.getSchema(), param.getTable());
         if (!jdbcMetaBrowser.supportsJdbc(ds)) {
             return Collections.emptyList();
         }
-        return jdbcMetaBrowser.listColumns(ds, param.getSchema(), param.getTable());
+        List<LhMetaColumnVo> cols = jdbcMetaBrowser.listColumns(ds, param.getSchema(), param.getTable());
+        apiBuildTableAccess.markSensitiveColumns(cols);
+        return cols;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -686,7 +709,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                         .eq(LhDatasource::getStatus, LhDatasourceStatusEnum.ONLINE.getValue())
                         .like(LhDatasource::getPurposes, "ingest")
                         .in(LhDatasource::getType, ingestTypes))
-                .stream().map(viewAssembler::toVo).collect(Collectors.toList());
+                .stream()
+                .filter(ds -> LhLoginUsers.isSuperAdmin() || secAuthGrantService.canUseDatasource(ds.getId()))
+                .map(viewAssembler::toVo)
+                .collect(Collectors.toList());
         userNameResolver.fillDatasources(vos);
         return vos;
     }
@@ -1505,16 +1531,21 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             if (bind != null) {
                 row.put("syncState", bind.getSyncState());
                 row.put("lastError", bind.getLastError());
+                row.put("lastSyncAt", bind.getLastSyncAt());
+                Long srId = null;
                 if (StrUtil.isNotBlank(bind.getProjection())) {
                     cn.hutool.json.JSONObject p = JSONUtil.parseObj(bind.getProjection());
-                    row.put("sqlrestDatasourceId", p.get("sqlrestDatasourceId"));
+                    srId = p.getLong("sqlrestDatasourceId");
+                    row.put("sqlrestDatasourceId", srId);
                     row.put("sqlrestName", p.get("sqlrestName"));
                     row.put("sqlrestType", p.get("sqlrestType"));
-                    row.put("projected", p.get("sqlrestDatasourceId") != null);
                 }
+                boolean synced = "synced".equalsIgnoreCase(bind.getSyncState()) && srId != null;
+                row.put("projected", synced);
             } else {
                 row.put("syncState", projectable ? "never" : "unsupported");
                 row.put("projected", false);
+                row.put("lastSyncAt", null);
             }
             // 平台权限：仅返回当前用户可用源（拥有者或 EDIT/MANAGE）
             try {
@@ -1547,6 +1578,17 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         int errors = 0;
         List<Map<String, Object>> details = new ArrayList<>();
         for (LhDatasource ds : list) {
+            if (!secAuthGrantService.canUseDatasource(ds.getId())) {
+                Map<String, Object> denied = new LinkedHashMap<>();
+                denied.put("id", ds.getId());
+                denied.put("name", ds.getName());
+                denied.put("ok", false);
+                denied.put("skipped", true);
+                denied.put("message", "无权投影该数据源（须为拥有者或持有 EDIT/MANAGE）");
+                details.add(denied);
+                skipped++;
+                continue;
+            }
             if (!LhDatasourceSqlrestProjector.isProjectable(ds.getType())) {
                 if (ids != null && !ids.isEmpty()) {
                     Map<String, Object> one = sqlrestProjector.project(ds);
@@ -1595,6 +1637,13 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
 
     private void assertCanDeleteDs(LhDatasource ds) {
         secAuthGrantService.assertCanDeleteDatasource(ds);
+    }
+
+    /** 构建页左树 / 元数据浏览：与 listForSqlrest、build 同口径（拥有者或 EDIT/MANAGE） */
+    private void assertCanUseDs(LhDatasource ds) {
+        if (ds == null || !secAuthGrantService.canUseDatasource(ds.getId())) {
+            throw new CommonException("无权使用该数据源（须为拥有者或持有 EDIT/MANAGE）");
+        }
     }
 
     private void markBindingsStale(String dsId) {

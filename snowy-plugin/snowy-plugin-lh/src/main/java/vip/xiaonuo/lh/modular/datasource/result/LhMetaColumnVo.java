@@ -20,4 +20,10 @@ public class LhMetaColumnVo {
 
     @Schema(description = "注释/备注，可为空串")
     private String remarks;
+
+    @Schema(description = "是否敏感列名提示（启发式，非引擎列 ACL）")
+    private Boolean sensitive;
+
+    @Schema(description = "敏感提示文案")
+    private String maskedHint;
 }

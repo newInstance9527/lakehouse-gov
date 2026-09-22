@@ -59,15 +59,15 @@ lh:
     default-module-id: 1
     # 正式 MUST 为 Trino JDBC；当前环境未登记 Trino 时可临时用已有 DS
     datasource-id: 1
-    # 数据 API 边缘：gateway（默认，用 SQLREST Gateway）| apisix | both
+    # 数据 API 边缘：仅 gateway（SQLREST Gateway）。apisix/both 已废弃，代码强制回落
     edge-mode: gateway
     gateway-url: http://127.0.0.1:18091
-    # 仅 edge-mode=apisix|both 时作为 APISIX upstream
     executor-upstream: "127.0.0.1:18091"
   dataapi:
     # true=发布必须携带已审批 API-xxx；联调可先 false
     require-publish-ticket: false
     gateway-probe-timeout-ms: 8000
+  # APISIX：数据服务明确不做；保留配置块以免旧环境报错，发布路径不再调用
   apisix:
     admin-url: http://127.0.0.1:9180
     vault-path: platform/apisix/admin

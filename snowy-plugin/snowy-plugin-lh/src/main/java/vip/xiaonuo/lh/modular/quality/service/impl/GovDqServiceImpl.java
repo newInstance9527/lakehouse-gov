@@ -83,11 +83,13 @@ public class GovDqServiceImpl implements GovDqService {
         long total = runs.size();
         long passCnt = runs.stream().filter(r -> Integer.valueOf(1).equals(r.getPass())).count();
         long blockCnt = runs.stream().filter(r -> Integer.valueOf(1).equals(r.getBlocked())).count();
-        double passRate = total == 0 ? 100.0 : (passCnt * 100.0 / total);
-        double avgScore = total == 0 ? 100.0 : runs.stream()
+        // 无运行时不伪装满分，前端显示「暂无」
+        boolean empty = total == 0;
+        double passRate = empty ? 0.0 : (passCnt * 100.0 / total);
+        double avgScore = empty ? 0.0 : runs.stream()
                 .map(r -> r.getOkPct() == null ? (Integer.valueOf(1).equals(r.getPass()) ? 100.0 : 0.0)
                         : r.getOkPct().doubleValue())
-                .mapToDouble(Double::doubleValue).average().orElse(100.0);
+                .mapToDouble(Double::doubleValue).average().orElse(0.0);
 
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("avgScore", round1(avgScore));
@@ -97,6 +99,7 @@ public class GovDqServiceImpl implements GovDqService {
         r.put("runCount", total);
         r.put("failCount", total - passCnt);
         r.put("ruleCount", rules.size());
+        r.put("empty", empty);
         r.put("range", StrUtil.blankToDefault(range, "30"));
         return r;
     }

@@ -28,4 +28,8 @@ public class DataapiApiKeyMeta extends CommonEntity {
     private String vaultPath;
     private String ticketId;
     private Date expireAt;
+    /** 订阅方 QPS 配额 */
+    private Integer qpsLimit;
+    /** 对外 AppKey（非密文） */
+    private String appKey;
 }

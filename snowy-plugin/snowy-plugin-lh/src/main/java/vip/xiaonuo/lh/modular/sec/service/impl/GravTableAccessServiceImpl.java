@@ -83,22 +83,24 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
                 condition);
         boolean gravOk = Boolean.TRUE.equals(granted.get("ok"));
         if (!gravOk) {
-            // 与申请中心约定：ACL soft-fail，门户投影仍写入
+            // 引擎失败不写门户 SELECT 投影，避免目录/元数据假授权
             log.warn("Gravitino ACL soft-fail asset={} user={} msg={}",
                     asset.getId(), principal.getTrinoUser(), granted.get("message"));
         }
         String policyId = granted.get("policyId") == null ? null : String.valueOf(granted.get("policyId"));
-        SecAuthGrant projection = secAuthGrantService.recordSelectProjection(
-                ticket.getId(),
-                ticket.getApplicant(),
-                asset.getId(),
-                ref.getId(),
-                ticket.getExpiresAt(),
-                condition,
-                policyId,
-                ticket.getWs(),
-                gravOk ? "SELECT projection; Grav ACL ok"
-                        : "SELECT projection; Grav ACL soft-fail: " + granted.get("message"));
+        SecAuthGrant projection = null;
+        if (gravOk) {
+            projection = secAuthGrantService.recordSelectProjection(
+                    ticket.getId(),
+                    ticket.getApplicant(),
+                    asset.getId(),
+                    ref.getId(),
+                    ticket.getExpiresAt(),
+                    condition,
+                    policyId,
+                    ticket.getWs(),
+                    "SELECT projection; Grav ACL ok");
+        }
         JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(ticket.getPayload(), "{}"));
         JSONObject grav = new JSONObject();
         grav.set("principal", principal.getTrinoUser());
@@ -113,18 +115,20 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
         grav.set("projected", gravOk);
         if (!gravOk) {
             grav.set("error", String.valueOf(granted.get("message")));
+            grav.set("softFail", true);
         }
         payload.set("grav", grav);
-        payload.set("aclStore", gravOk ? "gravitino" : "portal_only");
+        payload.set("aclStore", gravOk ? "gravitino" : "grav_soft_fail");
         ticket.setPayload(payload.toString());
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("aclStore", gravOk ? "gravitino" : "portal_only");
-        out.put("grantId", projection.getId());
+        out.put("aclStore", gravOk ? "gravitino" : "grav_soft_fail");
+        out.put("grantId", projection == null ? null : projection.getId());
         out.put("trinoUser", principal.getTrinoUser());
         out.put("gravPolicyId", granted.get("policyId"));
         out.put("gravProjected", gravOk);
         out.put("gravRole", granted.get("role"));
+        out.put("softFail", !gravOk);
         if (!gravOk) {
             out.put("gravMessage", granted.get("message"));
         }

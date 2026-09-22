@@ -25,7 +25,10 @@ import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
+import vip.xiaonuo.lh.modular.dataapi.support.DataapiCallStatsSupport;
+import vip.xiaonuo.lh.modular.dataapi.support.DataapiOpenApiBuilder;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
+import vip.xiaonuo.lh.modular.datasource.support.ApiBuildTableAccess;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import cn.hutool.http.HttpRequest;
@@ -58,6 +61,8 @@ public class DataapiServiceImpl implements DataapiService {
     @Resource
     private SecAuthGrantService secAuthGrantService;
     @Resource
+    private ApiBuildTableAccess apiBuildTableAccess;
+    @Resource
     private LhProperties lhProperties;
 
     @Override
@@ -81,13 +86,15 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("pendingSubscribers", pendingKeys);
         m.put("calls24h", null);
         m.put("avgLatencyMs", null);
-        m.put("callsNote", "调用量见 SQLREST overview / APISIX 审计");
-        Map<String, Object> counter = sqlrestClient.overviewCounter();
-        if (Boolean.TRUE.equals(counter.get("ok")) && counter.get("data") instanceof Map<?, ?> c) {
-            m.put("sqlrestTotal", c.get("totalCount"));
-            m.put("sqlrestOnline", c.get("publishCount"));
-            m.put("sqlrestOpen", c.get("openCount"));
-            m.put("sqlrestDatasourceCount", c.get("datasourceCount"));
+        m.put("callsNote", "调用量见 SQLREST overview（Gateway 日志）");
+        Map<String, Object> stats = callStats(7);
+        DataapiCallStatsSupport.enrichOverview(m, stats);
+        Map<?, ?> counter = stats.get("counter") instanceof Map<?, ?> c ? c : Map.of();
+        if (!counter.isEmpty()) {
+            m.put("sqlrestTotal", counter.get("totalCount"));
+            m.put("sqlrestOnline", counter.get("publishCount"));
+            m.put("sqlrestOpen", counter.get("openCount"));
+            m.put("sqlrestDatasourceCount", counter.get("datasourceCount"));
         }
         return m;
     }
@@ -125,6 +132,16 @@ public class DataapiServiceImpl implements DataapiService {
     public Map<String, Object> detail(String id, boolean withSqlrest) {
         DataapiApiBinding b = requireBinding(id);
         Map<String, Object> vo = toPortalCard(b, true);
+        Map<String, Object> pubTicket = applyTicketService.findLatestApiPublishTicket(b.getId());
+        if (pubTicket != null) {
+            Object existingNo = vo.get("publishTicketNo");
+            if (existingNo == null || StrUtil.isBlank(String.valueOf(existingNo))) {
+                vo.put("publishTicketNo", pubTicket.get("ticketNo"));
+            }
+            vo.put("publishTicketStatus", pubTicket.get("status"));
+            vo.put("publishTicketRemark", pubTicket.get("remark"));
+            vo.put("publishTicketId", pubTicket.get("id"));
+        }
         if (withSqlrest && StrUtil.isNotBlank(b.getSqlrestApiId())) {
             Map<String, Object> sr = sqlrestClient.detail(b.getSqlrestApiId());
             vo.put("sqlrest", sr);
@@ -134,6 +151,16 @@ public class DataapiServiceImpl implements DataapiService {
                 cn.hutool.json.JSONArray sqlList = data.getJSONArray("sqlList");
                 if (sqlList != null && !sqlList.isEmpty()) {
                     vo.put("sql", sqlList.getJSONObject(0).getStr("sqlText"));
+                    List<String> ctx = new ArrayList<>();
+                    for (int i = 0; i < sqlList.size(); i++) {
+                        String t = sqlList.getJSONObject(i).getStr("sqlText");
+                        if (StrUtil.isNotBlank(t)) {
+                            ctx.add(t);
+                        }
+                    }
+                    if (!ctx.isEmpty()) {
+                        vo.put("contextList", ctx);
+                    }
                 }
                 if (StrUtil.isNotBlank(data.getStr("script"))) {
                     vo.put("script", data.getStr("script"));
@@ -230,6 +257,14 @@ public class DataapiServiceImpl implements DataapiService {
             sqlForBody = param.getContextList().get(0);
             opts.put("contextList", param.getContextList());
         }
+        // 连接级通过后：对最终 SQL 正文做表级可读校验（多段 context 逐段）
+        if (param.getContextList() != null && !param.getContextList().isEmpty()) {
+            for (String c : param.getContextList()) {
+                apiBuildTableAccess.assertSqlTablesSelectable(portalDsCheck, engine, c);
+            }
+        } else {
+            apiBuildTableAccess.assertSqlTablesSelectable(portalDsCheck, engine, sqlForBody);
+        }
         Map<String, Object> body = sqlrestClient.buildSaveBody(
                 binding.getName(),
                 StrUtil.blankToDefault(param.getDescription(), binding.getName()),
@@ -278,7 +313,10 @@ public class DataapiServiceImpl implements DataapiService {
         result.put("binding", toPortalCard(binding, true));
         result.put("sqlrest", srResp);
         result.put("degraded", degraded);
-        result.put("ok", !degraded);
+        // 门户草稿已落库即算保存成功；SQLREST 同步失败用 degraded 表达，勿与 ok 混为一谈
+        result.put("ok", true);
+        result.put("sqlrestOk", !degraded);
+        result.put("portalSaved", true);
         return result;
     }
 
@@ -288,6 +326,15 @@ public class DataapiServiceImpl implements DataapiService {
         List<Map<String, Object>> portalParams = param.getParams();
         Long dsId = param.getDatasourceId();
         String portalDsId = StrUtil.blankToDefault(param.getPortalDsId(), param.getDsId());
+        if (StrUtil.isBlank(portalDsId) && StrUtil.isNotBlank(param.getId())) {
+            DataapiApiBinding early = bindingMapper.selectById(param.getId());
+            if (early != null) {
+                portalDsId = early.getPortalDsId();
+            }
+        }
+        if (StrUtil.isNotBlank(portalDsId) && !secAuthGrantService.canUseDatasource(portalDsId)) {
+            throw new CommonException("无权使用该数据源构建 API（须为拥有者或持有 EDIT/MANAGE）");
+        }
         if (StrUtil.isNotBlank(portalDsId)) {
             Long resolved = sqlrestProjector.resolveSqlrestDatasourceId(portalDsId);
             if (resolved == null) {
@@ -306,7 +353,7 @@ public class DataapiServiceImpl implements DataapiService {
         if (StrUtil.isNotBlank(param.getId())) {
             DataapiApiBinding b = requireBinding(param.getId());
             if (StrUtil.isBlank(sql) && StrUtil.isNotBlank(b.getSqlrestApiId())) {
-                return enrichTrial(sqlrestClient.trial(b.getSqlrestApiId()));
+                return enrichTrial(sqlrestClient.trial(b.getSqlrestApiId()), null);
             }
             if (portalParams == null && StrUtil.isNotBlank(b.getParamJson())) {
                 portalParams = new ArrayList<>();
@@ -322,6 +369,10 @@ public class DataapiServiceImpl implements DataapiService {
         if (contexts == null || contexts.isEmpty()) {
             throw new CommonException("试跑需要 SQL 或 Groovy 脚本");
         }
+        // 连接级通过后：对试跑各段 SQL 做表级可读校验
+        for (String c : contexts) {
+            apiBuildTableAccess.assertSqlTablesSelectable(portalDsId, engine, c);
+        }
         List<String> contextList = new ArrayList<>();
         for (String c : contexts) {
             contextList.add("GROOVY".equals(engine) ? c : SqlrestClient.toSqlrestSql(c));
@@ -333,7 +384,7 @@ public class DataapiServiceImpl implements DataapiService {
         req.put("formatMap", param.getFormatMap() != null ? param.getFormatMap() : List.of());
         req.put("contextList", contextList);
         req.put("paramValues", sqlrestClient.toDebugParamValues(portalParams));
-        return enrichTrial(sqlrestClient.debug(req));
+        return enrichTrial(sqlrestClient.debug(req), contextList);
     }
 
     @Override
@@ -345,7 +396,15 @@ public class DataapiServiceImpl implements DataapiService {
         }
         boolean requireTicket = lhProperties.getDataapi() != null && lhProperties.getDataapi().isRequirePublishTicket();
         String ticketNo = StrUtil.blankToDefault(param.getPublishTicketNo(), b.getPublishTicketNo());
-        if (requireTicket || StrUtil.isNotBlank(ticketNo)) {
+        if (StrUtil.isBlank(ticketNo) && requireTicket) {
+            // 审批通过后可不手填：自动取该绑定最近一张已通过的 api_publish
+            ticketNo = applyTicketService.findLatestApprovedApiPublishTicketNo(b.getId());
+        }
+        if (requireTicket) {
+            applyTicketService.assertApprovedApiPublishTicket(ticketNo, b.getId());
+            b.setPublishTicketNo(ticketNo);
+        } else if (StrUtil.isNotBlank(ticketNo)) {
+            // 已填单号则必须已审批（避免「提交申请后立刻点发布」踩坑时提示不清）
             applyTicketService.assertApprovedApiPublishTicket(ticketNo, b.getId());
             b.setPublishTicketNo(ticketNo);
         }
@@ -502,7 +561,7 @@ public class DataapiServiceImpl implements DataapiService {
         } else {
             m.put("ok", true);
             m.put("apisix", List.of());
-            m.put("message", "edge-mode=gateway：对外入口为 SQLREST Gateway，未同步 APISIX");
+            m.put("message", "边缘仅 SQLREST Gateway（不做 APISIX）");
         }
         return m;
     }
@@ -516,7 +575,7 @@ public class DataapiServiceImpl implements DataapiService {
             skip.put("synced", 0);
             skip.put("failed", 0);
             skip.put("edgeMode", sqlrestClient.edgeMode());
-            skip.put("message", "edge-mode=gateway：无需同步 APISIX；请在 SQLREST Manager 发版/上线");
+            skip.put("message", "数据服务不做 APISIX：边缘仅 SQLREST Gateway；请在工作台/SQLREST 发版上线");
             return skip;
         }
         String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
@@ -558,14 +617,44 @@ public class DataapiServiceImpl implements DataapiService {
         for (DataapiApiKeyMeta k : metas) {
             DataapiApiBinding b = bindingMapper.selectById(k.getBindingId());
             Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", k.getId());
+            row.put("name", k.getConsumerName());
             row.put("app", k.getConsumerName());
+            row.put("appKey", k.getAppKey());
             row.put("api", b != null ? b.getPublicPath() : "-");
+            row.put("apiName", b != null ? b.getName() : null);
+            row.put("method", b != null ? b.getMethod() : "-");
+            row.put("bindingId", k.getBindingId());
             row.put("user", k.getApplicant());
+            row.put("applicant", k.getApplicant());
             row.put("status", k.getStatus());
             row.put("cls", statusTag(k.getStatus()));
+            row.put("keyHint", k.getKeyHint());
+            row.put("qps", k.getQpsLimit());
+            row.put("qpsLimit", k.getQpsLimit());
+            row.put("ticketId", k.getTicketId());
+            row.put("ticketNo", ticketNoFromKeyRemark(k.getRemark()));
+            row.put("expireAt", k.getExpireAt() == null ? null : k.getExpireAt().toString());
+            row.put("createTime", k.getCreateTime() == null ? null : k.getCreateTime().toString());
+            row.put("remark", k.getRemark());
+            row.put("description", "末位 ···" + StrUtil.blankToDefault(k.getKeyHint(), "????")
+                    + (k.getQpsLimit() != null ? " · " + k.getQpsLimit() + " QPS" : ""));
             list.add(row);
         }
         return list;
+    }
+
+    /** remark 约定：api_subscribe {ticketNo} */
+    private static String ticketNoFromKeyRemark(String remark) {
+        if (StrUtil.isBlank(remark)) {
+            return null;
+        }
+        String prefix = "api_subscribe ";
+        if (remark.startsWith(prefix)) {
+            String no = remark.substring(prefix.length()).trim();
+            return StrUtil.blankToDefault(no, null);
+        }
+        return null;
     }
 
     @Override
@@ -590,9 +679,11 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("embed", embedUrl());
         m.put("edgeMode", sqlrestClient.edgeMode());
         m.put("gatewayUrl", sqlrestClient.gatewayUrl());
-        m.put("counter", sqlrestClient.overviewCounter());
-        m.put("trend", sqlrestClient.overviewTrend(7));
-        m.put("topPath", sqlrestClient.overviewTopPath(7, 10));
+        Map<String, Object> stats = callStats(7);
+        m.put("callStats", stats);
+        m.put("counter", Map.of("ok", true, "data", stats.get("counter")));
+        m.put("trend", Map.of("ok", true, "data", stats.get("trend")));
+        m.put("topPath", Map.of("ok", true, "data", stats.get("topPath")));
         m.put("assignments", sqlrestClient.listAssignments("", 1, 50));
         m.put("clients", sqlrestClient.listClients());
         m.put("authGroups", sqlrestClient.listAuthGroups());
@@ -730,7 +821,9 @@ public class DataapiServiceImpl implements DataapiService {
                 cn.hutool.json.JSONObject row = JSONUtil.parseObj(o);
                 Map<String, Object> p = new LinkedHashMap<>();
                 p.put("name", row.getStr("name"));
-                p.put("type", "string");
+                // SQLREST parse 无类型；门户默认 string，trial/build 经 mapParamType → STRING
+                String parsedType = StrUtil.blankToDefault(row.getStr("type"), "string");
+                p.put("type", parsedType);
                 p.put("required", false);
                 p.put("isArray", Boolean.TRUE.equals(row.getBool("isArray")));
                 p.put("example", "");
@@ -748,22 +841,61 @@ public class DataapiServiceImpl implements DataapiService {
         Map<String, Object> naming = sqlrestClient.responseNamingStrategies();
         Map<String, Object> formats = sqlrestClient.responseTypeFormats();
         Map<String, Object> comps = sqlrestClient.completions();
+        Map<String, Object> modules = sqlrestClient.listModules();
+        Map<String, Object> groups = sqlrestClient.listAuthGroups();
         m.put("namingStrategies", Boolean.TRUE.equals(naming.get("ok")) ? naming.get("data") : List.of());
         m.put("typeFormats", Boolean.TRUE.equals(formats.get("ok")) ? formats.get("data") : List.of());
         m.put("completions", Boolean.TRUE.equals(comps.get("ok")) ? comps.get("data") : List.of());
+        m.put("modules", unwrapSqlrestList(modules));
+        m.put("authGroups", unwrapSqlrestList(groups));
+        LhProperties.Sqlrest cfg = lhProperties.getSqlrest();
+        m.put("defaultModuleId", cfg != null ? cfg.getDefaultModuleId() : 1L);
+        m.put("defaultGroupId", cfg != null ? cfg.getDefaultGroupId() : 1L);
         m.put("ok", Boolean.TRUE.equals(naming.get("ok")) || Boolean.TRUE.equals(formats.get("ok")));
         m.put("degraded", !Boolean.TRUE.equals(m.get("ok")));
         return m;
+    }
+
+    private static List<Map<String, Object>> unwrapSqlrestList(Map<String, Object> resp) {
+        if (resp == null) {
+            return List.of();
+        }
+        Object data = resp.get("data");
+        if (!(data instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object row : list) {
+            if (row instanceof Map<?, ?> map) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                Object id = map.get("id") != null ? map.get("id") : map.get("moduleId");
+                if (id == null) {
+                    id = map.get("groupId");
+                }
+                item.put("id", id);
+                Object name = map.get("name");
+                if (name == null) {
+                    name = map.get("moduleName");
+                }
+                if (name == null) {
+                    name = map.get("groupName");
+                }
+                item.put("name", name != null ? String.valueOf(name) : String.valueOf(id));
+                out.add(item);
+            }
+        }
+        return out;
     }
 
     @Override
     public Map<String, Object> gatewayProbe(DataapiGatewayProbeParam param) {
         String path = param != null ? param.getPath() : null;
         String method = param != null ? StrUtil.blankToDefault(param.getMethod(), "GET") : "GET";
+        DataapiApiBinding binding = null;
         if (param != null && StrUtil.isNotBlank(param.getId())) {
-            DataapiApiBinding b = requireBinding(param.getId());
-            path = b.getPublicPath();
-            method = StrUtil.blankToDefault(b.getMethod(), "GET");
+            binding = requireBinding(param.getId());
+            path = binding.getPublicPath();
+            method = StrUtil.blankToDefault(binding.getMethod(), "GET");
         }
         if (StrUtil.isBlank(path)) {
             throw new CommonException("请提供绑定 id 或 path");
@@ -774,15 +906,21 @@ public class DataapiServiceImpl implements DataapiService {
         }
         String p = path.trim();
         String srPath = SqlrestClient.toSqlrestPath(p);
-        String url = base.replaceAll("/$", "") + "/api/" + srPath;
+        if (StrUtil.isBlank(srPath)) {
+            throw new CommonException("路径无效：请填写如 /api/demo 的对外路径（勿只填 /api/）");
+        }
+        String url = SqlrestClient.toGatewayRequestUrl(base, p);
         int timeout = lhProperties.getDataapi() != null
                 ? Math.max(2000, lhProperties.getDataapi().getGatewayProbeTimeoutMs())
                 : 8000;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("edgeMode", sqlrestClient.edgeMode());
         m.put("gatewayUrl", base);
+        m.put("publicPath", p.startsWith("/") ? p : "/" + p);
+        m.put("sqlrestPath", srPath);
         m.put("requestUrl", url);
         m.put("method", method.toUpperCase());
+        enrichProbeBinding(m, binding);
         long t0 = System.currentTimeMillis();
         try {
             HttpRequest req = "POST".equalsIgnoreCase(method)
@@ -794,16 +932,174 @@ public class DataapiServiceImpl implements DataapiService {
                     : HttpRequest.get(url);
             HttpResponse resp = req.timeout(timeout).execute();
             String body = resp.body();
-            m.put("ok", resp.getStatus() >= 200 && resp.getStatus() < 500);
-            m.put("httpStatus", resp.getStatus());
+            int status = resp.getStatus();
+            // 路由可达且业务成功才 ok；4xx（含 404）一律视为失败，避免 toast 把 404 当成功
+            boolean ok = status >= 200 && status < 300;
+            m.put("ok", ok);
+            m.put("httpStatus", status);
             m.put("latencyMs", System.currentTimeMillis() - t0);
             m.put("bodyPreview", body == null ? "" : body.substring(0, Math.min(800, body.length())));
+            applyProbeDiagnosis(m, status, null);
         } catch (Exception e) {
             m.put("ok", false);
             m.put("latencyMs", System.currentTimeMillis() - t0);
             m.put("message", e.getMessage());
+            applyProbeDiagnosis(m, null, e.getMessage());
         }
         return m;
+    }
+
+    /** 探针附带绑定 / SQLREST 在线态，便于 404 时给出可读原因 */
+    private void enrichProbeBinding(Map<String, Object> m, DataapiApiBinding binding) {
+        if (binding == null) {
+            return;
+        }
+        m.put("bindingId", binding.getId());
+        m.put("bindingState", binding.getState());
+        m.put("sqlrestApiId", binding.getSqlrestApiId());
+        Boolean sqlrestOnline = null;
+        String sqlrestPathStored = null;
+        String sqlrestMethod = null;
+        if (StrUtil.isNotBlank(binding.getSqlrestApiId())) {
+            try {
+                Map<String, Object> detail = sqlrestClient.detail(binding.getSqlrestApiId());
+                if (Boolean.TRUE.equals(detail.get("ok")) && detail.get("data") != null) {
+                    cn.hutool.json.JSONObject data = JSONUtil.parseObj(detail.get("data"));
+                    if (data.containsKey("status")) {
+                        sqlrestOnline = data.getBool("status");
+                    } else if (data.containsKey("online")) {
+                        sqlrestOnline = data.getBool("online");
+                    }
+                    sqlrestPathStored = data.getStr("path");
+                    sqlrestMethod = data.getStr("method");
+                } else if (detail.get("message") != null) {
+                    m.put("sqlrestDetailMessage", String.valueOf(detail.get("message")));
+                }
+            } catch (Exception e) {
+                m.put("sqlrestDetailMessage", e.getMessage());
+            }
+        }
+        m.put("sqlrestOnline", sqlrestOnline);
+        if (sqlrestPathStored != null) {
+            m.put("sqlrestPathStored", sqlrestPathStored);
+        }
+        if (sqlrestMethod != null) {
+            m.put("sqlrestMethod", sqlrestMethod);
+        }
+    }
+
+    private static void applyProbeDiagnosis(Map<String, Object> m, Integer httpStatus, String transportError) {
+        String bindingState = m.get("bindingState") == null ? null : String.valueOf(m.get("bindingState"));
+        Boolean sqlrestOnline = m.get("sqlrestOnline") instanceof Boolean b ? b : null;
+        String method = String.valueOf(m.getOrDefault("method", "GET"));
+        String requestUrl = String.valueOf(m.getOrDefault("requestUrl", ""));
+        String hint;
+        String suggestion;
+        if (transportError != null) {
+            hint = "无法连接 Gateway：" + transportError;
+            suggestion = "检查 lh.sqlrest.gateway-url 与网络连通性";
+        } else if (httpStatus != null && httpStatus >= 200 && httpStatus < 300) {
+            hint = "Gateway 路由可达";
+            suggestion = null;
+        } else if (httpStatus != null && (httpStatus == 401 || httpStatus == 403)) {
+            hint = "鉴权失败（通常不是路径问题）；open=false 时需订阅 Key（X-App-Key + Bearer）";
+            suggestion = "在数据服务密钥区签发 Key，或将接口设为 open 后再探";
+        } else if (httpStatus != null && httpStatus == 405) {
+            hint = "方法不允许：当前 " + method + "，请与绑定 / SQLREST method 一致";
+            suggestion = "核对接口配置中的 HTTP 方法后重试";
+        } else if (httpStatus != null && httpStatus == 404) {
+            boolean hasBinding = m.get("bindingId") != null;
+            Object apiIdObj = m.get("sqlrestApiId");
+            boolean missingApiId = hasBinding && (apiIdObj == null || StrUtil.isBlank(String.valueOf(apiIdObj)));
+            if (hasBinding && bindingState != null && !"published".equalsIgnoreCase(bindingState)) {
+                hint = "Gateway HTTP 404：绑定状态为 " + bindingState + "，接口可能尚未发布到 Gateway";
+                suggestion = "先保存并发布（SQLREST publish + deploy），再点 Gateway 探针";
+            } else if (hasBinding && Boolean.FALSE.equals(sqlrestOnline)) {
+                hint = "Gateway HTTP 404：绑定已 published，但 SQLREST 侧未 online";
+                suggestion = "在工作台重新发布，或到 SQLREST Manager 确认已 deploy";
+            } else if (missingApiId) {
+                hint = "Gateway HTTP 404：尚未构建 SQLREST 接口（无 sqlrestApiId）";
+                suggestion = "先保存（build）再发布，然后重试探针";
+            } else {
+                hint = "Gateway HTTP 404：无此路由（" + method + " " + requestUrl + "）";
+                suggestion = hasBinding
+                        ? "核对路径/方法是否与 SQLREST 一致；若刚改过路径请重新发布"
+                        : "确认路径已在 SQLREST 发布上线；工作台可先保存并发布后再探";
+            }
+        } else if (httpStatus != null) {
+            hint = "Gateway HTTP " + httpStatus;
+            suggestion = "查看 bodyPreview；确认接口已发布且方法正确";
+        } else {
+            hint = "探针未得到 HTTP 状态";
+            suggestion = "检查 Gateway 配置";
+        }
+        m.put("hint", hint);
+        m.put("message", hint);
+        if (suggestion != null) {
+            m.put("suggestion", suggestion);
+        }
+    }
+
+    @Override
+    public Map<String, Object> callStats(Integer days) {
+        int d = days == null ? 7 : Math.max(1, Math.min(days, 90));
+        Map<String, Object> counter;
+        Map<String, Object> trend;
+        Map<String, Object> top;
+        try {
+            counter = sqlrestClient.overviewCounter();
+        } catch (Exception e) {
+            counter = Map.of("ok", false, "message", e.getMessage());
+        }
+        try {
+            trend = sqlrestClient.overviewTrend(d);
+        } catch (Exception e) {
+            trend = Map.of("ok", false, "message", e.getMessage());
+        }
+        try {
+            top = sqlrestClient.overviewTopPath(d, 10);
+        } catch (Exception e) {
+            top = Map.of("ok", false, "message", e.getMessage());
+        }
+        Map<String, Object> stats = DataapiCallStatsSupport.assemble(d, counter, trend, top);
+        stats.put("gatewayUrl", sqlrestClient.gatewayUrl());
+        stats.put("edgeMode", sqlrestClient.edgeMode());
+        return stats;
+    }
+
+    @Override
+    public Map<String, Object> openapi(String ws, String id) {
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        List<DataapiApiBinding> bindings = new ArrayList<>();
+        if (StrUtil.isNotBlank(id)) {
+            DataapiApiBinding one = requireBinding(id);
+            bindings.add(one);
+        } else {
+            bindings.addAll(bindingMapper.selectList(baseQw(workspace)
+                    .eq("state", "published")
+                    .orderByAsc("public_path")));
+            if (bindings.isEmpty()) {
+                // 无 published 时导出全部非 retired，便于草稿验收
+                bindings.addAll(bindingMapper.selectList(baseQw(workspace)
+                        .ne("state", "retired")
+                        .orderByAsc("public_path")));
+            }
+        }
+        Map<String, Map<String, Object>> sqlrestById = new LinkedHashMap<>();
+        for (DataapiApiBinding b : bindings) {
+            if (StrUtil.isBlank(b.getSqlrestApiId())) {
+                continue;
+            }
+            try {
+                sqlrestById.put(b.getSqlrestApiId(), sqlrestClient.detail(b.getSqlrestApiId()));
+            } catch (Exception e) {
+                sqlrestById.put(b.getSqlrestApiId(), Map.of("ok", false, "message", e.getMessage()));
+            }
+        }
+        String title = StrUtil.isNotBlank(id) && !bindings.isEmpty()
+                ? bindings.get(0).getName()
+                : "Lakehouse Data API (" + workspace + ")";
+        return DataapiOpenApiBuilder.build(bindings, sqlrestById, sqlrestClient.gatewayUrl(), title);
     }
 
     private static Map<String, Object> assignmentOptsFromParam(DataapiBindingParam param) {
@@ -895,12 +1191,26 @@ public class DataapiServiceImpl implements DataapiService {
         return "/api/" + p;
     }
 
-    private Map<String, Object> enrichTrial(Map<String, Object> sr) {
+    private Map<String, Object> enrichTrial(Map<String, Object> sr, List<String> sentContexts) {
         Map<String, Object> m = new LinkedHashMap<>(sr);
         if (Boolean.TRUE.equals(sr.get("ok")) && sr.get("data") instanceof Map<?, ?> data) {
             m.put("sample", data.get("answer"));
             m.put("logs", data.get("logs"));
             m.put("types", data.get("types"));
+        }
+        if (sentContexts != null && !sentContexts.isEmpty()) {
+            m.put("sqlPreview", SqlrestClient.sqlPreview(sentContexts, 480));
+            m.put("contextCount", sentContexts.size());
+        }
+        String msg = StrUtil.blankToDefault(String.valueOf(m.getOrDefault("message", "")), "");
+        if (msg.contains("could not determine data type of parameter")) {
+            m.put("hint",
+                    "PostgreSQL 无法推断绑定参数类型：在 concat/LIKE 中请写 #{name}::text 或 CAST(#{name} AS text)；"
+                            + "并确认入参类型为 string。工作台可一键「加 ::text」。");
+        } else if (msg.toLowerCase().contains("syntax error at or near \"limit\"")) {
+            m.put("hint",
+                    "SQLREST 会对 SELECT 自动追加 LIMIT/OFFSET。请去掉语句末尾的 LIMIT 与分号（门户已尽量自动剥离）；"
+                            + "请核对返回的 sqlPreview。多 SQL 窗口时调试仅用当前窗口。");
         }
         return m;
     }
@@ -991,6 +1301,8 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("level", levelOf(b));
         m.put("levelCls", levelCls(b));
         m.put("publishedAt", b.getLastPublishAt() == null ? null : b.getLastPublishAt().toString());
+        m.put("createTime", b.getCreateTime() == null ? null : b.getCreateTime().toString());
+        m.put("updateTime", b.getUpdateTime() == null ? null : b.getUpdateTime().toString());
         m.put("lastError", b.getLastError());
         m.put("publishTicketNo", b.getPublishTicketNo());
         if (detail) {

@@ -10,6 +10,7 @@ import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -22,6 +23,7 @@ import vip.xiaonuo.lh.modular.query.param.CpQueryDatasetSaveParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExecParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExportParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryHistoryParam;
+import vip.xiaonuo.lh.modular.query.param.CpQuerySavedSaveParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
 
 import java.io.IOException;
@@ -181,6 +183,43 @@ public class CpQueryController {
             @RequestParam(required = false) String ws,
             @RequestParam(required = false) Integer limit) {
         return CommonResult.data(cpQueryService.listDatasets(ws, limit));
+    }
+
+    @Operation(summary = "保存即席脚本")
+    @CommonLog("即席保存脚本")
+    @PostMapping({"/lh/compute/query/saved", "/lh/query/saved", "/api/compute/query/saved"})
+    public CommonResult<Map<String, Object>> saveSaved(@RequestBody CpQuerySavedSaveParam param) {
+        return CommonResult.data(cpQueryService.saveSavedScript(param));
+    }
+
+    @Operation(summary = "我的即席脚本列表")
+    @GetMapping({"/lh/compute/query/saved", "/lh/query/saved", "/api/compute/query/saved"})
+    public CommonResult<List<Map<String, Object>>> listSaved(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(cpQueryService.listSavedScripts(ws, limit));
+    }
+
+    @Operation(summary = "读取即席脚本")
+    @GetMapping({
+            "/lh/compute/query/saved/{id}",
+            "/lh/query/saved/{id}",
+            "/api/compute/query/saved/{id}"
+    })
+    public CommonResult<Map<String, Object>> getSaved(@PathVariable String id) {
+        return CommonResult.data(cpQueryService.getSavedScript(id));
+    }
+
+    @Operation(summary = "删除即席脚本")
+    @CommonLog("即席删除脚本")
+    @PostMapping({
+            "/lh/compute/query/saved/{id}/delete",
+            "/lh/query/saved/{id}/delete",
+            "/api/compute/query/saved/{id}/delete"
+    })
+    public CommonResult<String> deleteSaved(@PathVariable String id) {
+        cpQueryService.deleteSavedScript(id);
+        return CommonResult.ok();
     }
 
     @Operation(summary = "即席查询面（白名单 ∩ SHOW CATALOGS）")

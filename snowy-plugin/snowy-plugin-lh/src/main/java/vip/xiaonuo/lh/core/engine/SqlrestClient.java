@@ -39,6 +39,12 @@ import java.util.regex.Pattern;
 public class SqlrestClient {
 
     private static final Pattern MUSTACHE = Pattern.compile("\\{\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*}}");
+    /**
+     * SQLREST 对 SELECT/WITH 会再拼 {@code LIMIT ? OFFSET ?}。
+     * 用户若已写尾部 LIMIT/OFFSET（或末尾分号），会变成 {@code ... LIMIT 100; LIMIT ?} → PG Position:2 近 LIMIT。
+     */
+    private static final Pattern TRAILING_LIMIT_OFFSET = Pattern.compile(
+            "(?is)\\s+LIMIT\\s+(?:\\d+|\\?|#\\{[\\w.]+}(?:::\\w+)?)(?:\\s+OFFSET\\s+(?:\\d+|\\?|#\\{[\\w.]+}(?:::\\w+)?))?\\s*$");
     private static final long TOKEN_SKEW_MS = 60_000L;
 
     @Resource
@@ -59,23 +65,26 @@ public class SqlrestClient {
         return StrUtil.blankToDefault(lhProperties.getSqlrest().getExecutorUpstream(), "127.0.0.1:18091");
     }
 
-    /** gateway | apisix | both；默认 gateway */
+    /**
+     * 边缘模式：产品定案仅 {@code gateway}（SQLREST Gateway）。
+     * 配置若仍写 {@code apisix}/{@code both}，强制回落 gateway 并忽略 APISIX。
+     */
     public String edgeMode() {
         String m = StrUtil.blankToDefault(lhProperties.getSqlrest().getEdgeMode(), "gateway").trim().toLowerCase();
-        if (!"gateway".equals(m) && !"apisix".equals(m) && !"both".equals(m)) {
+        if (!"gateway".equals(m)) {
+            // APISIX 明确不做：不启用 apisix/both
             return "gateway";
         }
         return m;
     }
 
     public boolean useSqlrestGateway() {
-        String m = edgeMode();
-        return "gateway".equals(m) || "both".equals(m);
+        return true;
     }
 
+    /** @deprecated 数据服务不做 APISIX；恒为 false */
     public boolean useApisixEdge() {
-        String m = edgeMode();
-        return "apisix".equals(m) || "both".equals(m);
+        return false;
     }
 
     public String gatewayUrl() {
@@ -84,7 +93,7 @@ public class SqlrestClient {
     }
 
     /**
-     * 将门户 {{param}} 转为 SQLREST MyBatis #{param}
+     * 将门户 {{param}} 转为 SQLREST MyBatis #{param}，并规范化尾部分号 / LIMIT（见 {@link #normalizeSqlContext}）。
      */
     public static String toSqlrestSql(String sql) {
         if (StrUtil.isBlank(sql)) {
@@ -96,21 +105,134 @@ public class SqlrestClient {
             m.appendReplacement(sb, Matcher.quoteReplacement("#{" + m.group(1) + "}"));
         }
         m.appendTail(sb);
-        return sb.toString();
+        return normalizeSqlContext(sb.toString());
     }
 
     /**
-     * 对外路径 → SQLREST path（去掉前导 /api/）
+     * 去掉尾部分号，并去掉语句末尾的 LIMIT[/OFFSET]（含数字、?、#{}），避免与 SQLREST 自动分页冲突。
+     * 子查询内部的 LIMIT 不处理（仅匹配整段末尾）。
+     */
+    public static String normalizeSqlContext(String sql) {
+        if (StrUtil.isBlank(sql)) {
+            return sql;
+        }
+        String s = sql.trim();
+        while (s.endsWith(";")) {
+            s = s.substring(0, s.length() - 1).trim();
+        }
+        Matcher lim = TRAILING_LIMIT_OFFSET.matcher(s);
+        if (lim.find()) {
+            s = s.substring(0, lim.start()).trim();
+        }
+        return s;
+    }
+
+    /** 试跑/日志用：截断后的 SQL 预览 */
+    public static String sqlPreview(List<String> contexts, int maxLen) {
+        if (contexts == null || contexts.isEmpty()) {
+            return "";
+        }
+        String joined = String.join("\n---\n", contexts);
+        int n = Math.max(64, maxLen);
+        if (joined.length() <= n) {
+            return joined;
+        }
+        return joined.substring(0, n) + "…";
+    }
+
+    /**
+     * 对外路径 → SQLREST assignment path（去掉前导 / 与一层或多层 {@code api/}）。
+     * 例：{@code /api/devLog}、{@code api/devLog}、{@code /api/api/x} → {@code devLog} / {@code x}
      */
     public static String toSqlrestPath(String publicPath) {
         String p = StrUtil.blankToDefault(publicPath, "").trim();
-        if (p.startsWith("/")) {
+        while (p.startsWith("/")) {
             p = p.substring(1);
         }
-        if (p.startsWith("api/")) {
+        while (p.regionMatches(true, 0, "api/", 0, 4)) {
             p = p.substring(4);
+            while (p.startsWith("/")) {
+                p = p.substring(1);
+            }
         }
         return p;
+    }
+
+    /**
+     * SQLREST Gateway 调用 URL：{@code {gatewayUrl}/api/{toSqlrestPath(publicPath)}}。
+     * 若 {@code gatewayUrl} 误配成以 {@code /api} 结尾，会先剥掉以免双前缀。
+     */
+    public static String toGatewayRequestUrl(String gatewayUrl, String publicPath) {
+        String base = StrUtil.blankToDefault(gatewayUrl, "").trim().replaceAll("/+$", "");
+        if (base.regionMatches(true, Math.max(0, base.length() - 4), "/api", 0, 4)) {
+            base = base.substring(0, base.length() - 4).replaceAll("/+$", "");
+        }
+        String srPath = toSqlrestPath(publicPath);
+        if (StrUtil.isBlank(srPath)) {
+            return base + "/api/";
+        }
+        return base + "/api/" + srPath;
+    }
+
+    /**
+     * SQLREST {@code DataTypeFormatEnum} 仅接受枚举名；过滤/映射历史 {@code java.sql.Date} 等类名。
+     */
+    public static List<Map<String, Object>> sanitizeFormatMap(List<?> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of(Map.of(
+                    "key", "USE_SYSTEM_RESPONSE_FORMAT",
+                    "value", "true",
+                    "remark", "Response format"));
+        }
+        Map<String, String> legacy = Map.of(
+                "java.sql.Date", "DATE",
+                "java.sql.Time", "TIME",
+                "java.sql.Timestamp", "TIMESTAMP",
+                "java.time.LocalDate", "LOCAL_DATE",
+                "java.time.LocalDateTime", "LOCAL_DATE_TIME",
+                "java.math.BigDecimal", "BIG_DECIMAL");
+        java.util.Set<String> allowed = java.util.Set.of(
+                "USE_SYSTEM_RESPONSE_FORMAT", "DATE", "TIME", "TIMESTAMP",
+                "LOCAL_DATE", "LOCAL_DATE_TIME", "BIG_DECIMAL");
+        List<Map<String, Object>> out = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        boolean hasSystem = false;
+        for (Object item : raw) {
+            if (!(item instanceof Map<?, ?> m)) {
+                continue;
+            }
+            Object keyObj = m.get("key");
+            if (keyObj == null) {
+                continue;
+            }
+            String key = String.valueOf(keyObj).trim();
+            if (legacy.containsKey(key)) {
+                key = legacy.get(key);
+            }
+            if (!allowed.contains(key) || seen.contains(key)) {
+                continue;
+            }
+            seen.add(key);
+            if ("USE_SYSTEM_RESPONSE_FORMAT".equals(key)) {
+                hasSystem = true;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("key", key);
+            row.put("value", m.get("value") != null ? String.valueOf(m.get("value")) : "");
+            if (m.get("remark") != null) {
+                row.put("remark", String.valueOf(m.get("remark")));
+            }
+            out.add(row);
+        }
+        if (!hasSystem) {
+            out.add(0, Map.of(
+                    "key", "USE_SYSTEM_RESPONSE_FORMAT",
+                    "value", "true",
+                    "remark", "Response format"));
+        }
+        return out.isEmpty()
+                ? List.of(Map.of("key", "USE_SYSTEM_RESPONSE_FORMAT", "value", "true", "remark", "Response format"))
+                : out;
     }
 
     public Map<String, Object> createAssignment(Map<String, Object> body) {
@@ -137,7 +259,7 @@ public class SqlrestClient {
             JSONArray sqlList = data.getJSONArray("sqlList");
             if (sqlList != null) {
                 for (int i = 0; i < sqlList.size(); i++) {
-                    sqls.add(sqlList.getJSONObject(i).getStr("sqlText"));
+                    sqls.add(toSqlrestSql(sqlList.getJSONObject(i).getStr("sqlText")));
                 }
             }
             Map<String, Object> req = new LinkedHashMap<>();
@@ -236,6 +358,10 @@ public class SqlrestClient {
         return postJson("/sqlrest/manager/api/v1/group/listAll", Map.of());
     }
 
+    public Map<String, Object> listModules() {
+        return postJson("/sqlrest/manager/api/v1/module/listAll", Map.of());
+    }
+
     public Map<String, Object> buildSaveBody(String name, String description, String method, String publicPath,
                                             String sql, List<Map<String, Object>> params,
                                             Long existingId, String contentType, Long datasourceId) {
@@ -291,7 +417,7 @@ public class SqlrestClient {
         body.put("namingStrategy", StrUtil.blankToDefault(
                 o.get("namingStrategy") == null ? null : String.valueOf(o.get("namingStrategy")), "CAMEL_CASE"));
         if (o.get("formatMap") instanceof List<?> fm && !fm.isEmpty()) {
-            body.put("formatMap", fm);
+            body.put("formatMap", sanitizeFormatMap(fm));
         } else {
             body.put("formatMap", List.of(Map.of(
                     "key", "USE_SYSTEM_RESPONSE_FORMAT",
@@ -380,11 +506,15 @@ public class SqlrestClient {
             }
             Object example = p.get("example");
             if (example == null || StrUtil.isBlank(String.valueOf(example))) {
+                example = p.get("defaultValue") != null ? p.get("defaultValue") : p.get("default");
+            }
+            if (example == null || StrUtil.isBlank(String.valueOf(example))) {
                 continue;
             }
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id", String.valueOf(p.getOrDefault("id", itemNameId(p))));
             item.put("name", String.valueOf(p.get("name")).trim());
+            // 始终带 JDBC/SQLREST 类型；空类型默认 STRING，避免 PG 绑参 unknown
             item.put("type", mapParamType(p.get("type")));
             item.put("isArray", false);
             item.put("required", Boolean.TRUE.equals(p.get("required")));

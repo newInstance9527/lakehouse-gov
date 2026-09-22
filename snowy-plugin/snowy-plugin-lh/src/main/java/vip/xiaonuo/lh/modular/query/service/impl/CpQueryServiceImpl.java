@@ -14,13 +14,16 @@ import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.modular.query.entity.CpQueryDataset;
 import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
+import vip.xiaonuo.lh.modular.query.entity.CpQuerySaved;
 import vip.xiaonuo.lh.modular.query.mapper.CpQueryDatasetMapper;
 import vip.xiaonuo.lh.modular.query.mapper.CpQueryExecMapper;
+import vip.xiaonuo.lh.modular.query.mapper.CpQuerySavedMapper;
 import vip.xiaonuo.lh.modular.query.param.CpQueryCancelParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryDatasetSaveParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExecParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExportParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryHistoryParam;
+import vip.xiaonuo.lh.modular.query.param.CpQuerySavedSaveParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
 import vip.xiaonuo.lh.modular.query.support.CpQueryAssetCatalog;
 import vip.xiaonuo.lh.modular.query.support.CpQueryCatalogGuard;
@@ -58,6 +61,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private CpQueryExecMapper execMapper;
     @Resource
     private CpQueryDatasetMapper datasetMapper;
+    @Resource
+    private CpQuerySavedMapper savedMapper;
     @Resource
     private TrinoClient trinoClient;
     @Resource
@@ -585,6 +590,147 @@ public class CpQueryServiceImpl implements CpQueryService {
             out.add(m);
         }
         return out;
+    }
+
+    @Override
+    public Map<String, Object> saveSavedScript(CpQuerySavedSaveParam param) {
+        if (param == null) {
+            throw new CommonException("参数不能为空");
+        }
+        String sql = StrUtil.trim(param.getSql());
+        if (StrUtil.isBlank(sql)) {
+            throw new CommonException("SQL 不能为空");
+        }
+        if (sql.length() > 512_000) {
+            throw new CommonException("SQL 过长，请改为开发脚本（Git）保存");
+        }
+        UserSnap user = currentUser();
+        String ws = StrUtil.blankToDefault(param.getWs(), "default");
+        String name = normalizeSavedName(param.getName());
+        Date now = new Date();
+        CpQuerySaved row = null;
+        if (StrUtil.isNotBlank(param.getId())) {
+            row = savedMapper.selectById(param.getId());
+            if (row == null || "DELETE".equals(row.getDeleteFlag()) || !user.id.equals(row.getUserId())) {
+                throw new CommonException("脚本不存在");
+            }
+        } else {
+            row = savedMapper.selectOne(new QueryWrapper<CpQuerySaved>().lambda()
+                    .eq(CpQuerySaved::getUserId, user.id)
+                    .eq(CpQuerySaved::getWs, ws)
+                    .eq(CpQuerySaved::getName, name)
+                    .eq(CpQuerySaved::getDeleteFlag, "NOT_DELETE")
+                    .last("LIMIT 1"));
+        }
+        boolean create = row == null;
+        if (create) {
+            row = new CpQuerySaved();
+            row.setId(IdUtil.getSnowflakeNextIdStr());
+            row.setUserId(user.id);
+            row.setCreateTime(now);
+            row.setCreateUser(user.id);
+            row.setDeleteFlag("NOT_DELETE");
+            row.setStatus("active");
+        }
+        row.setWs(ws);
+        row.setUserName(user.name);
+        row.setName(name);
+        row.setSqlText(sql);
+        row.setSqlHash(DigestUtil.sha256Hex(sql).substring(0, 32));
+        row.setSqlSummary(summarizeSql(sql));
+        row.setEngine(StrUtil.blankToDefault(param.getEngine(), "trino").toLowerCase(Locale.ROOT));
+        row.setUpdateTime(now);
+        row.setUpdateUser(user.id);
+        if (create) {
+            savedMapper.insert(row);
+        } else {
+            savedMapper.updateById(row);
+        }
+        Map<String, Object> out = savedView(row);
+        out.put("message", create ? "已保存脚本" : "已更新脚本");
+        return out;
+    }
+
+    @Override
+    public List<Map<String, Object>> listSavedScripts(String ws, Integer limit) {
+        int lim = limit == null || limit <= 0 ? 50 : Math.min(limit, 200);
+        UserSnap user = currentUser();
+        QueryWrapper<CpQuerySaved> qw = new QueryWrapper<CpQuerySaved>()
+                .eq("delete_flag", "NOT_DELETE")
+                .eq("user_id", user.id)
+                .orderByDesc("update_time")
+                .last("limit " + lim);
+        if (StrUtil.isNotBlank(ws)) {
+            qw.eq("ws", ws);
+        }
+        List<CpQuerySaved> list = savedMapper.selectList(qw);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (CpQuerySaved row : list) {
+            out.add(savedView(row));
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> getSavedScript(String id) {
+        CpQuerySaved row = requireOwnedSaved(id);
+        return savedView(row);
+    }
+
+    @Override
+    public void deleteSavedScript(String id) {
+        CpQuerySaved row = requireOwnedSaved(id);
+        row.setDeleteFlag("DELETE");
+        row.setStatus("archived");
+        row.setUpdateTime(new Date());
+        row.setUpdateUser(currentUser().id);
+        savedMapper.updateById(row);
+    }
+
+    private CpQuerySaved requireOwnedSaved(String id) {
+        if (StrUtil.isBlank(id)) {
+            throw new CommonException("缺少脚本 id");
+        }
+        UserSnap user = currentUser();
+        CpQuerySaved row = savedMapper.selectById(id);
+        if (row == null || "DELETE".equals(row.getDeleteFlag()) || !user.id.equals(row.getUserId())) {
+            throw new CommonException("脚本不存在");
+        }
+        return row;
+    }
+
+    private static Map<String, Object> savedView(CpQuerySaved row) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", row.getId());
+        m.put("name", row.getName());
+        m.put("ws", row.getWs());
+        m.put("sql", row.getSqlText());
+        m.put("sqlHash", row.getSqlHash());
+        m.put("sqlSummary", row.getSqlSummary());
+        m.put("engine", row.getEngine());
+        m.put("status", row.getStatus());
+        m.put("updateTime", formatTime(row.getUpdateTime()));
+        m.put("createTime", formatTime(row.getCreateTime()));
+        return m;
+    }
+
+    private static String normalizeSavedName(String raw) {
+        String name = StrUtil.trim(raw);
+        if (StrUtil.isBlank(name)) {
+            name = "query_" + System.currentTimeMillis() + ".sql";
+        }
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".sql")) {
+            name = name + ".sql";
+        }
+        if (name.length() > 200) {
+            name = name.substring(0, 196) + ".sql";
+        }
+        return name;
+    }
+
+    private static String summarizeSql(String sql) {
+        String one = StrUtil.blankToDefault(sql, "").replaceAll("\\s+", " ").trim();
+        return one.length() > 200 ? one.substring(0, 200) + "…" : one;
     }
 
     @Override

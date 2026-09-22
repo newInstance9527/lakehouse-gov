@@ -61,4 +61,15 @@ public interface DataapiService {
 
     /** Gateway 联调探针（edgeMode=gateway 时） */
     Map<String, Object> gatewayProbe(DataapiGatewayProbeParam param);
+
+    /** 调用大盘：SQLREST overview counter / trend / topPath */
+    Map<String, Object> callStats(Integer days);
+
+    /**
+     * OpenAPI 3.0 导出。
+     *
+     * @param ws 工作空间
+     * @param id 可选：仅导出单个绑定；空则全部 published
+     */
+    Map<String, Object> openapi(String ws, String id);
 }

@@ -18,6 +18,8 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.mapper.IgEtlDagMapper;
+import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
+import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMapper;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
@@ -49,6 +51,8 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
     @Resource
     private IgEtlDagMapper etlDagMapper;
     @Resource
+    private GovMetricMapper metricMapper;
+    @Resource
     private CbGravAssetRefMapper gravAssetRefMapper;
     @Resource
     private GravitinoClient gravitinoClient;
@@ -65,7 +69,8 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         if (asset != null && isAssetOwner(asset, user)) {
             return true;
         }
-        return hasActivePrivilege(user.getId(), LhOpsResourceTypeEnum.ASSET.getValue(), assetId, "SELECT");
+        // 仅认 Grav 投影成功的 SELECT（grav_projected=1），避免 soft-fail 假授权放行
+        return hasActiveSelectProjection(user.getId(), assetId);
     }
 
     @Override
@@ -96,7 +101,30 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         if (StrUtil.isBlank(datasourceId)) {
             return false;
         }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return true;
+        }
         return hasOpsPrivilege(LhOpsResourceTypeEnum.DATASOURCE.getValue(), datasourceId, LhOpsPrivilegeEnum.EDIT);
+    }
+
+    @Override
+    public boolean canReadMetric(String metricId) {
+        if (StrUtil.isBlank(metricId)) {
+            return false;
+        }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return true;
+        }
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        GovMetric metric = metricMapper.selectById(metricId);
+        if (metric != null && isMetricOwner(metric, user)) {
+            return true;
+        }
+        String type = LhOpsResourceTypeEnum.METRIC.getValue();
+        if (hasActiveOpsPrivilege(user.getId(), type, metricId, LhOpsPrivilegeEnum.EDIT)) {
+            return true;
+        }
+        return hasActivePrivilege(user.getId(), type, metricId, "SELECT");
     }
 
     @Override
@@ -127,6 +155,40 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
     @Override
     public void assertCanDeleteEtl(IgEtlDag dag) {
         assertEtlPrivilege(dag, LhOpsPrivilegeEnum.DELETE, "删除");
+    }
+
+    @Override
+    public void assertCanEditMetric(GovMetric metric) {
+        if (metric == null) {
+            throw new CommonException("指标不存在");
+        }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return;
+        }
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        if (isMetricOwner(metric, user)) {
+            return;
+        }
+        if (hasActiveOpsPrivilege(user.getId(), LhOpsResourceTypeEnum.METRIC.getValue(), metric.getId(),
+                LhOpsPrivilegeEnum.EDIT)) {
+            return;
+        }
+        throw new CommonException(
+                "指标「" + StrUtil.blankToDefault(metric.getMetricCode(), metric.getId()) + "」无编辑权："
+                        + LhOwnerGuard.MSG_NEED_APPLY);
+    }
+
+    @Override
+    public void assertCanReadMetric(GovMetric metric) {
+        if (metric == null) {
+            throw new CommonException("指标不存在");
+        }
+        if (canReadMetric(metric.getId())) {
+            return;
+        }
+        throw new CommonException(
+                "指标「" + StrUtil.blankToDefault(metric.getMetricCode(), metric.getId()) + "」无查询权："
+                        + LhOwnerGuard.MSG_NEED_APPLY);
     }
 
     private void assertAssetPrivilege(GovAsset asset, LhOpsPrivilegeEnum needed, String actionLabel) {
@@ -190,6 +252,10 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             IgEtlDag dag = etlDagMapper.selectById(resourceId);
             return dag != null && LhOwnerGuard.isOwner(user, dag.getCreateUser(), dag.getOwner());
         }
+        if (LhOpsResourceTypeEnum.METRIC.getValue().equals(type)) {
+            GovMetric metric = metricMapper.selectById(resourceId);
+            return metric != null && isMetricOwner(metric, user);
+        }
         return false;
     }
 
@@ -201,6 +267,19 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             qw.eq(SecAuthGrant::getPrivilege, privilegeExact);
         }
         applyResourceFilter(qw, resourceType, resourceId);
+        Long cnt = grantMapper.selectCount(qw);
+        return cnt != null && cnt > 0;
+    }
+
+    /** 目录上锁：仅 Grav 投影成功的 SELECT（grav_projected=1）；排除历史 soft-fail 假投影。 */
+    private boolean hasActiveSelectProjection(String userId, String assetId) {
+        Date now = new Date();
+        var qw = baseActiveGrantQw(userId, now);
+        qw.eq(SecAuthGrant::getPrivilege, "SELECT")
+                .eq(SecAuthGrant::getGravProjected, 1)
+                .and(w -> w.isNull(SecAuthGrant::getRemark)
+                        .or().notLike(SecAuthGrant::getRemark, "%soft-fail%"));
+        applyResourceFilter(qw, LhOpsResourceTypeEnum.ASSET.getValue(), assetId);
         Long cnt = grantMapper.selectCount(qw);
         return cnt != null && cnt > 0;
     }
@@ -247,6 +326,13 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             return false;
         }
         return LhOwnerGuard.isOwner(user, asset.getCreateUser(), asset.getTechOwner(), asset.getBizOwner());
+    }
+
+    public static boolean isMetricOwner(GovMetric metric, SaBaseLoginUser user) {
+        if (metric == null || user == null) {
+            return false;
+        }
+        return LhOwnerGuard.isOwner(user, metric.getCreateUser(), metric.getOwner());
     }
 
     @Override

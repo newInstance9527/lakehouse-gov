@@ -7,6 +7,7 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.annotation.Resource;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.exception.CommonException;
@@ -21,6 +22,13 @@ import vip.xiaonuo.lh.modular.apply.param.ApplyTicketPageParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
+import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
+import vip.xiaonuo.lh.modular.dataapi.mapper.DataapiApiBindingMapper;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
+import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricTransitionParam;
+import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
+import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
 import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
 import vip.xiaonuo.lh.modular.sec.service.GravTableAccessService;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
@@ -28,6 +36,7 @@ import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -40,6 +49,10 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public static final String TYPE_RESOURCE_MANAGE = "resource_manage";
     public static final String TYPE_COMPLIANCE_DELETE = "compliance_delete";
     public static final String TYPE_API_PUBLISH = "api_publish";
+    /** 数据服务订阅调用 Key */
+    public static final String TYPE_API_SUBSCRIBE = "api_subscribe";
+    /** 指标发布 / 变更 / 查询权限 */
+    public static final String TYPE_METRIC = "metric";
 
     @Resource
     private ApplyTicketMapper ticketMapper;
@@ -51,6 +64,16 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     private SecAuthGrantService secAuthGrantService;
     @Resource
     private GravTableAccessService gravTableAccessService;
+    @Resource
+    private vip.xiaonuo.lh.modular.dataapi.service.DataapiKeyIssueService dataapiKeyIssueService;
+    @Resource
+    private DataapiApiBindingMapper dataapiApiBindingMapper;
+    @Resource
+    @Lazy
+    private DataapiService dataapiService;
+    @Resource
+    @Lazy
+    private GovMetricService govMetricService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -69,7 +92,112 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (TYPE_API_PUBLISH.equals(type)) {
             return createApiPublish(param, userId);
         }
+        if (TYPE_API_SUBSCRIBE.equals(type)) {
+            return createApiSubscribe(param, userId);
+        }
+        if (TYPE_METRIC.equals(type)) {
+            return createMetric(param, userId);
+        }
         return createTableRead(param, userId, type);
+    }
+
+    /**
+     * 指标申请：create/change = 发布流（对齐 API：草稿→待发布→审批→自动启用）；query = 查询权限。
+     */
+    private ApplyTicket createMetric(ApplyTicketCreateParam param, String userId) {
+        String metricCode = StrUtil.trim(param.getMetricCode());
+        String metricKind = StrUtil.blankToDefault(param.getMetricKind(), "query").trim().toLowerCase(Locale.ROOT);
+        if (!"create".equals(metricKind) && !"change".equals(metricKind) && !"query".equals(metricKind)) {
+            throw new CommonException("metricKind 须为 create / change / query");
+        }
+        if (StrUtil.isBlank(metricCode)) {
+            throw new CommonException("指标申请须携带 metricCode（请先在指标中心保存草稿）");
+        }
+        GovMetricVo metric = govMetricService.detail(metricCode, null);
+        if (metric == null) {
+            throw new CommonException("指标不存在: " + metricCode);
+        }
+        String status = StrUtil.blankToDefault(metric.getStatus(), "");
+        String note = StrUtil.blankToDefault(param.getCaliberDiff(), param.getReason());
+
+        if ("create".equals(metricKind)) {
+            if ("draft".equals(status)) {
+                GovMetricTransitionParam tp = new GovMetricTransitionParam();
+                tp.setMetricCode(metricCode);
+                tp.setAction("submit");
+                tp.setNote(StrUtil.blankToDefault(param.getReason(), "申请发布"));
+                govMetricService.transition(tp);
+            } else if (!"review".equals(status)) {
+                throw new CommonException("仅草稿/待发布指标可申请首次发布（当前状态=" + status + "）");
+            }
+        } else if ("change".equals(metricKind)) {
+            if ("active".equals(status)) {
+                GovMetricTransitionParam tp = new GovMetricTransitionParam();
+                tp.setMetricCode(metricCode);
+                tp.setAction("change");
+                tp.setNote(StrUtil.blankToDefault(note, "口径变更发布申请"));
+                govMetricService.transition(tp);
+            } else if (!"version_review".equals(status)) {
+                throw new CommonException("仅已启用/待发布·变更指标可申请口径变更发布（当前状态=" + status + "）");
+            }
+        } else if (!"active".equals(status) && !"version_review".equals(status)) {
+            throw new CommonException("查询权限仅可申请已启用指标（当前状态=" + status + "）");
+        }
+
+        ApplyTicket t = newTicketShell(userId, TYPE_METRIC, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("MET-"));
+        JSONObject payload = new JSONObject();
+        payload.set("metricCode", metricCode);
+        payload.set("metricKind", metricKind);
+        payload.set("metricName", metric.getName());
+        payload.set("metricType", metric.getKind());
+        payload.set("caliberDiff", param.getCaliberDiff());
+        payload.set("expireLabel", param.getExpireLabel());
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            String kindLabel = "create".equals(metricKind) ? "指标发布"
+                    : "change".equals(metricKind) ? "口径变更发布" : "指标查询权限";
+            t.setTitle(kindLabel + " · " + metricCode + " · " + StrUtil.blankToDefault(metric.getName(), ""));
+        }
+        ticketMapper.insert(t);
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAssetId(null);
+        item.setAction("METRIC_" + metricKind.toUpperCase(Locale.ROOT));
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
+    }
+
+    private ApplyTicket createApiSubscribe(ApplyTicketCreateParam param, String userId) {
+        String publicPath = StrUtil.trim(param.getPublicPath());
+        String consumer = StrUtil.trim(param.getConsumerName());
+        if (StrUtil.isBlank(publicPath) && StrUtil.isBlank(param.getApiBindingId())) {
+            throw new CommonException("订阅申请须携带 publicPath 或 apiBindingId");
+        }
+        if (StrUtil.isBlank(consumer)) {
+            throw new CommonException("订阅申请须填写 consumerName（调用应用名）");
+        }
+        ApplyTicket t = newTicketShell(userId, TYPE_API_SUBSCRIBE, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("SUB-"));
+        t.setExpiresAt(vip.xiaonuo.lh.modular.dataapi.service.DataapiKeyIssueService.resolveExpireAt(param.getExpireLabel()));
+        JSONObject payload = new JSONObject();
+        payload.set("apiBindingId", param.getApiBindingId());
+        payload.set("publicPath", publicPath);
+        payload.set("method", StrUtil.blankToDefault(param.getMethod(), "GET"));
+        payload.set("consumerName", consumer);
+        payload.set("qps", param.getQps() == null ? 100 : param.getQps());
+        payload.set("expireLabel", param.getExpireLabel());
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            t.setTitle("API 订阅 · " + consumer + " · " + StrUtil.blankToDefault(publicPath, param.getApiBindingId()));
+        }
+        ticketMapper.insert(t);
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAssetId(null);
+        item.setAction("API_SUBSCRIBE");
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
     }
 
     private ApplyTicket createApiPublish(ApplyTicketCreateParam param, String userId) {
@@ -94,6 +222,13 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         item.setAction("API_PUBLISH");
         item.setDetail(payload.toString());
         itemMapper.insert(item);
+        // 回写绑定上的申请单号（草稿已存在；发布仍须审批通过）
+        DataapiApiBinding binding = dataapiApiBindingMapper.selectById(bindingId);
+        if (binding != null) {
+            binding.setPublishTicketNo(t.getTicketNo());
+            binding.setUpdateTime(new Date());
+            dataapiApiBindingMapper.updateById(binding);
+        }
         return t;
     }
 
@@ -308,10 +443,11 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
 
         Map<String, Object> r = new LinkedHashMap<>();
-        // 出湖 / 合规删除 / API 发布：仅改状态，不写 sec_auth_grant
+        // 出湖 / 合规删除：仅改状态；API 发布：审批通过后自动 publish+deploy；指标发布：自动启用
         if (TYPE_LAKE_EXPORT.equals(t.getTicketType())
                 || TYPE_COMPLIANCE_DELETE.equals(t.getTicketType())
-                || TYPE_API_PUBLISH.equals(t.getTicketType())) {
+                || TYPE_API_PUBLISH.equals(t.getTicketType())
+                || TYPE_METRIC.equals(t.getTicketType())) {
             t.setStatus("approved");
             t.setApprovedBy(LhLoginUsers.requireUserId());
             t.setApprovedAt(new Date());
@@ -323,6 +459,38 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
             r.put("ticketNo", t.getTicketNo());
             r.put("grantId", null);
             r.put("gravProjected", false);
+            if (TYPE_API_PUBLISH.equals(t.getTicketType())) {
+                Map<String, Object> pub = autoPublishApiAfterApprove(t);
+                r.put("autoPublished", true);
+                r.put("publish", pub);
+                r.put("publishOk", pub != null && !Boolean.FALSE.equals(pub.get("ok")));
+            }
+            if (TYPE_METRIC.equals(t.getTicketType())) {
+                Map<String, Object> pub = autoPublishMetricAfterApprove(t);
+                r.put("autoPublished", true);
+                r.put("metric", pub);
+                r.put("publishOk", pub != null && !Boolean.FALSE.equals(pub.get("ok")));
+                if (pub != null && pub.get("grantId") != null) {
+                    r.put("grantId", pub.get("grantId"));
+                }
+            }
+            return r;
+        }
+        // API 订阅：签发 Key（Vault + dataapi_api_key_meta）
+        if (TYPE_API_SUBSCRIBE.equals(t.getTicketType())) {
+            t.setStatus("approved");
+            t.setApprovedBy(LhLoginUsers.requireUserId());
+            t.setApprovedAt(new Date());
+            t.setRemark(param.getRemark());
+            t.setUpdateTime(new Date());
+            t.setUpdateUser(LhLoginUsers.requireUserId());
+            ticketMapper.updateById(t);
+            Map<String, Object> issued = dataapiKeyIssueService.issueFromSubscribeTicket(t);
+            r.put("ticket", t);
+            r.put("ticketNo", t.getTicketNo());
+            r.put("grantId", null);
+            r.put("gravProjected", false);
+            r.put("issuedKey", issued);
             return r;
         }
 
@@ -408,6 +576,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         t.setUpdateTime(new Date());
         t.setUpdateUser(LhLoginUsers.requireUserId());
         ticketMapper.updateById(t);
+        if (TYPE_METRIC.equals(t.getTicketType())) {
+            revertMetricAfterReject(t, param.getRemark());
+        }
         return t;
     }
 
@@ -460,7 +631,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public void assertApprovedApiPublishTicket(String ticketNo, String apiBindingId) {
         String no = StrUtil.trim(ticketNo);
         if (StrUtil.isBlank(no)) {
-            throw new CommonException("发布须填写已审批单号 publishTicketNo（申请中心 api_publish）");
+            throw new CommonException("发布须先有已审批的 api_publish 单号：请先「保存」草稿 →「提交发布申请」→ 审批通过后再「发布」");
         }
         ApplyTicket t = ticketMapper.selectOne(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
@@ -487,6 +658,176 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
                 /* payload 损坏时仅告警式放行类型校验 */
             }
         }
+    }
+
+    @Override
+    public String findLatestApprovedApiPublishTicketNo(String apiBindingId) {
+        Map<String, Object> hit = findLatestApiPublishTicket(apiBindingId);
+        if (hit == null) {
+            return null;
+        }
+        if (!"approved".equals(hit.get("status"))) {
+            return null;
+        }
+        Object no = hit.get("ticketNo");
+        return no == null ? null : String.valueOf(no);
+    }
+
+    @Override
+    public Map<String, Object> findLatestApiPublishTicket(String apiBindingId) {
+        if (StrUtil.isBlank(apiBindingId)) {
+            return null;
+        }
+        List<ApplyTicket> list = ticketMapper.selectList(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getTicketType, TYPE_API_PUBLISH)
+                .like(ApplyTicket::getPayload, apiBindingId)
+                .orderByDesc(ApplyTicket::getCreateTime)
+                .last("LIMIT 20"));
+        for (ApplyTicket t : list) {
+            try {
+                String bound = JSONUtil.parseObj(StrUtil.blankToDefault(t.getPayload(), "{}")).getStr("apiBindingId");
+                if (!apiBindingId.equals(bound)) {
+                    continue;
+                }
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("ticketNo", t.getTicketNo());
+                m.put("status", t.getStatus());
+                m.put("id", t.getId());
+                m.put("remark", t.getRemark());
+                return m;
+            } catch (Exception ignored) {
+                /* skip bad payload */
+            }
+        }
+        return null;
+    }
+
+    private void bindApprovedPublishTicket(ApplyTicket t) {
+        try {
+            String bindingId = JSONUtil.parseObj(StrUtil.blankToDefault(t.getPayload(), "{}")).getStr("apiBindingId");
+            if (StrUtil.isBlank(bindingId)) {
+                return;
+            }
+            DataapiApiBinding binding = dataapiApiBindingMapper.selectById(bindingId);
+            if (binding == null) {
+                return;
+            }
+            binding.setPublishTicketNo(t.getTicketNo());
+            binding.setUpdateTime(new Date());
+            dataapiApiBindingMapper.updateById(binding);
+        } catch (Exception ignored) {
+            /* 审批主路径不受绑定回写失败影响 */
+        }
+    }
+
+    /**
+     * 指标发布/变更审批通过后自动启用（create→approve；change→approveVersion）；
+     * query → 写 metric SELECT 门户投影，闭环「申请查询→能 trial/query」。
+     */
+    private Map<String, Object> autoPublishMetricAfterApprove(ApplyTicket t) {
+        JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(t.getPayload(), "{}"));
+        String metricCode = payload.getStr("metricCode");
+        String metricKind = StrUtil.blankToDefault(payload.getStr("metricKind"), "query").toLowerCase(Locale.ROOT);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("metricCode", metricCode);
+        out.put("metricKind", metricKind);
+        if (StrUtil.isBlank(metricCode)) {
+            out.put("ok", true);
+            out.put("skipped", "missing_code");
+            return out;
+        }
+        if ("query".equals(metricKind)) {
+            GovMetricVo metric = govMetricService.detail(metricCode, null);
+            if (metric == null || StrUtil.isBlank(metric.getId())) {
+                throw new CommonException("指标不存在，无法写入查询授权: " + metricCode);
+            }
+            SecAuthGrant grant = secAuthGrantService.createFromApproval(
+                    t.getId(),
+                    t.getApplicant(),
+                    "metric",
+                    metric.getId(),
+                    null,
+                    null,
+                    "SELECT",
+                    t.getExpiresAt(),
+                    StrUtil.blankToDefault(t.getRemark(), "metric query grant · " + t.getTicketNo()));
+            out.put("ok", true);
+            out.put("grantId", grant.getId());
+            out.put("privilege", "SELECT");
+            out.put("resourceType", "metric");
+            out.put("resourceId", metric.getId());
+            return out;
+        }
+        GovMetricTransitionParam tp = new GovMetricTransitionParam();
+        tp.setMetricCode(metricCode);
+        tp.setNote(StrUtil.blankToDefault(t.getRemark(), "审批通过自动启用 · " + t.getTicketNo()));
+        if ("change".equals(metricKind)) {
+            tp.setAction("approveVersion");
+        } else {
+            tp.setAction("approve");
+        }
+        GovMetricVo vo = govMetricService.transition(tp);
+        out.put("ok", true);
+        out.put("status", vo == null ? null : vo.getStatus());
+        out.put("ver", vo == null ? null : vo.getVer());
+        return out;
+    }
+
+    /** 驳回：首次发布退回草稿；口径变更撤回待审并保留启用版；query 仅关单。 */
+    private void revertMetricAfterReject(ApplyTicket t, String remark) {
+        JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(t.getPayload(), "{}"));
+        String metricCode = payload.getStr("metricCode");
+        String metricKind = StrUtil.blankToDefault(payload.getStr("metricKind"), "query").toLowerCase(Locale.ROOT);
+        if (StrUtil.isBlank(metricCode) || "query".equals(metricKind)) {
+            return;
+        }
+        String note = StrUtil.blankToDefault(remark, "驳回退回重改 · " + t.getTicketNo());
+        GovMetricTransitionParam tp = new GovMetricTransitionParam();
+        tp.setMetricCode(metricCode);
+        tp.setNote(note);
+        if ("change".equals(metricKind)) {
+            tp.setAction("cancelChange");
+        } else {
+            tp.setAction("reject");
+        }
+        try {
+            govMetricService.transition(tp);
+        } catch (CommonException e) {
+            // 指标可能已被人工改态；驳回主路径仍成功关单
+        }
+    }
+
+    /**
+     * 审批通过后自动发布：写回单号 → SQLREST publish/deploy → 门户 state=published。
+     * 失败抛异常，整单审批事务回滚，避免「已通过但未上线」。
+     */
+    private Map<String, Object> autoPublishApiAfterApprove(ApplyTicket t) {
+        JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(t.getPayload(), "{}"));
+        String bindingId = payload.getStr("apiBindingId");
+        if (StrUtil.isBlank(bindingId)) {
+            throw new CommonException("发布申请缺少 apiBindingId，无法自动发布");
+        }
+        bindApprovedPublishTicket(t);
+        DataapiIdParam pubParam = new DataapiIdParam();
+        pubParam.setId(bindingId);
+        pubParam.setPublishTicketNo(t.getTicketNo());
+        Map<String, Object> pub = dataapiService.publish(pubParam);
+        if (pub == null) {
+            throw new CommonException("自动发布失败：无返回");
+        }
+        // publish 允许 degraded；若连 pub.ok 也为 false 且未写成 published，则失败回滚
+        Object binding = pub.get("binding");
+        String state = null;
+        if (binding instanceof Map<?, ?> m) {
+            Object st = m.get("state");
+            state = st == null ? null : String.valueOf(st);
+        }
+        if (!"published".equals(state) && Boolean.FALSE.equals(pub.get("ok"))) {
+            throw new CommonException("自动发布失败：" + StrUtil.blankToDefault(
+                    String.valueOf(pub.get("message")), "SQLREST publish/deploy 未成功"));
+        }
+        return pub;
     }
 
     private ApplyTicket newTicketShell(String userId, String type, ApplyTicketCreateParam param, String ws) {
@@ -552,8 +893,14 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if ("compliance".equals(t) || "compliance_delete".equals(t) || "erase".equals(t)) {
             return TYPE_COMPLIANCE_DELETE;
         }
-        if ("api".equals(t) || "api_publish".equals(t) || "dataapi".equals(t) || "publish_api".equals(t)) {
+        if ("api_publish".equals(t) || "publish".equals(t) || "publish_api".equals(t) || "dataapi_publish".equals(t)) {
             return TYPE_API_PUBLISH;
+        }
+        if ("api".equals(t) || "api_subscribe".equals(t) || "subscribe".equals(t) || "dataapi_subscribe".equals(t)) {
+            return TYPE_API_SUBSCRIBE;
+        }
+        if ("metric".equals(t) || "metric_publish".equals(t) || "metrics".equals(t)) {
+            return TYPE_METRIC;
         }
         return t;
     }

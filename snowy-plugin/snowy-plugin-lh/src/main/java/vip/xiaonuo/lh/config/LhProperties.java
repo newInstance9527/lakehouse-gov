@@ -185,19 +185,14 @@ public class LhProperties {
          */
         private Long datasourceId = 1L;
         /**
-         * 边缘模式：
-         * <ul>
-         *   <li>{@code gateway}（默认）— 对外走 SQLREST Gateway（:18091），不再强依赖 APISIX</li>
-         *   <li>{@code apisix} — 对外走 APISIX，upstream 指向 {@link #executorUpstream}</li>
-         *   <li>{@code both} — SQLREST 上线 + 同步写 APISIX 路由（双边缘）</li>
-         * </ul>
+         * 边缘模式：仅支持 {@code gateway}（SQLREST Gateway）。
+         * {@code apisix}/{@code both} 已废弃，运行时强制回落 gateway（数据服务不做 APISIX）。
          */
         private String edgeMode = "gateway";
         /** SQLREST Gateway 公网根，如 http://host:18091；门户展示与联调 */
         private String gatewayUrl = "http://127.0.0.1:18091";
         /**
-         * APISIX upstream 节点 host:port（仅 edge-mode=apisix|both 使用）。
-         * 可指向 Gateway 或 Executor。
+         * 历史字段：曾作 APISIX upstream；APISIX 不做后仅作展示兜底，可与 {@link #gatewayUrl} 主机端口一致。
          */
         private String executorUpstream = "127.0.0.1:18091";
     }

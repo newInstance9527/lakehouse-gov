@@ -39,6 +39,11 @@ public final class LhVaultPaths {
     /** APISIX Admin Key */
     public static final String APISIX = "platform/apisix/admin";
 
+    /** 数据服务订阅 Key：platform/dataapi/keys/{keyMetaId} */
+    public static String dataapiKey(String keyMetaId) {
+        return "platform/dataapi/keys/" + keyMetaId;
+    }
+
     /** OpenMetadata Bot / PAT */
     public static final String OPENMETADATA = "platform/openmetadata/bot";
 

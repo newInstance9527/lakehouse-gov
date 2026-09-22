@@ -3,6 +3,7 @@ package vip.xiaonuo.lh.modular.sec.service;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
+import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
 import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum;
 
@@ -11,7 +12,10 @@ import java.util.Map;
 
 public interface SecAuthGrantService {
 
-    /** 表级查看：拥有者或未过期的 SELECT 投影。不含 EDIT/DELETE/MANAGE，执行鉴权不读这里。 */
+    /**
+     * 表级查看：拥有者或未过期且已 Grav 投影成功的 SELECT。
+     * 不含 EDIT/DELETE/MANAGE；假投影（grav_projected≠1）不放行。
+     */
     boolean hasTableReadGrant(String assetId);
 
     /** 资产管理权：拥有者或 MANAGE grant（兼容旧 assetId） */
@@ -21,9 +25,14 @@ public interface SecAuthGrantService {
     boolean hasManageGrant(String resourceType, String resourceId);
 
     /**
-     * 数据服务构建：是否可用该数据源（拥有者或 EDIT/MANAGE grant）。
+     * 数据服务构建 / 列表：是否可用该数据源（超管、拥有者或 EDIT/MANAGE grant）。
      */
     boolean canUseDatasource(String datasourceId);
+
+    /**
+     * 指标读/试跑：超管、拥有者，或未过期 SELECT / EDIT / MANAGE。
+     */
+    boolean canReadMetric(String metricId);
 
     /**
      * 是否具备所需操作能力（owner 或 privilege 满足；MANAGE 覆盖 EDIT/DELETE）。
@@ -41,6 +50,12 @@ public interface SecAuthGrantService {
     void assertCanEditEtl(IgEtlDag dag);
 
     void assertCanDeleteEtl(IgEtlDag dag);
+
+    /** 指标写：超管、拥有者或 EDIT/MANAGE */
+    void assertCanEditMetric(GovMetric metric);
+
+    /** 指标试跑/查询：见 {@link #canReadMetric} */
+    void assertCanReadMetric(GovMetric metric);
 
     /** @deprecated 用 assertCanEdit*；保留为编辑能力别名 */
     @Deprecated
@@ -62,7 +77,7 @@ public interface SecAuthGrantService {
 
     /**
      * 审批通过写 grant。
-     * @param resourceType asset/datasource/etl（已启用）
+     * @param resourceType asset/datasource/etl/metric（已启用）
      * @param resourceId 资源主键
      * @param assetId 仅 asset 时填，兼容 Grav
      * @param gravAssetId 可选

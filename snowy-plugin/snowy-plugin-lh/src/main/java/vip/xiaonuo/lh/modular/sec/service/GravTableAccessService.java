@@ -12,7 +12,7 @@ public interface GravTableAccessService {
 
     /**
      * 表读申请通过：先授予 Gravitino SELECT，成功后再写门户投影（目录上锁用）。
-     * 引擎失败则抛错，不写 sec_auth_grant。
+     * Grav 失败：不写 sec_auth_grant SELECT 投影，返回 softFail=true 与 gravMessage（审批方可据此提示，不产生假授权）。
      */
     Map<String, Object> grantTableRead(ApplyTicket ticket, ApplyTicketItem item, String privilege, String rowFilter);
 

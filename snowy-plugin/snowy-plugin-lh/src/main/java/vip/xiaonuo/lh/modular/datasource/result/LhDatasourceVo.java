@@ -127,4 +127,19 @@ public class LhDatasourceVo {
 
     @Schema(description = "脱敏连接原文Map")
     private Map<String, Object> conn;
+
+    @Schema(description = "是否可投影到 SQLREST")
+    private Boolean sqlrestProjectable;
+
+    @Schema(description = "SQLREST 投影态：never/synced/error/unsupported")
+    private String sqlrestSyncState;
+
+    @Schema(description = "是否已成功投影")
+    private Boolean sqlrestProjected;
+
+    @Schema(description = "最近投影错误")
+    private String sqlrestLastError;
+
+    @Schema(description = "SQLREST datasource id")
+    private Long sqlrestDatasourceId;
 }

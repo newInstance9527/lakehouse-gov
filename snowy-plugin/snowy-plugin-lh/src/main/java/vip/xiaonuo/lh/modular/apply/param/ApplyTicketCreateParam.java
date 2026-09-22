@@ -9,7 +9,7 @@ import lombok.Setter;
 @Setter
 public class ApplyTicketCreateParam {
 
-    @Schema(description = "类型：table_read|lake_export|resource_manage|compliance_delete|api_publish；兼容前端 export/perm/manage/compliance/api")
+    @Schema(description = "类型：table_read|lake_export|resource_manage|compliance_delete|api_publish|api_subscribe|metric；兼容前端 export/perm/manage/compliance/publish/api")
     private String ticketType;
 
     @NotBlank
@@ -55,12 +55,27 @@ public class ApplyTicketCreateParam {
     @Schema(description = "计划载体数（compliance_delete 展示用）")
     private Integer targetCount;
 
-    @Schema(description = "数据服务绑定 id（api_publish）")
+    @Schema(description = "数据服务绑定 id（api_publish / api_subscribe）")
     private String apiBindingId;
 
-    @Schema(description = "对外路径（api_publish）")
+    @Schema(description = "对外路径（api_publish / api_subscribe）")
     private String publicPath;
 
-    @Schema(description = "HTTP 方法（api_publish）")
+    @Schema(description = "HTTP 方法（api_publish / api_subscribe）")
     private String method;
+
+    @Schema(description = "调用应用名（api_subscribe MUST）")
+    private String consumerName;
+
+    @Schema(description = "订阅方 QPS（api_subscribe）")
+    private Integer qps;
+
+    @Schema(description = "指标编码（metric：create/change/query MUST）")
+    private String metricCode;
+
+    @Schema(description = "指标申请子类型：create|change|query（metric；默认 query）")
+    private String metricKind;
+
+    @Schema(description = "口径变更说明（metric + change）")
+    private String caliberDiff;
 }

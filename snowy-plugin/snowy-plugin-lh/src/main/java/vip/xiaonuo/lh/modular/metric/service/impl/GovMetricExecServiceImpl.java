@@ -25,6 +25,7 @@ import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
 import vip.xiaonuo.lh.modular.query.mapper.CpQueryExecMapper;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
+import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -54,10 +55,13 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
     private CpQueryExecMapper execMapper;
     @Resource
     private LhTrinoPrincipalService principalService;
+    @Resource
+    private SecAuthGrantService secAuthGrantService;
 
     @Override
     public Map<String, Object> query(GovMetricQueryParam param) {
         GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+        secAuthGrantService.assertCanReadMetric(head);
         if (!"active".equals(head.getStatus())) {
             throw new CommonException("仅已启用指标可查询");
         }
@@ -70,6 +74,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
     public Map<String, Object> trial(String metricCode, GovMetricTrialParam param) {
         GovMetricTrialParam p = param == null ? new GovMetricTrialParam() : param;
         GovMetric head = requireMetric(metricCode, p.getWs());
+        secAuthGrantService.assertCanReadMetric(head);
         if (!TRIAL_OK.contains(head.getStatus())) {
             throw new CommonException("当前状态不可试跑: " + head.getStatus());
         }

@@ -6,6 +6,7 @@ import vip.xiaonuo.lh.modular.query.param.CpQueryDatasetSaveParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExecParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExportParam;
 import vip.xiaonuo.lh.modular.query.param.CpQueryHistoryParam;
+import vip.xiaonuo.lh.modular.query.param.CpQuerySavedSaveParam;
 
 import java.util.List;
 import java.util.Map;
@@ -45,6 +46,15 @@ public interface CpQueryService {
     Map<String, Object> saveDataset(CpQueryDatasetSaveParam param);
 
     List<Map<String, Object>> listDatasets(String ws, Integer limit);
+
+    /** 保存即席脚本到 cp_query_saved（同用户+ws+name 覆盖） */
+    Map<String, Object> saveSavedScript(CpQuerySavedSaveParam param);
+
+    List<Map<String, Object>> listSavedScripts(String ws, Integer limit);
+
+    Map<String, Object> getSavedScript(String id);
+
+    void deleteSavedScript(String id);
 
     /** 即席查询面快照：白名单 ∩ SHOW CATALOGS */
     Map<String, Object> querySurface();

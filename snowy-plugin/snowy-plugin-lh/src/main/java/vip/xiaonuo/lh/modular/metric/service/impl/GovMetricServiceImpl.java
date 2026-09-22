@@ -36,6 +36,7 @@ import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAssetSourceLink;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetSourceLinkMapper;
+import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.ArrayList;
 import java.util.Date;
@@ -57,9 +58,9 @@ public class GovMetricServiceImpl implements GovMetricService {
 
     private static final Map<String, String> STATUS_LABEL = Map.of(
             "draft", "草稿",
-            "review", "评审中",
+            "review", "待发布",
             "active", "已启用",
-            "version_review", "新版本评审",
+            "version_review", "待发布·变更",
             "deprecated", "已废弃"
     );
 
@@ -87,6 +88,8 @@ public class GovMetricServiceImpl implements GovMetricService {
     private GovAssetMapper govAssetMapper;
     @Resource
     private GovAssetSourceLinkMapper govAssetSourceLinkMapper;
+    @Resource
+    private SecAuthGrantService secAuthGrantService;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -190,6 +193,7 @@ public class GovMetricServiceImpl implements GovMetricService {
             throw new CommonException("metricCode 不能为空");
         }
         GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+        secAuthGrantService.assertCanEditMetric(head);
         if (!"draft".equals(head.getStatus()) && !"review".equals(head.getStatus())) {
             throw new CommonException("仅草稿/评审中可直接编辑；已启用请走变更");
         }
@@ -225,6 +229,7 @@ public class GovMetricServiceImpl implements GovMetricService {
     @Transactional(rollbackFor = Exception.class)
     public GovMetricVo transition(GovMetricTransitionParam param) {
         GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+        secAuthGrantService.assertCanEditMetric(head);
         String action = param.getAction().trim();
         String note = StrUtil.blankToDefault(param.getNote(), "");
         String from = head.getStatus();
@@ -272,7 +277,7 @@ public class GovMetricServiceImpl implements GovMetricService {
                     ver.setPendingCaliber(null);
                     verMapper.updateById(ver);
                 }
-                appendHistory(head.getId(), to, "取消变更，保持当前版本");
+                appendHistory(head.getId(), to, StrUtil.blankToDefault(note, "取消变更，保持当前版本"));
             }
             case "deprecate" -> {
                 requireStatus(from, "active");
@@ -293,6 +298,9 @@ public class GovMetricServiceImpl implements GovMetricService {
         String dialect = StrUtil.blankToDefault(param.getDialect(), "trino");
         if (StrUtil.isNotBlank(param.getMetricCode())) {
             GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+            if (Boolean.TRUE.equals(param.getPersist())) {
+                secAuthGrantService.assertCanEditMetric(head);
+            }
             GovMetricSqlCompiler.CompileOut out = compileInternal(head, dialect);
             if (Boolean.TRUE.equals(param.getPersist()) && StrUtil.isNotBlank(head.getCurrentVerId())) {
                 persistSql(head.getCurrentVerId(), out);

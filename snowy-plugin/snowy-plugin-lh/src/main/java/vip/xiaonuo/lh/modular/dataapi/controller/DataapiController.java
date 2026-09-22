@@ -87,7 +87,7 @@ public class DataapiController {
         return CommonResult.data(dataapiService.trial(param));
     }
 
-    @Operation(summary = "发布：SQLREST 上线；APISIX 仅 edgeMode=apisix|both")
+    @Operation(summary = "发布：SQLREST publish + deploy（边缘仅 Gateway，不写 APISIX）")
     @CommonLog("数据服务发布")
     @PostMapping("/lh/dataapi/publish")
     public CommonResult<Map<String, Object>> publish(@RequestBody @Valid DataapiIdParam param) {
@@ -109,14 +109,14 @@ public class DataapiController {
         return CommonResult.ok();
     }
 
-    @Operation(summary = "APISIX 路由投影")
+    @Operation(summary = "已发布入口一览（Gateway；历史路径名 routes）")
     @GetMapping("/lh/dataapi/routes")
     public CommonResult<Map<String, Object>> routes() {
         return CommonResult.data(dataapiService.routes());
     }
 
-    @Operation(summary = "与 APISIX 同步")
-    @CommonLog("数据服务同步 APISIX")
+    @Operation(summary = "已废弃：数据服务不做 APISIX，恒返回 skipped")
+    @CommonLog("数据服务同步 APISIX（已废弃）")
     @PostMapping("/lh/dataapi/syncApisix")
     public CommonResult<Map<String, Object>> syncApisix(@RequestParam(required = false) String ws) {
         return CommonResult.data(dataapiService.syncApisix(ws));
@@ -170,5 +170,20 @@ public class DataapiController {
     @PostMapping("/lh/dataapi/gatewayProbe")
     public CommonResult<Map<String, Object>> gatewayProbe(@RequestBody DataapiGatewayProbeParam param) {
         return CommonResult.data(dataapiService.gatewayProbe(param));
+    }
+
+    @Operation(summary = "调用大盘（SQLREST overview 聚合）")
+    @GetMapping("/lh/dataapi/callStats")
+    public CommonResult<Map<String, Object>> callStats(
+            @RequestParam(required = false, defaultValue = "7") Integer days) {
+        return CommonResult.data(dataapiService.callStats(days));
+    }
+
+    @Operation(summary = "OpenAPI 3.0 导出（published 绑定；可选单条 id）")
+    @GetMapping({"/lh/dataapi/openapi.json", "/lh/dataapi/openapi"})
+    public CommonResult<Map<String, Object>> openapi(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String id) {
+        return CommonResult.data(dataapiService.openapi(ws, id));
     }
 }

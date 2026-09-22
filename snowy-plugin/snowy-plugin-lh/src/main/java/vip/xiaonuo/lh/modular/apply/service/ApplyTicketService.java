@@ -34,4 +34,14 @@ public interface ApplyTicketService {
      * 数据服务发布门闩：ticketNo 须为 api_publish 且 approved；可选校验绑定 id。
      */
     void assertApprovedApiPublishTicket(String ticketNo, String apiBindingId);
+
+    /**
+     * 取绑定最近一张已审批的 api_publish 单号；无则返回 null。
+     */
+    String findLatestApprovedApiPublishTicketNo(String apiBindingId);
+
+    /**
+     * 取绑定最近一张 api_publish（任意状态）元信息：ticketNo / status。
+     */
+    Map<String, Object> findLatestApiPublishTicket(String apiBindingId);
 }

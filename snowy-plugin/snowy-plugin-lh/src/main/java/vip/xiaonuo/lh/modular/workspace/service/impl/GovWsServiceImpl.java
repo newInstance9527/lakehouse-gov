@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
+import vip.xiaonuo.lh.core.auth.LhOwnerGuard;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
@@ -180,6 +181,7 @@ public class GovWsServiceImpl implements GovWsService {
     @Transactional(rollbackFor = Exception.class)
     public GovWsVo archive(String wsCode) {
         GovWs row = requireWs(wsCode);
+        assertWsOwner(row);
         if (WS_DEFAULT.equals(row.getWsCode())) {
             throw new CommonException("默认空间不可归档");
         }
@@ -205,7 +207,8 @@ public class GovWsServiceImpl implements GovWsService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public List<GovWsMemberVo> replaceMembers(String wsCode, GovWsMembersReplaceParam param) {
-        requireWs(wsCode);
+        GovWs ws = requireWs(wsCode);
+        assertWsOwner(ws);
         String userId = LhLoginUsers.requireUserId();
         Date now = new Date();
         memberMapper.physicalDeleteByWs(wsCode);
@@ -224,7 +227,7 @@ public class GovWsServiceImpl implements GovWsService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public GovWsMemberVo addMember(String wsCode, GovWsMemberItemParam param) {
-        requireWs(wsCode);
+        assertWsOwner(requireWs(wsCode));
         if (param == null || StrUtil.isBlank(param.getSubjectId())) {
             throw new CommonException("subjectId 不能为空");
         }
@@ -245,7 +248,7 @@ public class GovWsServiceImpl implements GovWsService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void removeMember(String wsCode, String memberId) {
-        requireWs(wsCode);
+        assertWsOwner(requireWs(wsCode));
         GovWsMember m = memberMapper.selectById(memberId);
         if (m == null || !wsCode.equals(m.getWsCode())) {
             throw new CommonException("成员不存在");
@@ -319,6 +322,26 @@ public class GovWsServiceImpl implements GovWsService {
     }
 
     // ---------- helpers ----------
+
+    /** 空间成员管理：仅空间 Owner（gov_ws_member.role=Owner）或超管 */
+    private void assertWsOwner(GovWs ws) {
+        if (ws == null) {
+            throw new CommonException("工作空间不存在");
+        }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return;
+        }
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        String role = myRole(ws.getWsCode());
+        if ("Owner".equalsIgnoreCase(StrUtil.blankToDefault(role, ""))) {
+            return;
+        }
+        // 兼容：创建人视为 Owner（成员表尚未写入时）
+        if (LhOwnerGuard.isOwner(user, ws.getCreateUser())) {
+            return;
+        }
+        throw new CommonException("仅空间 Owner 可管理成员/归档：" + LhOwnerGuard.MSG_NEED_APPLY);
+    }
 
     private List<GovWs> listActiveEntities() {
         return wsMapper.selectList(new QueryWrapper<GovWs>().lambda()
