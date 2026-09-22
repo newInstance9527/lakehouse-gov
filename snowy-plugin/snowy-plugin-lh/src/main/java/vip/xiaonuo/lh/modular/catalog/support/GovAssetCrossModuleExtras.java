@@ -13,20 +13,26 @@ import vip.xiaonuo.lh.modular.quality.entity.GovDqRule;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRuleRun;
 import vip.xiaonuo.lh.modular.quality.mapper.GovDqRuleMapper;
 import vip.xiaonuo.lh.modular.quality.mapper.GovDqRuleRunMapper;
+import vip.xiaonuo.lh.modular.standard.entity.GovStdDetectResult;
+import vip.xiaonuo.lh.modular.standard.entity.GovStdMapping;
+import vip.xiaonuo.lh.modular.standard.mapper.GovStdDetectResultMapper;
+import vip.xiaonuo.lh.modular.standard.mapper.GovStdMappingMapper;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 资产详情跨模块 extras：质量分/失败规则 + 血缘影响摘要（soft-fail）
+ * 资产详情跨模块 extras：质量分/失败规则 + 血缘影响摘要 + 标准覆盖率（soft-fail）
  *
  * @author lakehouse
  * @date 2026/9/19
@@ -43,6 +49,10 @@ public class GovAssetCrossModuleExtras {
     private GovDqRuleRunMapper runMapper;
     @Resource
     private GovLineageService govLineageService;
+    @Resource
+    private GovStdMappingMapper mappingMapper;
+    @Resource
+    private GovStdDetectResultMapper detectMapper;
 
     public Map<String, Object> buildQuality(GovAsset asset, String objectName) {
         Map<String, Object> out = new LinkedHashMap<>();
@@ -165,6 +175,175 @@ public class GovAssetCrossModuleExtras {
             out.put("message", e.getMessage());
             return out;
         }
+    }
+
+    /**
+     * 标准覆盖率：资产列 ∩（映射目标/源字段 ∪ 检测字段） / 列数。
+     * 无 schema 列时回退为「有映射即提示映射条数」，coveragePct 可为 null。
+     */
+    public Map<String, Object> buildStandard(GovAsset asset, String objectName, Map<String, Object> schema) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        String assetId = asset == null ? null : asset.getId();
+        String ws = asset == null ? "default" : StrUtil.blankToDefault(asset.getWs(), "default");
+        String tableHint = StrUtil.blankToDefault(objectName, shortName(asset == null ? null : asset.getOmFqn()));
+        String assetCode = asset == null ? null : asset.getAssetCode();
+        out.put("path", LhModuleDeepLinks.standardMapping(tableHint));
+        try {
+            List<String> columns = columnNames(schema);
+            List<GovStdMapping> maps = matchMappings(ws, assetId, tableHint, assetCode);
+            List<GovStdDetectResult> detects = matchDetects(ws, assetId, tableHint);
+
+            Set<String> mappedKeys = new LinkedHashSet<>();
+            for (GovStdMapping m : maps) {
+                if (StrUtil.isNotBlank(m.getStdFieldName())) {
+                    mappedKeys.add(m.getStdFieldName().trim());
+                }
+                if (StrUtil.isNotBlank(m.getSrcField())) {
+                    mappedKeys.add(m.getSrcField().trim());
+                }
+            }
+            Set<String> detectFields = new LinkedHashSet<>();
+            int detectFail = 0;
+            int detectWarn = 0;
+            for (GovStdDetectResult d : detects) {
+                if (StrUtil.isNotBlank(d.getFieldName())) {
+                    detectFields.add(d.getFieldName().trim());
+                }
+                String st = StrUtil.blankToDefault(d.getStatus(), "").toLowerCase(Locale.ROOT);
+                if ("fail".equals(st)) {
+                    detectFail++;
+                } else if ("warn".equals(st)) {
+                    detectWarn++;
+                }
+            }
+
+            Set<String> covered = new LinkedHashSet<>();
+            List<String> gaps = new ArrayList<>();
+            Integer coveragePct;
+            if (!columns.isEmpty()) {
+                Set<String> colLower = new HashSet<>();
+                Map<String, String> colCanon = new LinkedHashMap<>();
+                for (String c : columns) {
+                    colLower.add(c.toLowerCase(Locale.ROOT));
+                    colCanon.put(c.toLowerCase(Locale.ROOT), c);
+                }
+                for (String k : mappedKeys) {
+                    String hit = colCanon.get(k.toLowerCase(Locale.ROOT));
+                    if (hit != null) {
+                        covered.add(hit);
+                    }
+                }
+                for (String k : detectFields) {
+                    String hit = colCanon.get(k.toLowerCase(Locale.ROOT));
+                    if (hit != null) {
+                        covered.add(hit);
+                    }
+                }
+                for (String c : columns) {
+                    if (!covered.contains(c)) {
+                        gaps.add(c);
+                    }
+                }
+                coveragePct = (int) Math.round(covered.size() * 100.0 / columns.size());
+            } else if (!maps.isEmpty()) {
+                coveragePct = null;
+                out.put("hint", "无列结构；已登记 " + maps.size() + " 条标准映射");
+            } else {
+                coveragePct = columns.isEmpty() && maps.isEmpty() ? null : 0;
+                out.put("hint", "无关联标准映射");
+            }
+
+            out.put("available", true);
+            out.put("coveragePct", coveragePct);
+            out.put("columnCount", columns.size());
+            out.put("coveredCount", covered.size());
+            out.put("mappingCount", maps.size());
+            out.put("detectCount", detects.size());
+            out.put("detectFailCount", detectFail);
+            out.put("detectWarnCount", detectWarn);
+            out.put("gaps", gaps.size() > 12 ? gaps.subList(0, 12) : gaps);
+            out.put("gapCount", gaps.size());
+            return out;
+        } catch (Exception e) {
+            log.warn("catalog extras.standard soft-fail asset={}: {}", assetId, e.getMessage());
+            out.put("available", false);
+            out.put("coveragePct", null);
+            out.put("degraded", true);
+            out.put("message", e.getMessage());
+            return out;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> columnNames(Map<String, Object> schema) {
+        if (schema == null) {
+            return List.of();
+        }
+        Object cols = schema.get("columns");
+        if (!(cols instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<String> names = new ArrayList<>();
+        for (Object o : list) {
+            if (o instanceof Map<?, ?> m) {
+                Object n = m.get("name");
+                if (n != null && StrUtil.isNotBlank(String.valueOf(n))) {
+                    names.add(String.valueOf(n).trim());
+                }
+            }
+        }
+        return names;
+    }
+
+    List<GovStdMapping> matchMappings(String ws, String assetId, String objectName, String assetCode) {
+        List<GovStdMapping> all = mappingMapper.selectList(new QueryWrapper<GovStdMapping>().lambda()
+                .eq(GovStdMapping::getWs, StrUtil.blankToDefault(ws, "default"))
+                .eq(GovStdMapping::getDeleteFlag, NOT_DELETE));
+        String shortObj = shortName(objectName);
+        return all.stream()
+                .filter(m -> mappingMatches(m, assetId, objectName, shortObj, assetCode))
+                .collect(Collectors.toList());
+    }
+
+    static boolean mappingMatches(GovStdMapping m, String assetId, String objectName,
+                                  String shortObj, String assetCode) {
+        if (m == null) {
+            return false;
+        }
+        if (StrUtil.isNotBlank(assetId) && Objects.equals(assetId, m.getAssetId())) {
+            return true;
+        }
+        if (eqIgnore(m.getTargetTable(), objectName) || eqIgnore(m.getTargetTable(), shortObj)
+                || eqIgnore(m.getTargetTable(), assetCode)) {
+            return true;
+        }
+        if (eqIgnore(m.getSrcObject(), objectName) || eqIgnore(m.getSrcObject(), shortObj)
+                || eqIgnore(shortName(m.getSrcObject()), shortObj)) {
+            return true;
+        }
+        String ttShort = shortName(m.getTargetTable());
+        return eqIgnore(ttShort, shortObj) || eqIgnore(ttShort, shortName(assetCode));
+    }
+
+    List<GovStdDetectResult> matchDetects(String ws, String assetId, String objectName) {
+        List<GovStdDetectResult> all = detectMapper.selectList(new QueryWrapper<GovStdDetectResult>().lambda()
+                .eq(GovStdDetectResult::getWs, StrUtil.blankToDefault(ws, "default")));
+        String shortObj = shortName(objectName);
+        return all.stream()
+                .filter(d -> detectMatches(d, assetId, objectName, shortObj))
+                .collect(Collectors.toList());
+    }
+
+    static boolean detectMatches(GovStdDetectResult d, String assetId, String objectName, String shortObj) {
+        if (d == null) {
+            return false;
+        }
+        if (StrUtil.isNotBlank(assetId) && Objects.equals(assetId, d.getAssetId())) {
+            return true;
+        }
+        return eqIgnore(d.getTableName(), objectName)
+                || eqIgnore(d.getTableName(), shortObj)
+                || eqIgnore(shortName(d.getTableName()), shortObj);
     }
 
     /**

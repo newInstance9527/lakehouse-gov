@@ -37,6 +37,10 @@ class GovAssetCrossModuleExtrasTest {
     private GovDqRuleRunMapper runMapper;
     @Mock
     private GovLineageService govLineageService;
+    @Mock
+    private vip.xiaonuo.lh.modular.standard.mapper.GovStdMappingMapper mappingMapper;
+    @Mock
+    private vip.xiaonuo.lh.modular.standard.mapper.GovStdDetectResultMapper detectMapper;
 
     @InjectMocks
     private GovAssetCrossModuleExtras extras;

@@ -210,10 +210,12 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         GovAssetVo vo = toVo(asset, links, dsMap, true);
         String objectName = vo.getObjectName();
         Map<String, Object> extras = new LinkedHashMap<>();
-        extras.put("schema", loadSchemaInternal(asset, links, dsMap));
+        Map<String, Object> schema = loadSchemaInternal(asset, links, dsMap);
+        extras.put("schema", schema);
         extras.put("omMeta", loadOmMetaInternal(asset));
         extras.put("quality", crossModuleExtras.buildQuality(asset, objectName));
         extras.put("lineage", crossModuleExtras.buildLineage(asset, objectName));
+        extras.put("standard", crossModuleExtras.buildStandard(asset, objectName, schema));
         extras.put("gold", buildGoldExtra(asset, extras.get("omMeta")));
         extras.put("omMetaWrite", Map.of(
                 "available", true,

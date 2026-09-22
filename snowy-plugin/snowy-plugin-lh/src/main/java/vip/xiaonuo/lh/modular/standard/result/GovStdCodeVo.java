@@ -18,6 +18,7 @@ import lombok.Setter;
 
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 标准码值 VO
@@ -44,8 +45,11 @@ public class GovStdCodeVo {
     private String complianceStatus;
     private List<Item> items;
     private List<Item> valueList;
+    private String omGlossaryFqn;
     private Integer revision;
     private Date updateTime;
+    /** Glossary soft-fail 摘要；enumsSynced 恒为 false（不双写枚举） */
+    private Map<String, Object> glossarySync;
 
     @Getter
     @Setter

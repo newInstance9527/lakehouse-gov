@@ -283,6 +283,13 @@ public class LhProperties {
          * 对账策略：OM 有金标 → 门户 is_gold=1，否则 0（om_wins）。
          */
         private String goldTagFqns = "Tier.Gold";
+        /**
+         * 标准字段/码值 soft-fail 写入的 OM Glossary 名（不双写全量枚举）。
+         * 空则跳过 Glossary 同步。
+         */
+        private String glossaryName = "LakehouseStandard";
+        /** false=不写 OM Glossary（门户 CRUD 仍可用） */
+        private boolean glossarySync = true;
     }
 
     @Getter

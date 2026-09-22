@@ -17,6 +17,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.util.Date;
+import java.util.Map;
 
 /**
  * 标准字段 VO（对齐前端 name/type/unit/desc/domain/mapped/status）
@@ -46,4 +47,6 @@ public class GovStdFieldVo {
     private String omGlossaryFqn;
     private Integer revision;
     private Date updateTime;
+    /** Glossary soft-fail 摘要：ok/skipped/degraded/fqn/message */
+    private Map<String, Object> glossarySync;
 }

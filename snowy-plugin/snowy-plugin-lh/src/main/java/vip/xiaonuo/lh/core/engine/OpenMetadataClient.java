@@ -907,6 +907,98 @@ public class OpenMetadataClient {
         }
     }
 
+    /**
+     * 确保 Glossary 存在并 upsert 术语（仅 name/displayName/description；不写枚举码值）。
+     *
+     * @param glossaryName Glossary 名（如 LakehouseStandard）
+     * @param termName     术语名（标准字段名或码值集 ID）
+     * @param displayName  展示名；空则同 termName
+     * @param description  人读描述；可为 null
+     * @return fqn / omId / created|updated
+     */
+    public Map<String, Object> upsertGlossaryTerm(String glossaryName, String termName,
+                                                  String displayName, String description) {
+        if (StrUtil.isBlank(glossaryName) || StrUtil.isBlank(termName)) {
+            throw new CommonException("Glossary 名与术语名不能为空");
+        }
+        String gName = glossaryName.trim();
+        String tName = sanitizeGlossaryName(termName.trim());
+        if (StrUtil.isBlank(tName)) {
+            throw new CommonException("术语名非法: {}", termName);
+        }
+        JSONObject glossary = ensureGlossary(gName);
+        String glossaryFqn = glossary.getStr("fullyQualifiedName", gName);
+        String glossaryId = glossary.getStr("id");
+
+        String termFqn = glossaryFqn + "." + tName;
+        JSONObject existing = getGlossaryTermByFqn(termFqn);
+        JSONObject body = new JSONObject();
+        body.set("name", tName);
+        body.set("displayName", StrUtil.blankToDefault(displayName, tName));
+        if (description != null) {
+            body.set("description", description);
+        }
+        JSONObject glossRef = new JSONObject();
+        if (StrUtil.isNotBlank(glossaryId)) {
+            glossRef.set("id", glossaryId);
+        } else {
+            glossRef.set("fullyQualifiedName", glossaryFqn);
+        }
+        body.set("glossary", glossRef);
+
+        String respBody;
+        boolean created;
+        if (existing == null) {
+            respBody = authPost("/api/v1/glossaryTerms", body.toString());
+            created = true;
+        } else {
+            body.set("id", existing.getStr("id"));
+            respBody = authPut("/api/v1/glossaryTerms", body.toString());
+            created = false;
+        }
+        JSONObject updated = JSONUtil.parseObj(respBody);
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("ok", true);
+        r.put("fqn", updated.getStr("fullyQualifiedName", termFqn));
+        r.put("omId", updated.getStr("id"));
+        r.put("glossaryFqn", glossaryFqn);
+        r.put("created", created);
+        r.put("description", updated.getStr("description"));
+        return r;
+    }
+
+    /**
+     * 按 FQN 读 Glossary Term；不存在返回 null
+     */
+    public JSONObject getGlossaryTermByFqn(String fqn) {
+        return getEntityByFqn("glossaryTerms", fqn, "description,displayName,glossary");
+    }
+
+    private JSONObject ensureGlossary(String name) {
+        JSONObject existing = getEntityByFqn("glossaries", name, "description");
+        if (existing != null) {
+            return existing;
+        }
+        JSONObject create = new JSONObject();
+        create.set("name", name);
+        create.set("displayName", name);
+        create.set("description", "Lakehouse 数据标准术语（门户 gov_std_* soft-fail 同步；不含码值枚举）");
+        String body = authPost("/api/v1/glossaries", create.toString());
+        return JSONUtil.parseObj(body);
+    }
+
+    /** OM Glossary / Term 名：字母数字下划线连字符 */
+    static String sanitizeGlossaryName(String raw) {
+        if (StrUtil.isBlank(raw)) {
+            return null;
+        }
+        String s = raw.trim().replaceAll("[^A-Za-z0-9_\\-]", "_");
+        if (s.isEmpty() || !Character.isLetter(s.charAt(0)) && s.charAt(0) != '_') {
+            s = "t_" + s;
+        }
+        return s.length() > 128 ? s.substring(0, 128) : s;
+    }
+
     private String authGet(String path) {
         return authRequest("GET", path, null, true);
     }

@@ -46,6 +46,7 @@ import vip.xiaonuo.lh.modular.standard.result.GovStdFieldVo;
 import vip.xiaonuo.lh.modular.standard.result.GovStdMappingVo;
 import vip.xiaonuo.lh.modular.standard.result.GovStdNamingVo;
 import vip.xiaonuo.lh.modular.standard.service.GovStdService;
+import vip.xiaonuo.lh.modular.standard.support.GovStdGlossarySync;
 
 import java.util.ArrayList;
 import java.util.Date;
@@ -79,6 +80,8 @@ public class GovStdServiceImpl implements GovStdService {
     private GovStdMappingMapper mappingMapper;
     @Resource
     private GovStdDetectResultMapper detectMapper;
+    @Resource
+    private GovStdGlossarySync glossarySync;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -191,8 +194,11 @@ public class GovStdServiceImpl implements GovStdService {
             }
             fieldMapper.updateById(existing);
         }
+        Map<String, Object> gloss = glossarySync.syncField(existing);
         Map<String, Long> mapped = countMappingsByField(ws, List.of(fieldName));
-        return toFieldVo(existing, mapped.getOrDefault(fieldName, 0L).intValue());
+        GovStdFieldVo vo = toFieldVo(existing, mapped.getOrDefault(fieldName, 0L).intValue());
+        vo.setGlossarySync(gloss);
+        return vo;
     }
 
     @Override
@@ -305,7 +311,10 @@ public class GovStdServiceImpl implements GovStdService {
             codeItemMapper.insert(row);
             savedItems.add(row);
         }
-        return toCodeVo(existing, savedItems);
+        Map<String, Object> gloss = glossarySync.syncCode(existing);
+        GovStdCodeVo vo = toCodeVo(existing, savedItems);
+        vo.setGlossarySync(gloss);
+        return vo;
     }
 
     @Override
@@ -865,6 +874,7 @@ public class GovStdServiceImpl implements GovStdService {
         vo.setMappedSummary(c.getMappedSummary());
         vo.setStatus(c.getComplianceStatus());
         vo.setComplianceStatus(c.getComplianceStatus());
+        vo.setOmGlossaryFqn(c.getOmGlossaryFqn());
         vo.setRevision(c.getRevision());
         vo.setUpdateTime(c.getUpdateTime());
         return vo;

@@ -85,6 +85,8 @@ lh:
     # token:  # 可选 Bot PAT；空则运行时用 email/password 登录取 JWT
     lake-service: lakehouse
     lake-database: default
+    glossary-name: LakehouseStandard
+    glossary-sync: true
   marquez:
     url: http://127.0.0.1:15000
     vault-path: platform/marquez/api
