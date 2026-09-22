@@ -598,6 +598,9 @@ public class IgEtlVaultInjector {
         if (lhProperties.getTrino() != null && StrUtil.isNotBlank(lhProperties.getTrino().getUrl())) {
             env.putIfAbsent("LH_TRINO_URL", lhProperties.getTrino().getUrl());
         }
+        if (lhProperties.getQuality() != null && StrUtil.isNotBlank(lhProperties.getQuality().getGovBaseUrl())) {
+            env.putIfAbsent("LH_GOV_URL", lhProperties.getQuality().getGovBaseUrl().replaceAll("/+$", ""));
+        }
         if (lhProperties.getFlink() != null) {
             if (StrUtil.isNotBlank(lhProperties.getFlink().getUrl())) {
                 env.putIfAbsent("LH_FLINK_URL", lhProperties.getFlink().getUrl());

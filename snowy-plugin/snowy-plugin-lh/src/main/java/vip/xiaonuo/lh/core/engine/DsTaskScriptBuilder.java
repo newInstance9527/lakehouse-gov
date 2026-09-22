@@ -127,6 +127,10 @@ public final class DsTaskScriptBuilder {
             params.put("customConfig", 1);
             params.put("json", JSONUtil.toJsonStr(job));
             params.put("rawScript", DataxJobBuilder.buildShell(n, conf));
+        } else if ("quality".equals(StrUtil.blankToDefault(n.getNodeType(), ""))) {
+            String qualityShell = qualityGateShell(n, conf);
+            params.put("rawScript", qualityShell);
+            params.put("lhQualityGate", true);
         } else {
             // SHELL 通用：优先 Trino，否则打印 SQL
             params.put("rawScript", shellWrapper(n, engine, sql, false));
@@ -383,6 +387,71 @@ public final class DsTaskScriptBuilder {
 
     private static String trinoShellFallback(IgEtlNode n, String sql) {
         return shellWrapper(n, "ds_sql", sql, false);
+    }
+
+    /**
+     * 质量门禁 SHELL：curl 门户 {@code /lh/quality/rules/evaluate}；blocked → exit 1 阻断下游。
+     * <p>无 {@code LH_GOV_URL} 时 fail-closed（blockOnFail=true）。</p>
+     */
+    static String qualityGateShell(IgEtlNode n, JSONObject conf) {
+        List<String> ruleIds = new ArrayList<>();
+        Object ids = conf == null ? null : conf.get("ruleIds");
+        if (ids instanceof Iterable<?> it) {
+            for (Object o : it) {
+                if (o != null && StrUtil.isNotBlank(String.valueOf(o))) {
+                    ruleIds.add(String.valueOf(o).trim());
+                }
+            }
+        } else if (ids instanceof String s && StrUtil.isNotBlank(s)) {
+            for (String p : s.split("[,;\\s]+")) {
+                if (StrUtil.isNotBlank(p)) {
+                    ruleIds.add(p.trim());
+                }
+            }
+        }
+        boolean blockOnFail = conf == null || conf.getBool("blockOnFail", true);
+        String nodeKey = n == null ? "quality" : StrUtil.blankToDefault(n.getNodeKey(), "quality");
+        StringBuilder sb = new StringBuilder();
+        sb.append("#!/bin/bash\n");
+        sb.append("set -euo pipefail\n");
+        sb.append("NODE_KEY='").append(escapeSh(nodeKey)).append("'\n");
+        sb.append("BLOCK_ON_FAIL=").append(blockOnFail ? "true" : "false").append("\n");
+        sb.append("RULE_IDS='").append(escapeSh(String.join(",", ruleIds))).append("'\n");
+        sb.append("JOB_RUN_ID=\"${LH_JOB_RUN_ID:-${run_id:-ds-$NODE_KEY-$(date +%s)}}\"\n");
+        sb.append("echo \"[lh-quality] node=$NODE_KEY blockOnFail=$BLOCK_ON_FAIL rules=$RULE_IDS\"\n");
+        sb.append("if [ -z \"$RULE_IDS\" ]; then\n");
+        sb.append("  echo \"[lh-quality] no ruleIds; skip (draft rules only)\"\n");
+        sb.append("  exit 0\n");
+        sb.append("fi\n");
+        sb.append("GOV=\"${LH_GOV_URL:-}\"\n");
+        sb.append("if [ -z \"$GOV\" ]; then\n");
+        sb.append("  echo \"[lh-quality] LH_GOV_URL empty; skip runtime evaluate (portal trial/deploy already wrote runs)\"\n");
+        sb.append("  exit 0\n");
+        sb.append("fi\n");
+        sb.append("GOV=\"${GOV%/}\"\n");
+        sb.append("IDS_JSON=$(echo \"$RULE_IDS\" | awk -F',' '{printf \"[\"; for(i=1;i<=NF;i++){ if(i>1) printf \",\"; printf \"\\\"%s\\\"\", $i } printf \"]\"}')\n");
+        sb.append("BODY=$(printf '{\"ws\":\"%s\",\"jobRunId\":\"%s\",\"nodeKey\":\"%s\",\"blockOnFail\":%s,\"ruleIds\":%s}' \\\n");
+        sb.append("  \"${LH_WS:-default}\" \"$JOB_RUN_ID\" \"$NODE_KEY\" \"$BLOCK_ON_FAIL\" \"$IDS_JSON\")\n");
+        sb.append("RESP=$(curl -sS -m 60 -X POST \"$GOV/lh/quality/rules/evaluate\" \\\n");
+        sb.append("  -H 'Content-Type: application/json' \\\n");
+        sb.append("  ${LH_GOV_TOKEN:+-H \"token: $LH_GOV_TOKEN\"} \\\n");
+        sb.append("  -d \"$BODY\" || true)\n");
+        sb.append("echo \"[lh-quality] evaluate resp=${RESP:0:500}\"\n");
+        sb.append("echo \"$RESP\" | grep -Eq '\"blocked\"[[:space:]]*:[[:space:]]*true' && {\n");
+        sb.append("  echo \"[lh-quality] BLOCKED — fail downstream\"\n");
+        sb.append("  exit 1\n");
+        sb.append("}\n");
+        sb.append("echo \"$RESP\" | grep -Eq '\"code\"[[:space:]]*:[[:space:]]*200|\"blocked\"[[:space:]]*:[[:space:]]*false|\"data\"' || {\n");
+        sb.append("  echo \"[lh-quality] evaluate ambiguous/empty; fail closed when blockOnFail\"\n");
+        sb.append("  if [ \"$BLOCK_ON_FAIL\" = \"true\" ]; then exit 1; else exit 0; fi\n");
+        sb.append("}\n");
+        sb.append("echo \"[lh-quality] PASS\"\n");
+        sb.append("exit 0\n");
+        return sb.toString();
+    }
+
+    private static String escapeSh(String s) {
+        return StrUtil.blankToDefault(s, "").replace("'", "'\"'\"'");
     }
 
     private static String shellWrapper(IgEtlNode n, String engine, String sql, boolean engineHint) {

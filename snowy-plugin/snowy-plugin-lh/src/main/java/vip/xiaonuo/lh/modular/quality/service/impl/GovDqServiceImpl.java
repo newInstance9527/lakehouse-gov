@@ -10,7 +10,13 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.OpenMetadataClient;
+import vip.xiaonuo.lh.core.engine.VictoriaMetricsClient;
+import vip.xiaonuo.lh.modular.apply.entity.ApplyTicket;
+import vip.xiaonuo.lh.modular.apply.param.ApplyTicketCreateParam;
+import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.apply.service.impl.ApplyTicketServiceImpl;
 import vip.xiaonuo.lh.modular.quality.entity.CbDqSyncWatermark;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqGate;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRule;
@@ -19,6 +25,7 @@ import vip.xiaonuo.lh.modular.quality.mapper.CbDqSyncWatermarkMapper;
 import vip.xiaonuo.lh.modular.quality.mapper.GovDqGateMapper;
 import vip.xiaonuo.lh.modular.quality.mapper.GovDqRuleMapper;
 import vip.xiaonuo.lh.modular.quality.mapper.GovDqRuleRunMapper;
+import vip.xiaonuo.lh.modular.quality.param.GovDqEvaluateParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqGateUpsertParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqIdParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqPageParam;
@@ -26,17 +33,23 @@ import vip.xiaonuo.lh.modular.quality.param.GovDqRunAddParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqRuleUpsertParam;
 import vip.xiaonuo.lh.modular.quality.result.GovDqRuleVo;
 import vip.xiaonuo.lh.modular.quality.service.GovDqService;
+import vip.xiaonuo.lh.modular.quality.support.GovDqMetricsFormatter;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 
 /**
  * 数据质量：门户规则 SoT + 运行流水；OM Profiler soft-fail
@@ -47,6 +60,7 @@ import java.util.stream.Collectors;
 @Service
 public class GovDqServiceImpl implements GovDqService {
 
+    private static final Logger log = LoggerFactory.getLogger(GovDqServiceImpl.class);
     private static final String WS_DEFAULT = "default";
     private static final String NOT_DELETE = "NOT_DELETE";
 
@@ -64,6 +78,13 @@ public class GovDqServiceImpl implements GovDqService {
     private vip.xiaonuo.lh.modular.catalog.support.GovAssetQualityGateReactor qualityGateReactor;
     @Resource
     private vip.xiaonuo.lh.modular.standard.service.GovStdService govStdService;
+    @Resource
+    private LhProperties lhProperties;
+    @Resource
+    private VictoriaMetricsClient victoriaMetricsClient;
+    @Resource
+    @Lazy
+    private ApplyTicketService applyTicketService;
 
     @Override
     public Map<String, Object> overview(String ws, String range) {
@@ -357,7 +378,208 @@ public class GovDqServiceImpl implements GovDqService {
             Map<String, Object> catalogFx = qualityGateReactor.onBlockedRun(rule, run);
             result.put("catalogEffect", catalogFx);
         }
+        result.put("vmWritten", writeVmSoft(rule, run));
         return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> evaluate(GovDqEvaluateParam param) {
+        if (param == null) {
+            throw new CommonException("evaluate 参数不能为空");
+        }
+        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
+        boolean blockOnFail = param.getBlockOnFail() == null || Boolean.TRUE.equals(param.getBlockOnFail());
+        String jobRunId = StrUtil.blankToDefault(param.getJobRunId(), "eval:" + IdUtil.getSnowflakeNextIdStr());
+        String nodeKey = StrUtil.blankToDefault(param.getNodeKey(), "");
+
+        Map<String, GovDqEvaluateParam.ResultItem> reported = new HashMap<>();
+        if (param.getResults() != null) {
+            for (GovDqEvaluateParam.ResultItem item : param.getResults()) {
+                if (item != null && StrUtil.isNotBlank(item.getRuleId())) {
+                    reported.put(item.getRuleId().trim(), item);
+                }
+            }
+        }
+        List<String> ruleIds = new ArrayList<>();
+        if (param.getRuleIds() != null) {
+            for (String id : param.getRuleIds()) {
+                if (StrUtil.isNotBlank(id)) {
+                    ruleIds.add(id.trim());
+                }
+            }
+        }
+        for (String id : reported.keySet()) {
+            if (!ruleIds.contains(id)) {
+                ruleIds.add(id);
+            }
+        }
+        if (ruleIds.isEmpty()) {
+            Map<String, Object> empty = new LinkedHashMap<>();
+            empty.put("blocked", false);
+            empty.put("pass", 0);
+            empty.put("fail", 0);
+            empty.put("skipped", true);
+            empty.put("reason", "无 ruleIds");
+            empty.put("runs", List.of());
+            return empty;
+        }
+
+        int passCnt = 0;
+        int failCnt = 0;
+        int blockedCnt = 0;
+        List<Map<String, Object>> runs = new ArrayList<>();
+        List<String> notes = new ArrayList<>();
+
+        for (String ruleId : ruleIds) {
+            GovDqRule rule = ruleMapper.selectById(ruleId);
+            if (rule == null || "DELETED".equals(rule.getDeleteFlag())) {
+                failCnt++;
+                if (blockOnFail) {
+                    blockedCnt++;
+                }
+                notes.add("规则不存在: " + ruleId);
+                Map<String, Object> miss = new LinkedHashMap<>();
+                miss.put("ruleId", ruleId);
+                miss.put("pass", false);
+                miss.put("blocked", blockOnFail);
+                miss.put("message", "规则不存在");
+                runs.add(miss);
+                continue;
+            }
+            GovDqEvaluateParam.ResultItem rep = reported.get(ruleId);
+            boolean enabled = rule.getEnabled() == null || Integer.valueOf(1).equals(rule.getEnabled());
+            boolean pass;
+            Long okRows;
+            Long failRows;
+            BigDecimal okPct;
+            String message;
+            Boolean forcedBlock = null;
+            if (rep != null && rep.getPass() != null) {
+                pass = Boolean.TRUE.equals(rep.getPass());
+                okRows = rep.getOkRows();
+                failRows = rep.getFailRows();
+                okPct = rep.getOkPct();
+                message = StrUtil.blankToDefault(rep.getMessage(),
+                        pass ? "作业上报通过" : "作业上报失败");
+                forcedBlock = rep.getBlocked();
+            } else {
+                // 本期无引擎实探：enabled → pass；disabled → fail
+                pass = enabled;
+                okRows = pass ? 1000L : 0L;
+                failRows = pass ? 0L : 1L;
+                okPct = pass ? new BigDecimal("100.00") : new BigDecimal("0.00");
+                message = pass
+                        ? "quality evaluate (enabled) node=" + nodeKey
+                        : "quality evaluate fail: rule disabled node=" + nodeKey;
+            }
+            boolean severityBlock = "block".equalsIgnoreCase(StrUtil.blankToDefault(rule.getSeverity(), ""));
+            boolean doBlock = forcedBlock != null
+                    ? Boolean.TRUE.equals(forcedBlock)
+                    : (!pass && (blockOnFail || severityBlock));
+
+            GovDqRunAddParam p = new GovDqRunAddParam();
+            p.setWs(ws);
+            p.setRuleId(ruleId);
+            p.setPass(pass);
+            p.setBlocked(doBlock);
+            p.setJobRunId(jobRunId);
+            p.setOkRows(okRows);
+            p.setFailRows(failRows);
+            p.setOkPct(okPct);
+            p.setMessage(message);
+            Map<String, Object> runResult = addRun(p);
+            runs.add(runResult);
+            if (pass) {
+                passCnt++;
+            } else {
+                failCnt++;
+                if (doBlock) {
+                    blockedCnt++;
+                }
+            }
+        }
+
+        // 层/表门禁：近跑均分 < min_score 且 block_on_fail → 额外标 blocked
+        Map<String, Object> gateFx = assessGatesForRules(ws, ruleIds, blockOnFail);
+        if (Boolean.TRUE.equals(gateFx.get("blocked"))) {
+            blockedCnt = Math.max(blockedCnt, 1);
+            notes.add(String.valueOf(gateFx.get("detail")));
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("blocked", blockedCnt > 0);
+        out.put("blockOnFail", blockOnFail);
+        out.put("pass", passCnt);
+        out.put("fail", failCnt);
+        out.put("blockedCount", blockedCnt);
+        out.put("jobRunId", jobRunId);
+        out.put("nodeKey", nodeKey);
+        out.put("runs", runs);
+        out.put("gate", gateFx);
+        if (!notes.isEmpty()) {
+            out.put("notes", notes.size() > 8 ? notes.subList(0, 8) : notes);
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> assessPublishGate(String ws, String tableHint, String layerHint) {
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        List<GovDqGate> gates = gateMapper.selectList(new QueryWrapper<GovDqGate>().lambda()
+                .eq(GovDqGate::getWs, workspace)
+                .eq(GovDqGate::getDeleteFlag, NOT_DELETE));
+        if (gates.isEmpty()) {
+            Map<String, Object> skip = new LinkedHashMap<>();
+            skip.put("status", "skip");
+            skip.put("detail", "无 gov_dq_gate 配置");
+            skip.put("blocked", false);
+            return skip;
+        }
+        String table = StrUtil.trim(tableHint);
+        String layer = StrUtil.trim(layerHint);
+        List<GovDqGate> matched = gates.stream()
+                .filter(g -> matchGate(g, table, layer))
+                .collect(Collectors.toList());
+        if (matched.isEmpty()) {
+            // 有门禁但与脚本无关：不阻断
+            Map<String, Object> skip = new LinkedHashMap<>();
+            skip.put("status", "skip");
+            skip.put("detail", "门禁未匹配当前脚本表/层（gates=" + gates.size() + "）");
+            skip.put("blocked", false);
+            return skip;
+        }
+        for (GovDqGate g : matched) {
+            Double score = tableScore(workspace, g.getTableName(), g.getLayer());
+            BigDecimal min = g.getMinScore() == null ? new BigDecimal("95.00") : g.getMinScore();
+            boolean below = score != null && score < min.doubleValue();
+            boolean block = Integer.valueOf(1).equals(g.getBlockOnFail());
+            if (below && block) {
+                Map<String, Object> fail = new LinkedHashMap<>();
+                fail.put("status", "fail");
+                fail.put("detail", "质量门禁未达 minScore=" + min + " 实际="
+                        + (score == null ? "无近跑" : round1(score))
+                        + " table=" + StrUtil.blankToDefault(g.getTableName(), g.getLayer()));
+                fail.put("blocked", true);
+                fail.put("minScore", min);
+                fail.put("score", score);
+                fail.put("gateId", g.getId());
+                return fail;
+            }
+            if (below) {
+                Map<String, Object> warn = new LinkedHashMap<>();
+                warn.put("status", "pass");
+                warn.put("detail", "质量分低于阈值但不阻断（blockOnFail=false）score="
+                        + round1(score) + " min=" + min);
+                warn.put("blocked", false);
+                return warn;
+            }
+        }
+        Map<String, Object> pass = new LinkedHashMap<>();
+        pass.put("status", "pass");
+        pass.put("detail", "已读 gov_dq_gate · 匹配 " + matched.size() + " 条均达阈值");
+        pass.put("blocked", false);
+        return pass;
     }
 
     @Override
@@ -416,13 +638,34 @@ public class GovDqServiceImpl implements GovDqService {
     public Map<String, Object> createTicket(String ruleId, String remark) {
         GovDqRule rule = StrUtil.isBlank(ruleId) ? null : ruleMapper.selectById(ruleId);
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("ticketId", IdUtil.getSnowflakeNextIdStr());
         r.put("ruleId", ruleId);
         r.put("table", rule == null ? null : rule.getTableName());
         r.put("remark", remark);
-        r.put("status", "open");
-        r.put("hint", "质量工单已登记；正式对接工单模块");
-        return r;
+        try {
+            ApplyTicketCreateParam p = new ApplyTicketCreateParam();
+            p.setTicketType(ApplyTicketServiceImpl.TYPE_QUALITY_FIX);
+            String table = rule == null ? ruleId : StrUtil.blankToDefault(rule.getTableName(), ruleId);
+            String code = rule == null ? ruleId : StrUtil.blankToDefault(rule.getRuleCode(), ruleId);
+            p.setTitle("质量修复 · " + code + " · " + table);
+            p.setReason(StrUtil.blankToDefault(remark,
+                    "质量规则失败需修复：" + code));
+            p.setAssetId(rule == null ? null : rule.getAssetId());
+            p.setResourceType("quality_rule");
+            p.setResourceId(ruleId);
+            ApplyTicket ticket = applyTicketService.create(p);
+            r.put("ticketId", ticket.getId());
+            r.put("ticketNo", ticket.getTicketNo());
+            r.put("status", ticket.getStatus());
+            r.put("hint", "已写入申请中心 apply_ticket(quality_fix)");
+            return r;
+        } catch (Exception e) {
+            // 无登录态等：保留草稿 id，不阻断门户
+            String draftId = IdUtil.getSnowflakeNextIdStr();
+            r.put("ticketId", draftId);
+            r.put("status", "open");
+            r.put("hint", "质量工单草稿（申请中心 soft-fail: " + e.getMessage() + "）");
+            return r;
+        }
     }
 
     @Override
@@ -569,5 +812,118 @@ public class GovDqServiceImpl implements GovDqService {
 
     private static double round1(double v) {
         return BigDecimal.valueOf(v).setScale(1, RoundingMode.HALF_UP).doubleValue();
+    }
+
+    private boolean writeVmSoft(GovDqRule rule, GovDqRuleRun run) {
+        if (rule == null || run == null) {
+            return false;
+        }
+        LhProperties.Quality q = lhProperties.getQuality();
+        if (q != null && !q.isVmWriteEnabled()) {
+            return false;
+        }
+        String vmUrl = lhProperties.getLifecycle() == null ? "" : lhProperties.getLifecycle().getVmImportUrl();
+        if (StrUtil.isBlank(vmUrl)) {
+            return false;
+        }
+        try {
+            boolean pass = Integer.valueOf(1).equals(run.getPass());
+            boolean blocked = Integer.valueOf(1).equals(run.getBlocked());
+            Double okPct = run.getOkPct() == null ? null : run.getOkPct().doubleValue();
+            long ts = run.getRanAt() == null ? System.currentTimeMillis() : run.getRanAt().getTime();
+            List<String> lines = GovDqMetricsFormatter.format(
+                    rule.getRuleCode(),
+                    rule.getTableName(),
+                    run.getWs(),
+                    rule.getSeverity(),
+                    pass,
+                    blocked,
+                    okPct,
+                    ts);
+            Map<String, Object> wr = victoriaMetricsClient.importPrometheus(GovDqMetricsFormatter.joinBody(lines));
+            return wr != null && !Boolean.FALSE.equals(wr.get("ok"));
+        } catch (Exception e) {
+            log.warn("quality vm write soft-fail rule={}: {}", rule.getId(), e.getMessage());
+            return false;
+        }
+    }
+
+    private Map<String, Object> assessGatesForRules(String ws, List<String> ruleIds, boolean blockOnFail) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("blocked", false);
+        if (ruleIds == null || ruleIds.isEmpty()) {
+            return r;
+        }
+        for (String ruleId : ruleIds) {
+            GovDqRule rule = ruleMapper.selectById(ruleId);
+            if (rule == null) {
+                continue;
+            }
+            Map<String, Object> g = assessPublishGate(ws, rule.getTableName(), rule.getLayer());
+            if (Boolean.TRUE.equals(g.get("blocked")) && blockOnFail) {
+                r.put("blocked", true);
+                r.put("detail", g.get("detail"));
+                r.putAll(g);
+                return r;
+            }
+        }
+        return r;
+    }
+
+    private static boolean matchGate(GovDqGate g, String table, String layer) {
+        if (g == null) {
+            return false;
+        }
+        if (StrUtil.isBlank(table) && StrUtil.isBlank(layer)) {
+            // 无 hint：层级门禁（无 table）视为全局层门槛
+            return StrUtil.isNotBlank(g.getLayer()) && StrUtil.isBlank(g.getTableName());
+        }
+        if (StrUtil.isNotBlank(table) && StrUtil.isNotBlank(g.getTableName())) {
+            String a = table.toLowerCase(Locale.ROOT);
+            String b = g.getTableName().toLowerCase(Locale.ROOT);
+            if (a.equals(b) || a.endsWith("." + b) || b.endsWith("." + a)
+                    || a.contains(b) || b.contains(a)) {
+                return true;
+            }
+        }
+        if (StrUtil.isNotBlank(layer) && StrUtil.isNotBlank(g.getLayer())
+                && layer.equalsIgnoreCase(g.getLayer())
+                && StrUtil.isBlank(g.getTableName())) {
+            return true;
+        }
+        return false;
+    }
+
+    private Double tableScore(String ws, String tableName, String layer) {
+        List<GovDqRule> rules = ruleMapper.selectList(new QueryWrapper<GovDqRule>().lambda()
+                .eq(GovDqRule::getWs, ws)
+                .eq(GovDqRule::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(tableName), GovDqRule::getTableName, tableName)
+                .eq(StrUtil.isBlank(tableName) && StrUtil.isNotBlank(layer), GovDqRule::getLayer, layer));
+        if (rules.isEmpty() && StrUtil.isNotBlank(tableName)) {
+            String shortName = tableName.contains(".")
+                    ? tableName.substring(tableName.lastIndexOf('.') + 1) : tableName;
+            rules = ruleMapper.selectList(new QueryWrapper<GovDqRule>().lambda()
+                    .eq(GovDqRule::getWs, ws)
+                    .eq(GovDqRule::getDeleteFlag, NOT_DELETE)
+                    .like(GovDqRule::getTableName, shortName)
+                    .last("LIMIT 50"));
+        }
+        List<Double> scores = new ArrayList<>();
+        for (GovDqRule rule : rules) {
+            GovDqRuleRun latest = latestRun(rule.getId());
+            if (latest == null) {
+                continue;
+            }
+            if (latest.getOkPct() != null) {
+                scores.add(latest.getOkPct().doubleValue());
+            } else {
+                scores.add(Integer.valueOf(1).equals(latest.getPass()) ? 100.0 : 0.0);
+            }
+        }
+        if (scores.isEmpty()) {
+            return null;
+        }
+        return scores.stream().mapToDouble(Double::doubleValue).average().orElse(0);
     }
 }

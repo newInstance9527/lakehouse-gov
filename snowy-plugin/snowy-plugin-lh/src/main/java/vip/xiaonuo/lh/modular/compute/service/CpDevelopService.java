@@ -28,6 +28,7 @@ import vip.xiaonuo.lh.modular.compute.param.CpScriptRunParam;
 import vip.xiaonuo.lh.modular.compute.param.CpScriptSaveParam;
 import vip.xiaonuo.lh.modular.compute.support.CpScriptGitStore;
 import vip.xiaonuo.lh.modular.compute.support.CpScriptLint;
+import vip.xiaonuo.lh.modular.quality.service.GovDqService;
 import vip.xiaonuo.lh.modular.query.param.CpQueryExecParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
@@ -75,6 +76,8 @@ public class CpDevelopService {
     private LhProperties lhProperties;
     @Resource
     private CpQueryService cpQueryService;
+    @Resource
+    private GovDqService govDqService;
 
     public Map<String, Object> tree(String ws) {
         String workspace = ws(ws);
@@ -805,14 +808,60 @@ public class CpDevelopService {
     private List<Map<String, Object>> buildGates(CpScriptIndex script, List<Map<String, String>> lint, boolean trialOk) {
         boolean lintFail = CpScriptLint.hasError(lint);
         String lintDetail = lint.isEmpty() ? "无检查项" : lint.get(0).get("label");
+        Map<String, Object> qualityGate = assessQualityGate(script);
         List<Map<String, Object>> gates = new ArrayList<>();
         gates.add(gate(1, "静态检查", lintDetail, lintFail ? "fail" : "pass"));
         gates.add(gate(2, "血缘解析入库", "未接线", "skip"));
-        gates.add(gate(3, "质量规则绑定", "未接线", "skip"));
+        gates.add(gate(3, "质量规则绑定",
+                String.valueOf(qualityGate.getOrDefault("detail", "未接线")),
+                String.valueOf(qualityGate.getOrDefault("status", "skip"))));
         gates.add(gate(4, "stg 试跑", trialOk ? "已有成功或运行中的试跑" : "尚无成功试跑", trialOk ? "pass" : "fail"));
         gates.add(gate(5, "变更影响", "未接线，不阻断", "skip"));
         gates.add(gate(6, "生产发布", "等待门禁通过后发布 " + script.getName(), "wait"));
         return gates;
+    }
+
+    /** 发布门禁：读 gov_dq_gate，对照脚本路径/层猜测。 */
+    private Map<String, Object> assessQualityGate(CpScriptIndex script) {
+        try {
+            String path = StrUtil.blankToDefault(script.getPath(), script.getName());
+            String layer = guessLayerFromPath(path);
+            String tableHint = guessTableFromPath(path);
+            return govDqService.assessPublishGate(script.getWs(), tableHint, layer);
+        } catch (Exception e) {
+            Map<String, Object> soft = new LinkedHashMap<>();
+            soft.put("status", "skip");
+            soft.put("detail", "质量门禁 soft-fail: " + e.getMessage());
+            soft.put("blocked", false);
+            return soft;
+        }
+    }
+
+    private static String guessLayerFromPath(String path) {
+        String p = StrUtil.blankToDefault(path, "").toLowerCase(Locale.ROOT);
+        if (p.contains("/ods/") || p.contains(".ods_") || p.contains("_ods_")) {
+            return "ODS";
+        }
+        if (p.contains("/dwd/") || p.contains(".dwd_") || p.contains("_dwd_")) {
+            return "DWD";
+        }
+        if (p.contains("/dws/") || p.contains(".dws_") || p.contains("_dws_")) {
+            return "DWS";
+        }
+        if (p.contains("/ads/") || p.contains(".ads_") || p.contains("_ads_")) {
+            return "ADS";
+        }
+        return null;
+    }
+
+    private static String guessTableFromPath(String path) {
+        String p = StrUtil.blankToDefault(path, "");
+        int slash = p.lastIndexOf('/');
+        String name = slash >= 0 ? p.substring(slash + 1) : p;
+        if (name.endsWith(".sql")) {
+            name = name.substring(0, name.length() - 4);
+        }
+        return StrUtil.isBlank(name) ? null : name;
     }
 
     private static Map<String, Object> gate(int step, String name, String detail, String status) {

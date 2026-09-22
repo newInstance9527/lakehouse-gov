@@ -1,0 +1,53 @@
+# 湖仓数据质量 · 夜莺可导入的 Prometheus 告警规则（H1）
+# 指标契约：lh_dq_rule_pass / lh_dq_rule_blocked / lh_dq_ok_pct（门户 addRun/evaluate 写 VM）
+# 导入：夜莺 ≥8.2「告警规则 → 导入 Prometheus 规则」粘贴本文件；再批量挂通知规则。
+#
+# 分级（labels.severity）：critical≈P0/P1 · warning≈P1（全栈 §6.6 / §30.3）
+
+groups:
+  - name: lh-quality-h1
+    interval: 60s
+    rules:
+      - alert: LhDqRuleBlocked
+        expr: lh_dq_rule_blocked == 1
+        for: 2m
+        labels:
+          severity: critical
+          domain: quality
+          route: platform
+        annotations:
+          summary: "质量规则 {{ $labels.rule_code }} 已阻断 DAG"
+          description: "表 {{ $labels.table }} ws={{ $labels.ws }}；深链 /quality?q={{ $labels.rule_code }}"
+
+      - alert: LhDqRuleFailed
+        expr: lh_dq_rule_pass == 0
+        for: 5m
+        labels:
+          severity: warning
+          domain: quality
+          route: platform
+        annotations:
+          summary: "质量规则 {{ $labels.rule_code }} 最近运行失败"
+          description: "表 {{ $labels.table }}；severity={{ $labels.severity }}。可 POST /lh/quality/tickets 开工单"
+
+      - alert: LhDqOkPctLow
+        expr: lh_dq_ok_pct < 95
+        for: 10m
+        labels:
+          severity: warning
+          domain: quality
+          route: owner
+        annotations:
+          summary: "质量分 {{ $labels.table }} ok_pct={{ $value }} < 95"
+          description: "对齐 gov_dq_gate.min_score；rule={{ $labels.rule_code }}"
+
+      - alert: LhDqSampleStale
+        expr: absent_over_time(lh_dq_rule_pass[36h])
+        for: 1h
+        labels:
+          severity: info
+          domain: quality
+          route: platform
+        annotations:
+          summary: "质量运行时序断流（36h 无 lh_dq_rule_pass）"
+          description: "检查 ETL quality 节点、evaluate 回调、lh.lifecycle.vm-import-url"

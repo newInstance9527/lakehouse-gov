@@ -55,6 +55,7 @@ public class LhProperties {
     private Compute compute = new Compute();
     private Compliance compliance = new Compliance();
     private Metric metric = new Metric();
+    private Quality quality = new Quality();
 
     @Getter
     @Setter
@@ -447,6 +448,21 @@ public class LhProperties {
         private String patrolCron = "0 0 * * * ?";
         /** Key 将在 N 天内过期 → status=warn */
         private int patrolWarnDays = 14;
+    }
+
+    /**
+     * 数据质量 H1：DS 质量节点回调门户 + 运行写 VM（夜莺规则包）。
+     */
+    @Getter
+    @Setter
+    public static class Quality {
+        /**
+         * 门户基址（DS Worker curl evaluate / runs）。例 http://dev3:82。
+         * 空则 SHELL 仅按嵌入的 block 标志裁决，仍写 runs 由试跑/发布侧完成。
+         */
+        private String govBaseUrl = "";
+        /** 写 VictoriaMetrics（复用 lifecycle.vm-import-url）；false=跳过 */
+        private boolean vmWriteEnabled = true;
     }
 
     /**

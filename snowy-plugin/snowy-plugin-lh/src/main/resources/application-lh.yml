@@ -147,6 +147,11 @@ lh:
     profile-daily-enabled: false
     profile-table-timeout-ms: 60000
     profile-max-tables: 200
+  # 数据质量 H1：DS 质量节点回调 + 运行写 VM（夜莺规则包 ops/nightingale-quality）
+  quality:
+    # DS Worker 可达的门户基址；空则 SHELL 跳过运行时 evaluate（试跑/发布仍门户写 runs）
+    gov-base-url: ""
+    vm-write-enabled: true
   # 合规删除：HMAC key + sa_compliance 进 Vault；yml 明文仅 bootstrap，导入后可清空
   compliance:
     hmac-vault-path: platform/compliance/subject-hmac

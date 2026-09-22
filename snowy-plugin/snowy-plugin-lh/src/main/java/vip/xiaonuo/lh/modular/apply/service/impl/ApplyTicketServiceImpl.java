@@ -57,6 +57,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public static final String TYPE_METRIC = "metric";
     /** 即席扫描抬额（硬顶 50GB） */
     public static final String TYPE_SCAN_ELEVATE = "scan_elevate";
+    /** 质量规则失败修复工单 */
+    public static final String TYPE_QUALITY_FIX = "quality_fix";
 
     @Resource
     private ApplyTicketMapper ticketMapper;
@@ -109,7 +111,38 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (TYPE_SCAN_ELEVATE.equals(type)) {
             return createScanElevate(param, userId);
         }
+        if (TYPE_QUALITY_FIX.equals(type)) {
+            return createQualityFix(param, userId);
+        }
         return createTableRead(param, userId, type);
+    }
+
+    /**
+     * 质量失败修复：挂 ruleId / 表，审批后由 Owner 跟进（不自动改规则）。
+     */
+    private ApplyTicket createQualityFix(ApplyTicketCreateParam param, String userId) {
+        String ruleId = StrUtil.blankToDefault(param.getResourceId(), param.getAssetId());
+        ApplyTicket t = newTicketShell(userId, TYPE_QUALITY_FIX, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("DQ-"));
+        JSONObject payload = new JSONObject();
+        payload.set("ruleId", ruleId);
+        payload.set("resourceType", StrUtil.blankToDefault(param.getResourceType(), "quality_rule"));
+        payload.set("assetId", param.getAssetId());
+        payload.set("remark", param.getReason());
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            t.setTitle("质量修复 · " + StrUtil.blankToDefault(ruleId, "rule"));
+        }
+        if (StrUtil.isBlank(t.getReason())) {
+            t.setReason(StrUtil.blankToDefault(param.getReason(), "质量规则失败需修复"));
+        }
+        ticketMapper.insert(t);
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAssetId(param.getAssetId());
+        item.setAction("QUALITY_FIX");
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
     }
 
     /**
@@ -1062,6 +1095,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if ("scan_elevate".equals(t) || "elevated".equals(t) || "elevate".equals(t)
                 || "scan_quota".equals(t) || "adhoc_elevate".equals(t)) {
             return TYPE_SCAN_ELEVATE;
+        }
+        if ("quality_fix".equals(t) || "quality".equals(t) || "dq".equals(t) || "dq_fix".equals(t)) {
+            return TYPE_QUALITY_FIX;
         }
         return t;
     }

@@ -15,12 +15,11 @@ import vip.xiaonuo.lh.modular.lineage.param.GovLineageEdgeUpsertParam;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRule;
 import vip.xiaonuo.lh.modular.quality.mapper.GovDqRuleMapper;
-import vip.xiaonuo.lh.modular.quality.param.GovDqRunAddParam;
+import vip.xiaonuo.lh.modular.quality.param.GovDqEvaluateParam;
 import vip.xiaonuo.lh.modular.quality.service.GovDqService;
 import vip.xiaonuo.lh.modular.standard.param.GovStdMappingUpsertParam;
 import vip.xiaonuo.lh.modular.standard.service.GovStdService;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -231,9 +230,9 @@ public class IgEtlPublishSideEffects {
     }
 
     /**
-     * quality 节点：按 ruleIds 写 {@code gov_dq_rule_run}。
-     * <p>本期无引擎实探：规则存在且 enabled → pass；否则 fail。
-     * {@code blockOnFail=true} 且存在失败时 {@code blocked=true}，由调用方决定是否阻断试跑/发布。</p>
+     * quality 节点：调 {@link GovDqService#evaluate} 写 {@code gov_dq_rule_run}。
+     * <p>{@code blockOnFail=true} 且存在失败时 {@code blocked=true}，由调用方决定是否阻断试跑/发布。
+     * DS SHELL 同期 curl 同一 evaluate，exit 1 阻断下游。</p>
      *
      * @param jobRunId 关联 ig_etl_run.run_id 或 deploy 标记
      */
@@ -257,59 +256,49 @@ public class IgEtlPublishSideEffects {
             nr.put("nodeKey", n.getNodeKey());
             nr.put("blockOnFail", blockOnFail);
             nr.put("ruleCount", ruleIds.size());
-            int nodeFail = 0;
-            int nodePass = 0;
             if (ruleIds.isEmpty()) {
                 nr.put("skipped", true);
                 nr.put("reason", "无 ruleIds（草稿 rules 不写 gov_dq_rule_run）");
                 nodeResults.add(nr);
                 continue;
             }
-            for (String ruleId : ruleIds) {
-                GovDqRule rule = dqRuleMapper.selectById(ruleId);
-                if (rule == null || "DELETED".equals(rule.getDeleteFlag())) {
-                    missing++;
-                    nodeFail++;
-                    notes.add("quality " + n.getNodeKey() + " 规则不存在: " + ruleId);
-                    continue;
+            try {
+                GovDqEvaluateParam ep = new GovDqEvaluateParam();
+                ep.setWs(ws);
+                ep.setJobRunId(jobRunId);
+                ep.setNodeKey(n.getNodeKey());
+                ep.setBlockOnFail(blockOnFail);
+                ep.setRuleIds(ruleIds);
+                Map<String, Object> ev = govDqService.evaluate(ep);
+                int nodePass = ((Number) ev.getOrDefault("pass", 0)).intValue();
+                int nodeFail = ((Number) ev.getOrDefault("fail", 0)).intValue();
+                boolean nodeBlocked = Boolean.TRUE.equals(ev.get("blocked"));
+                runOk += nodePass;
+                runFail += nodeFail;
+                if (nodeBlocked) {
+                    blocked++;
                 }
-                boolean enabled = rule.getEnabled() == null || Integer.valueOf(1).equals(rule.getEnabled());
-                boolean pass = enabled;
-                boolean doBlock = !pass && blockOnFail;
-                try {
-                    GovDqRunAddParam p = new GovDqRunAddParam();
-                    p.setWs(ws);
-                    p.setRuleId(ruleId);
-                    p.setPass(pass);
-                    p.setBlocked(doBlock);
-                    p.setJobRunId(jobRunId);
-                    p.setOkRows(pass ? 1000L : 0L);
-                    p.setFailRows(pass ? 0L : 1L);
-                    p.setOkPct(pass ? new BigDecimal("100.00") : new BigDecimal("0.00"));
-                    p.setMessage(pass
-                            ? "etl quality register (enabled) node=" + n.getNodeKey()
-                            : "etl quality fail: rule disabled node=" + n.getNodeKey());
-                    govDqService.addRun(p);
-                    if (pass) {
-                        runOk++;
-                        nodePass++;
-                    } else {
-                        runFail++;
-                        if (doBlock) {
-                            blocked++;
-                        }
+                Object missNotes = ev.get("notes");
+                if (missNotes instanceof List<?> nl) {
+                    for (Object o : nl) {
+                        missing++;
+                        notes.add(String.valueOf(o));
                     }
-                } catch (Exception ex) {
-                    runFail++;
-                    nodeFail++;
-                    notes.add("quality run " + ruleId + ": " + ex.getMessage());
-                    log.warn("quality run soft-fail dag={} rule={}: {}", dag.getId(), ruleId, ex.getMessage());
                 }
+                nr.put("pass", nodePass);
+                nr.put("fail", nodeFail);
+                nr.put("blocked", nodeBlocked);
+                nr.put("evaluate", ev);
+                nodeResults.add(nr);
+            } catch (Exception ex) {
+                runFail++;
+                notes.add("quality " + n.getNodeKey() + ": " + ex.getMessage());
+                nr.put("pass", 0);
+                nr.put("fail", ruleIds.size());
+                nr.put("blocked", blockOnFail);
+                nodeResults.add(nr);
+                log.warn("quality evaluate soft-fail dag={} node={}: {}", dag.getId(), n.getNodeKey(), ex.getMessage());
             }
-            nr.put("pass", nodePass);
-            nr.put("fail", nodeFail);
-            nr.put("blocked", blockOnFail && nodeFail > 0);
-            nodeResults.add(nr);
         }
 
         Map<String, Object> r = new LinkedHashMap<>();

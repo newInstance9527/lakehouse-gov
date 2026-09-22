@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
+import vip.xiaonuo.lh.modular.quality.param.GovDqEvaluateParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqGateUpsertParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqIdParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqPageParam;
@@ -103,6 +104,13 @@ public class GovDqController {
     @PostMapping("/lh/quality/rules/runs")
     public CommonResult<Map<String, Object>> addRun(@RequestBody @Valid GovDqRunAddParam param) {
         return CommonResult.data(govDqService.addRun(param));
+    }
+
+    @Operation(summary = "质量节点批量裁决（DS SHELL / 试跑；写 runs + blocked）")
+    @CommonLog("质量节点裁决")
+    @PostMapping("/lh/quality/rules/evaluate")
+    public CommonResult<Map<String, Object>> evaluate(@RequestBody GovDqEvaluateParam param) {
+        return CommonResult.data(govDqService.evaluate(param));
     }
 
     @Operation(summary = "门禁列表")

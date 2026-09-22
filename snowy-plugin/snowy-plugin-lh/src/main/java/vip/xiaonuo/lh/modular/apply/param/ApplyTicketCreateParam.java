@@ -9,7 +9,7 @@ import lombok.Setter;
 @Setter
 public class ApplyTicketCreateParam {
 
-    @Schema(description = "类型：table_read|lake_export|resource_manage|compliance_delete|api_publish|api_subscribe|metric|scan_elevate；兼容前端 export/perm/manage/compliance/publish/api/elevated")
+    @Schema(description = "类型：table_read|lake_export|resource_manage|compliance_delete|api_publish|api_subscribe|metric|scan_elevate|quality_fix；兼容前端 export/perm/manage/compliance/publish/api/elevated/quality")
     private String ticketType;
 
     @NotBlank
