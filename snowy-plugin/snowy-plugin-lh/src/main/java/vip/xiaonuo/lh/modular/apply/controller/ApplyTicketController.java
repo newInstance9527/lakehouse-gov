@@ -38,7 +38,7 @@ public class ApplyTicketController {
         return CommonResult.data(applyTicketService.pageMine(param));
     }
 
-    @Operation(summary = "待审批（超管）")
+    @Operation(summary = "待我审批（超管 / 资产 Owner / 空间 Owner）")
     @GetMapping("/lh/apply/tickets/pending")
     public CommonResult<Page<ApplyTicket>> pagePending(ApplyTicketPageParam param) {
         return CommonResult.data(applyTicketService.pagePending(param));

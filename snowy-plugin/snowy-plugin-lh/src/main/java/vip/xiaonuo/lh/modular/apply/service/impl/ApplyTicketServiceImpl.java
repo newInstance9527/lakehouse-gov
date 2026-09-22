@@ -20,6 +20,7 @@ import vip.xiaonuo.lh.modular.apply.param.ApplyTicketCreateParam;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketDecideParam;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketPageParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.apply.support.ApplyApprovalCandidateService;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
@@ -79,6 +80,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     private GovMetricService govMetricService;
     @Resource
     private GovDelProcessingGate govDelProcessingGate;
+    @Resource
+    private ApplyApprovalCandidateService approvalCandidateService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -449,30 +452,36 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
 
     @Override
     public Page<ApplyTicket> pagePending(ApplyTicketPageParam param) {
-        if (!LhLoginUsers.isSuperAdmin()) {
-            throw new CommonException("仅超管可查看待审批列表（一期）");
-        }
+        LhLoginUsers.requireUserId();
         long current = param.getCurrent() == null ? 1L : param.getCurrent();
         long size = param.getSize() == null ? 20L : param.getSize();
-        QueryWrapper<ApplyTicket> qw = new QueryWrapper<>();
-        qw.lambda().eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+        String typeFilter = normalizeFilterType(param.getTicketType());
+        // 超管：DB 分页；Owner：先拉 pending 再按候选人过滤后内存分页（一期量级可接受）
+        if (LhLoginUsers.isSuperAdmin()) {
+            QueryWrapper<ApplyTicket> qw = new QueryWrapper<>();
+            qw.lambda().eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                    .eq(ApplyTicket::getStatus, "pending")
+                    .eq(StrUtil.isNotBlank(typeFilter), ApplyTicket::getTicketType, typeFilter)
+                    .orderByAsc(ApplyTicket::getCreateTime);
+            return ticketMapper.selectPage(new Page<>(current, size), qw);
+        }
+        List<ApplyTicket> all = ticketMapper.selectList(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
                 .eq(ApplyTicket::getStatus, "pending")
-                .eq(StrUtil.isNotBlank(normalizeFilterType(param.getTicketType())),
-                        ApplyTicket::getTicketType, normalizeFilterType(param.getTicketType()))
-                .orderByAsc(ApplyTicket::getCreateTime);
-        return ticketMapper.selectPage(new Page<>(current, size), qw);
+                .eq(StrUtil.isNotBlank(typeFilter), ApplyTicket::getTicketType, typeFilter)
+                .orderByAsc(ApplyTicket::getCreateTime));
+        List<ApplyTicket> decidable = approvalCandidateService.filterDecidable(all);
+        return slicePage(decidable, current, size);
     }
 
     @Override
     public Map<String, Object> kpi() {
         String userId = LhLoginUsers.requireUserId();
         Date monthStart = startOfMonth();
-        long pending = 0L;
-        if (LhLoginUsers.isSuperAdmin()) {
-            pending = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
-                    .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
-                    .eq(ApplyTicket::getStatus, "pending"));
-        }
+        List<ApplyTicket> allPending = ticketMapper.selectList(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getStatus, "pending"));
+        long pending = approvalCandidateService.countDecidablePending(allPending);
         long mine = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
                 .eq(ApplyTicket::getApplicant, userId));
@@ -490,10 +499,10 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
                 .eq(ApplyTicket::getApplicant, userId)
                 .eq(ApplyTicket::getStatus, "rejected")
                 .ge(ApplyTicket::getApprovedAt, monthStart));
-        long metricPending = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
-                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
-                .eq(ApplyTicket::getTicketType, TYPE_METRIC)
-                .eq(ApplyTicket::getStatus, "pending"));
+        List<ApplyTicket> metricPendingAll = allPending.stream()
+                .filter(t -> TYPE_METRIC.equals(t.getTicketType()))
+                .toList();
+        long metricPending = approvalCandidateService.countDecidablePending(metricPendingAll);
         long metricMine = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
                 .eq(ApplyTicket::getTicketType, TYPE_METRIC)
@@ -511,6 +520,22 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         return r;
     }
 
+    private static Page<ApplyTicket> slicePage(List<ApplyTicket> all, long current, long size) {
+        long cur = Math.max(1L, current);
+        long sz = Math.max(1L, size);
+        Page<ApplyTicket> page = new Page<>(cur, sz);
+        long total = all == null ? 0L : all.size();
+        page.setTotal(total);
+        if (total == 0L) {
+            page.setRecords(List.of());
+            return page;
+        }
+        int from = (int) Math.min((cur - 1) * sz, total);
+        int to = (int) Math.min(from + sz, total);
+        page.setRecords(all.subList(from, to));
+        return page;
+    }
+
     private static Date startOfMonth() {
         Calendar cal = Calendar.getInstance();
         cal.set(Calendar.DAY_OF_MONTH, 1);
@@ -524,10 +549,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> approve(ApplyTicketDecideParam param) {
-        if (!LhLoginUsers.isSuperAdmin()) {
-            throw new CommonException("仅超管可审批（一期）");
-        }
         ApplyTicket t = requireTicket(param.getId());
+        approvalCandidateService.assertCanDecide(t);
         if (!"pending".equals(t.getStatus())) {
             throw new CommonException("申请单状态不可审批: " + t.getStatus());
         }
@@ -685,10 +708,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ApplyTicket reject(ApplyTicketDecideParam param) {
-        if (!LhLoginUsers.isSuperAdmin()) {
-            throw new CommonException("仅超管可审批（一期）");
-        }
         ApplyTicket t = requireTicket(param.getId());
+        approvalCandidateService.assertCanDecide(t);
         if (!"pending".equals(t.getStatus())) {
             throw new CommonException("申请单状态不可驳回: " + t.getStatus());
         }
