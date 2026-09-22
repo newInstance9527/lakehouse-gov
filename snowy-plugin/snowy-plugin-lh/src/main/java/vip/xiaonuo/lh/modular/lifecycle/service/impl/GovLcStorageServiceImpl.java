@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 import vip.xiaonuo.common.exception.CommonException;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcOrphanScan;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcPolicy;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcStorageAdvice;
@@ -17,6 +18,7 @@ import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcStorageChangePointMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcStorageService;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcBucketMetricsReader;
+import vip.xiaonuo.lh.modular.observability.support.LhFinOpsRates;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWsQuota;
 import vip.xiaonuo.lh.modular.workspace.mapper.GovWsMapper;
@@ -47,10 +49,12 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
     private static final String WS_DEFAULT = "default";
     private static final String NOT_DELETE = "NOT_DELETE";
-    private static final long GB = 1024L * 1024 * 1024;
-    private static final long TB = GB * 1024;
+    private static final long GB = LhFinOpsRates.GB;
+    private static final long TB = LhFinOpsRates.TB;
     private static final DateTimeFormatter DAY_FMT = DateTimeFormatter.ofPattern("MM-dd");
 
+    @Resource
+    private LhProperties lhProperties;
     @Resource
     private GovLcTableStatMapper tableStatMapper;
     @Resource
@@ -458,12 +462,16 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         }
 
         List<Map<String, Object>> list = new ArrayList<>();
+        BigDecimal totalCostAll = BigDecimal.ZERO;
+        BigDecimal perTb = LhFinOpsRates.storagePerTbMonth(lhProperties);
         for (String code : codes) {
             List<TableCaliber> rows = buildCalibers(code, days);
             long active = rows.stream().mapToLong(TableCaliber::activeBytes).sum();
             long total = rows.stream().mapToLong(TableCaliber::totalBytes).sum();
             long net = rows.stream().mapToLong(TableCaliber::netGrowthBytes).sum();
             long quotaBytes = quotaByWs.getOrDefault(code, 20L * TB);
+            BigDecimal storageCost = LhFinOpsRates.storageCost(total, days, perTb);
+            totalCostAll = totalCostAll.add(storageCost);
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("ws", code);
             row.put("activeBytes", active);
@@ -471,6 +479,8 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
             row.put("netGrowthBytes", net);
             row.put("quotaBytes", quotaBytes);
             row.put("quotaPct", pct(total, quotaBytes));
+            row.put("storageCost", storageCost);
+            row.put("storageCostLabel", LhFinOpsRates.formatCny(storageCost));
             row.put("owner", ownerByWs.getOrDefault(code, "platform"));
             row.put("status", quotaBytes > 0 && total * 100.0 / quotaBytes >= 80 ? "QUOTA_WARN" : "ok");
             list.add(row);
@@ -481,8 +491,11 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         out.put("ws", allWs ? null : wsOrDefault(filterWs));
         out.put("range", rangeLabel(days));
         out.put("group", g);
+        out.put("currency", LhFinOpsRates.currency(lhProperties));
+        out.put("rates", LhFinOpsRates.ratesMap(lhProperties));
         out.put("list", list);
-        out.put("note", "配额读 gov_ws_quota；与 /lh/workspace/spaces/{code}/quota 同源");
+        out.put("totalStorageCost", totalCostAll.setScale(2, RoundingMode.HALF_UP));
+        out.put("note", "配额读 gov_ws_quota；金额引 lh.finops（§24.3）与 /lh/observability/costs 同源");
         return out;
     }
 

@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcStorageService;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageEventCollect;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageProfileCollector;
 
 import java.util.List;
@@ -32,6 +33,8 @@ public class GovLcStorageController {
     private GovLcStorageService govLcStorageService;
     @Resource
     private GovLcStorageProfileCollector profileCollector;
+    @Resource
+    private GovLcStorageEventCollect eventCollect;
 
     @Operation(summary = "存储趋势概览（三口径 KPI）")
     @GetMapping({"/lh/lifecycle/storage/summary", "/api/governance/lifecycle/storage/summary"})
@@ -85,7 +88,7 @@ public class GovLcStorageController {
         return CommonResult.data(govLcStorageService.advice(ws));
     }
 
-    @Operation(summary = "按空间 showback（group=ws；配额读 gov_ws_quota）")
+    @Operation(summary = "按空间 showback（group=ws；配额读 gov_ws_quota；金额引 lh.finops §24.3）")
     @GetMapping({"/lh/lifecycle/storage/showback", "/api/governance/lifecycle/storage/showback"})
     public CommonResult<Map<String, Object>> showback(
             @RequestParam(required = false) String ws,
@@ -99,5 +102,15 @@ public class GovLcStorageController {
     @PostMapping({"/lh/lifecycle/storage/collect/rerun", "/api/governance/lifecycle/storage/collect/rerun"})
     public CommonResult<Map<String, Object>> collectRerun(@RequestParam(required = false) String ws) {
         return CommonResult.data(profileCollector.runDaily(ws));
+    }
+
+    @Operation(summary = "事件驱动采集（仅 L3；Iceberg commit / 表状态变更钩子）")
+    @CommonLog("存储画像事件采集")
+    @PostMapping({"/lh/lifecycle/storage/collect/on-commit", "/api/governance/lifecycle/storage/collect/on-commit"})
+    public CommonResult<Map<String, Object>> collectOnCommit(
+            @RequestParam(required = false) String ws,
+            @RequestParam String tableFqn,
+            @RequestParam(required = false) String eventId) {
+        return CommonResult.data(eventCollect.onCommit(ws, tableFqn, eventId));
     }
 }

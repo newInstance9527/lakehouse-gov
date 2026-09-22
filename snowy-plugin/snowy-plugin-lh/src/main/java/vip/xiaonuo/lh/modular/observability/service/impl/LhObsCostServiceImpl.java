@@ -4,11 +4,13 @@ import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.modular.aimodel.entity.GovAiUsageDaily;
 import vip.xiaonuo.lh.modular.aimodel.mapper.GovAiUsageDailyMapper;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcTableStat;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 import vip.xiaonuo.lh.modular.observability.service.LhObsCostService;
+import vip.xiaonuo.lh.modular.observability.support.LhFinOpsRates;
 import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
 import vip.xiaonuo.lh.modular.query.mapper.CpQueryExecMapper;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
@@ -29,20 +31,17 @@ import java.util.Map;
 
 /**
  * 用量按 ws 聚合：存储（gov_lc_table_stat）+ 计算扫描（cp_query_exec）+ AI（gov_ai_usage_daily）。
- * <p>金额为门户演示单价（非财务结算）；金额化结算属 J4。
+ * <p>金额引 {@link LhFinOpsRates}（§24.3 / {@code lh.finops}），与存储 showback 同源。
  */
 @Service
 public class LhObsCostServiceImpl implements LhObsCostService {
 
     private static final String NOT_DELETE = "NOT_DELETE";
     private static final String WS_DEFAULT = "default";
-    private static final long GB = 1024L * 1024 * 1024;
-    private static final long TB = GB * 1024;
-    /** 演示：存储 ¥/TB·月 */
-    private static final BigDecimal STORAGE_PER_TB_MONTH = new BigDecimal("100");
-    /** 演示：扫描 ¥/GB */
-    private static final BigDecimal COMPUTE_PER_GB = new BigDecimal("0.50");
+    private static final long TB = LhFinOpsRates.TB;
 
+    @Resource
+    private LhProperties lhProperties;
     @Resource
     private GovLcTableStatMapper tableStatMapper;
     @Resource
@@ -84,11 +83,7 @@ public class LhObsCostServiceImpl implements LhObsCostService {
                 .comparing((Map<String, Object> m) -> (BigDecimal) m.get("totalCost"))
                 .reversed());
 
-        Map<String, Object> rates = new LinkedHashMap<>();
-        rates.put("storagePerTbMonth", STORAGE_PER_TB_MONTH);
-        rates.put("computePerGbScan", COMPUTE_PER_GB);
-        rates.put("currency", "CNY");
-        rates.put("note", "演示单价；正式结算见波次 J 金额化 showback");
+        Map<String, Object> rates = LhFinOpsRates.ratesMap(lhProperties);
 
         Map<String, Object> totals = new LinkedHashMap<>();
         totals.put("totalCost", totalAll.setScale(2, RoundingMode.HALF_UP));
@@ -101,11 +96,11 @@ public class LhObsCostServiceImpl implements LhObsCostService {
         out.put("range", days + "d");
         out.put("group", g);
         out.put("ws", StrUtil.blankToDefault(filterWs, null));
-        out.put("unit", "CNY");
+        out.put("unit", LhFinOpsRates.currency(lhProperties));
         out.put("rates", rates);
         out.put("items", items);
         out.put("totals", totals);
-        out.put("source", List.of("gov_lc_table_stat", "cp_query_exec", "gov_ai_usage_daily", "gov_ws_quota"));
+        out.put("source", List.of("gov_lc_table_stat", "cp_query_exec", "gov_ai_usage_daily", "gov_ws_quota", "lh.finops"));
         return out;
     }
 
@@ -205,15 +200,10 @@ public class LhObsCostServiceImpl implements LhObsCostService {
     }
 
     private Map<String, Object> toItem(Bucket b, int days, long maxScan) {
-        BigDecimal storageTb = BigDecimal.valueOf(b.storageTotalBytes)
-                .divide(BigDecimal.valueOf(TB), 6, RoundingMode.HALF_UP);
-        BigDecimal monthFactor = BigDecimal.valueOf(days)
-                .divide(BigDecimal.valueOf(30), 6, RoundingMode.HALF_UP);
-        BigDecimal storageCost = storageTb.multiply(STORAGE_PER_TB_MONTH).multiply(monthFactor)
-                .setScale(2, RoundingMode.HALF_UP);
-        BigDecimal scanGb = BigDecimal.valueOf(b.scanBytes)
-                .divide(BigDecimal.valueOf(GB), 6, RoundingMode.HALF_UP);
-        BigDecimal computeCost = scanGb.multiply(COMPUTE_PER_GB).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal storageCost = LhFinOpsRates.storageCost(
+                b.storageTotalBytes, days, LhFinOpsRates.storagePerTbMonth(lhProperties));
+        BigDecimal computeCost = LhFinOpsRates.computeCost(
+                b.scanBytes, LhFinOpsRates.computePerGbScan(lhProperties));
         BigDecimal aiCost = b.aiCost.setScale(2, RoundingMode.HALF_UP);
         BigDecimal total = storageCost.add(computeCost).add(aiCost).setScale(2, RoundingMode.HALF_UP);
 
@@ -242,7 +232,7 @@ public class LhObsCostServiceImpl implements LhObsCostService {
         m.put("aiTokens", b.aiPromptTokens + b.aiCompletionTokens);
         m.put("aiCost", aiCost);
         m.put("totalCost", total);
-        m.put("totalLabel", formatCny(total));
+        m.put("totalLabel", LhFinOpsRates.formatCny(total));
         m.put("quotaBytes", b.quotaBytes);
         m.put("quotaPct", quotaPct);
         m.put("pct", barPct);
@@ -291,13 +281,6 @@ public class LhObsCostServiceImpl implements LhObsCostService {
 
     private static long nvl(Long v) {
         return v == null ? 0L : v;
-    }
-
-    private static String formatCny(BigDecimal v) {
-        if (v == null) {
-            return "¥0";
-        }
-        return "¥" + v.setScale(2, RoundingMode.HALF_UP).toPlainString();
     }
 
     private static final class Bucket {

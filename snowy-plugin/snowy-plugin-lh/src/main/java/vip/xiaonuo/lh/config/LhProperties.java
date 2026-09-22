@@ -52,6 +52,7 @@ public class LhProperties {
     private Catalog catalog = new Catalog();
     private Ai ai = new Ai();
     private Lifecycle lifecycle = new Lifecycle();
+    private Finops finops = new Finops();
     private Compute compute = new Compute();
     private Compliance compliance = new Compliance();
     private Metric metric = new Metric();
@@ -379,6 +380,13 @@ public class LhProperties {
         private int profileTableTimeoutMs = 60_000;
         private int profileMaxTables = 200;
         /**
+         * 事件驱动采集（Iceberg commit 钩子）：仅 L3 低频表；默认开。
+         * L1/L2 高频 CDC 禁止走本通道，避免采集风暴。
+         */
+        private boolean eventCollectEnabled = true;
+        /** 同表事件采集冷却（分钟）；未到冷却则跳过画像 */
+        private int eventCollectCooldownMinutes = 30;
+        /**
          * VictoriaMetrics 根地址（例 http://vm:8428）。空=跳过写 VM，仅回写 gov_lc_table_stat。
          * 写入路径：{@code {url}/api/v1/import/prometheus}，不引 Pushgateway。
          */
@@ -530,6 +538,19 @@ public class LhProperties {
         private String intakeWebhookSecret = "lh-compliance-dev-intake-secret";
         /** intake 时间戳允许偏移（秒）；0=不校验时间戳 */
         private long intakeSkewSeconds = 300L;
+    }
+
+    /**
+     * §24.3 FinOps 单价：showback 金额化与 observability/costs 同源。
+     */
+    @Getter
+    @Setter
+    public static class Finops {
+        /** 存储 ¥/TB·月 */
+        private java.math.BigDecimal storagePerTbMonth = new java.math.BigDecimal("100");
+        /** 扫描 ¥/GB */
+        private java.math.BigDecimal computePerGbScan = new java.math.BigDecimal("0.50");
+        private String currency = "CNY";
     }
 
     /**
