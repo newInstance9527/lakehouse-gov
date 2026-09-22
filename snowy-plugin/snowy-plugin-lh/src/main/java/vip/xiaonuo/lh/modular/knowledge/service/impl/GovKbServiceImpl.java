@@ -77,6 +77,30 @@ public class GovKbServiceImpl implements GovKbService {
         out.put("manualCount", countCat(all, "manual"));
         out.put("citeCnt", all.stream().mapToInt(e -> e.getCiteCnt() == null ? 0 : e.getCiteCnt()).sum());
         out.put("ws", workspace);
+        Map<String, Object> probe = milvusClient.probe();
+        out.put("milvusEnabled", probe.get("enabled"));
+        out.put("milvusReachable", probe.get("reachable"));
+        out.put("retrievalMode", probe.get("mode"));
+        out.put("milvusCollection", probe.get("collection"));
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> vectorProbe() {
+        Map<String, Object> out = new LinkedHashMap<>(milvusClient.probe());
+        out.put("embedAvailable", liteLlmClient.available());
+        LhProperties.Ai ai = lhProperties.getAi();
+        out.put("embedModel", ai == null ? "" : StrUtil.nullToEmpty(ai.getDefaultEmbedModel()));
+        out.put("vectorWeight", ai == null ? 0.7 : ai.getVectorWeight());
+        // 真混合还需 embed；否则即便 Milvus 可达也只能关键词
+        boolean hybridReady = Boolean.TRUE.equals(out.get("reachable")) && liteLlmClient.available();
+        if (Boolean.TRUE.equals(out.get("enabled")) && hybridReady) {
+            out.put("mode", "hybrid");
+            out.put("message", "Milvus + embed 可用；search 走混合检索");
+        } else if (Boolean.TRUE.equals(out.get("enabled")) && Boolean.TRUE.equals(out.get("reachable"))) {
+            out.put("mode", "vector-only-no-embed");
+            out.put("message", "Milvus 可达但 LiteLLM embed 不可用；search 仍关键词");
+        }
         return out;
     }
 
@@ -311,6 +335,7 @@ public class GovKbServiceImpl implements GovKbService {
 
         // 混合：Milvus 可用且 query embed 成功时合并向量分
         double vectorWeight = 0.7;
+        boolean usedVector = false;
         try {
             LhProperties.Ai ai = lhProperties.getAi();
             if (ai != null) {
@@ -322,6 +347,9 @@ public class GovKbServiceImpl implements GovKbService {
                 if (qVecs != null && !qVecs.isEmpty() && qVecs.get(0) != null) {
                     List<Map<String, Object>> vecHits = milvusClient.search(
                             ws, qVecs.get(0), topK * 3, param.getCats());
+                    if (!vecHits.isEmpty()) {
+                        usedVector = true;
+                    }
                     for (Map<String, Object> vh : vecHits) {
                         String chunkId = vh.get("chunkId") == null ? null : String.valueOf(vh.get("chunkId"));
                         String entryId = vh.get("entryId") == null ? null : String.valueOf(vh.get("entryId"));
@@ -355,8 +383,10 @@ public class GovKbServiceImpl implements GovKbService {
             }
         } catch (Exception ignored) {
             // soft-fail → 仅关键词
+            usedVector = false;
         }
 
+        String retrievalMode = usedVector ? "hybrid" : "keyword";
         double kwWeight = 1.0 - vectorWeight;
         double maxKw = byChunk.values().stream()
                 .mapToDouble(m -> ((Number) m.getOrDefault("kwScore", 0)).doubleValue())
@@ -373,6 +403,7 @@ public class GovKbServiceImpl implements GovKbService {
                     ? (vectorWeight * vecNorm + kwWeight * kwNorm)
                     : kwNorm;
             m.put("score", score);
+            m.put("retrievalMode", retrievalMode);
             scored.add(m);
         }
         scored.sort(Comparator.comparingDouble((Map<String, Object> m) -> (Double) m.get("score")).reversed());

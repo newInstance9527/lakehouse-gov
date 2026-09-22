@@ -52,10 +52,61 @@ public class LhMilvusClient {
     private final AtomicBoolean collectionReady = new AtomicBoolean(false);
     private final Object lock = new Object();
 
-    /** 配置开关 + URI 非空 */
+    /** 配置开关 + URI 非空（不探测连通；连通见 {@link #probe()}） */
     public boolean available() {
         LhProperties.Ai ai = lhProperties.getAi();
         return ai != null && ai.isMilvusEnabled() && StrUtil.isNotBlank(ai.getMilvusUri());
+    }
+
+    /**
+     * 运维探针：开关 / URI / 集合 / 是否可达。不可达时调用方应走关键词降级。
+     * <p>返回字段：enabled、uri、database、collection、reachable、collectionExists、mode、message
+     */
+    public Map<String, Object> probe() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        LhProperties.Ai ai = lhProperties.getAi();
+        boolean enabled = available();
+        out.put("enabled", enabled);
+        out.put("uri", enabled && ai != null ? StrUtil.nullToEmpty(ai.getMilvusUri()) : "");
+        out.put("database", ai == null ? "default" : StrUtil.blankToDefault(ai.getMilvusDatabase(), "default"));
+        out.put("collection", collectionName());
+        if (!enabled) {
+            out.put("reachable", false);
+            out.put("collectionExists", false);
+            out.put("mode", "keyword");
+            out.put("message", "milvus-enabled=false 或 URI 空；检索走 MySQL 关键词");
+            return out;
+        }
+        try {
+            MilvusServiceClient c = client();
+            if (c == null) {
+                out.put("reachable", false);
+                out.put("collectionExists", false);
+                out.put("mode", "keyword");
+                out.put("message", "连接失败；降级关键词");
+                return out;
+            }
+            R<Boolean> has = c.hasCollection(HasCollectionParam.newBuilder()
+                    .withCollectionName(collectionName())
+                    .build());
+            boolean rpcOk = has != null && has.getStatus() == R.Status.Success.getCode();
+            boolean exists = rpcOk && Boolean.TRUE.equals(has.getData());
+            out.put("reachable", rpcOk);
+            out.put("collectionExists", exists);
+            out.put("mode", rpcOk ? "vector" : "keyword");
+            out.put("message", rpcOk
+                    ? (exists ? "OK" : "已连通；集合尚未创建（首次索引 ensure 后出现）")
+                    : "RPC 失败；降级关键词");
+            return out;
+        } catch (Throwable t) {
+            // 连接损坏时清掉，下次重连
+            destroy();
+            out.put("reachable", false);
+            out.put("collectionExists", false);
+            out.put("mode", "keyword");
+            out.put("message", "探测异常；降级关键词");
+            return out;
+        }
     }
 
     /**

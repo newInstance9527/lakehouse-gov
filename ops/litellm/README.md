@@ -86,7 +86,7 @@ lh.ai.patrol-warn-days=14
 
 1. **现网未部署 LiteLLM**：无法在生产验证 chat/embed 真连通。
 2. **LiteLLM `model_list` 与门户 `gov_ai_model` 自动同步 / 启停联动** → 波次 **D3**。
-3. **Milvus 联调** → 波次 **D2**。
+3. **Milvus**：D2 已交付 `ops/milvus`；现网未起栈仍为残留。
 4. **巡检失败 / Key 过期 → 夜莺**（§2.12）未接；本波次只写 `gov_ai_model.status`。
 5. **厂商 Key 从门户 Vault 自动投影到 LiteLLM env** 未做（需 Vault Agent / 旁路；禁止脚本把明文写进 Git）。
 

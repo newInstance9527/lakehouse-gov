@@ -17,6 +17,9 @@ public interface GovKbService {
 
     Map<String, Object> overview(String ws);
 
+    /** Milvus 向量探针（D2）；未启用/不可达 → mode=keyword */
+    Map<String, Object> vectorProbe();
+
     Page<GovKbEntryVo> page(GovKbPageParam param);
 
     GovKbEntryVo create(GovKbUpsertParam param);

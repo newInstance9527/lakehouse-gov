@@ -42,6 +42,12 @@ public class GovKbController {
         return CommonResult.data(govKbService.overview(ws));
     }
 
+    @Operation(summary = "Milvus 向量探针（D2；未启用则关键词降级）")
+    @GetMapping("/lh/knowledge/vector/probe")
+    public CommonResult<Map<String, Object>> vectorProbe() {
+        return CommonResult.data(govKbService.vectorProbe());
+    }
+
     @Operation(summary = "知识条目分页")
     @GetMapping("/lh/knowledge/entries")
     public CommonResult<Page<GovKbEntryVo>> page(GovKbPageParam param) {
@@ -93,7 +99,7 @@ public class GovKbController {
         return CommonResult.data(govKbService.rebuild(entryId));
     }
 
-    @Operation(summary = "混合检索（P0 关键词）")
+    @Operation(summary = "混合检索（向量优先；未启用 Milvus 则关键词）")
     @PostMapping("/lh/knowledge/search")
     public CommonResult<List<Map<String, Object>>> search(@RequestBody GovKbSearchParam param) {
         return CommonResult.data(govKbService.search(param));
