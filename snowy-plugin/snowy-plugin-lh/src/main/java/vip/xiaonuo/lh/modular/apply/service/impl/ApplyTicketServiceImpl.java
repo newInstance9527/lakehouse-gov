@@ -21,6 +21,7 @@ import vip.xiaonuo.lh.modular.apply.param.ApplyTicketDecideParam;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketPageParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.apply.support.ApplyApprovalCandidateService;
+import vip.xiaonuo.lh.modular.apply.support.ApplyApprovalChain;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
@@ -405,6 +406,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         payload.set("rowFilter", param.getRowFilter());
         payload.set("expireLabel", param.getExpireLabel());
         payload.set("columns", param.getColumns());
+        ApplyApprovalChain.stampChainOnCreate(payload, asset.getSensitivity());
         t.setPayload(payload.toString());
         t.setExpiresAt(parseExpire(param.getExpireLabel()));
         ticketMapper.insert(t);
@@ -453,6 +455,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
             payload.set("assetId", asset.getId());
             payload.set("assetCode", asset.getAssetCode());
         }
+        ApplyApprovalChain.stampChainOnCreate(payload, asset != null ? asset.getSensitivity() : null);
         t.setPayload(payload.toString());
         t.setExpiresAt(parseExpire(param.getExpireLabel()));
         if (StrUtil.isBlank(t.getTitle())) {
@@ -493,18 +496,23 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         long current = param.getCurrent() == null ? 1L : param.getCurrent();
         long size = param.getSize() == null ? 20L : param.getSize();
         String typeFilter = normalizeFilterType(param.getTicketType());
-        // 超管：DB 分页；Owner：先拉 pending 再按候选人过滤后内存分页（一期量级可接受）
+        // 超管：DB 分页；Owner/安全岗：先拉开单再按候选人过滤后内存分页（一期量级可接受）
+        // J2：含 pending_security（待安全加签）
         if (LhLoginUsers.isSuperAdmin()) {
             QueryWrapper<ApplyTicket> qw = new QueryWrapper<>();
             qw.lambda().eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
-                    .eq(ApplyTicket::getStatus, "pending")
+                    .in(ApplyTicket::getStatus, List.of(
+                            ApplyApprovalChain.STATUS_PENDING,
+                            ApplyApprovalChain.STATUS_PENDING_SECURITY))
                     .eq(StrUtil.isNotBlank(typeFilter), ApplyTicket::getTicketType, typeFilter)
                     .orderByAsc(ApplyTicket::getCreateTime);
             return ticketMapper.selectPage(new Page<>(current, size), qw);
         }
         List<ApplyTicket> all = ticketMapper.selectList(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
-                .eq(ApplyTicket::getStatus, "pending")
+                .in(ApplyTicket::getStatus, List.of(
+                        ApplyApprovalChain.STATUS_PENDING,
+                        ApplyApprovalChain.STATUS_PENDING_SECURITY))
                 .eq(StrUtil.isNotBlank(typeFilter), ApplyTicket::getTicketType, typeFilter)
                 .orderByAsc(ApplyTicket::getCreateTime));
         List<ApplyTicket> decidable = approvalCandidateService.filterDecidable(all);
@@ -517,7 +525,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         Date monthStart = startOfMonth();
         List<ApplyTicket> allPending = ticketMapper.selectList(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
-                .eq(ApplyTicket::getStatus, "pending"));
+                .in(ApplyTicket::getStatus, List.of(
+                        ApplyApprovalChain.STATUS_PENDING,
+                        ApplyApprovalChain.STATUS_PENDING_SECURITY)));
         long pending = approvalCandidateService.countDecidablePending(allPending);
         long mine = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
@@ -525,7 +535,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         long minePending = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
                 .eq(ApplyTicket::getApplicant, userId)
-                .eq(ApplyTicket::getStatus, "pending"));
+                .in(ApplyTicket::getStatus, List.of(
+                        ApplyApprovalChain.STATUS_PENDING,
+                        ApplyApprovalChain.STATUS_PENDING_SECURITY)));
         long monthApproved = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
                 .eq(ApplyTicket::getApplicant, userId)
@@ -588,7 +600,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public Map<String, Object> approve(ApplyTicketDecideParam param) {
         ApplyTicket t = requireTicket(param.getId());
         approvalCandidateService.assertCanDecide(t);
-        if (!"pending".equals(t.getStatus())) {
+        if (!ApplyApprovalChain.isOpenForDecision(t.getStatus())) {
             throw new CommonException("申请单状态不可审批: " + t.getStatus());
         }
         ApplyTicketItem item = itemMapper.selectOne(new QueryWrapper<ApplyTicketItem>().lambda()
@@ -600,6 +612,11 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
 
         Map<String, Object> r = new LinkedHashMap<>();
+        // J2：机密明文 Owner 首签 → pending_security，不写 grant / 不签发副作用
+        if (advanceOwnerToSecurityIfNeeded(t, param, r)) {
+            return r;
+        }
+        stampSecurityCosignIfNeeded(t, param);
         // 出湖 / 合规删除：仅改状态；API 发布：审批通过后自动 publish+deploy；指标发布：自动启用
         if (TYPE_LAKE_EXPORT.equals(t.getTicketType())
                 || TYPE_COMPLIANCE_DELETE.equals(t.getTicketType())
@@ -757,7 +774,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public ApplyTicket reject(ApplyTicketDecideParam param) {
         ApplyTicket t = requireTicket(param.getId());
         approvalCandidateService.assertCanDecide(t);
-        if (!"pending".equals(t.getStatus())) {
+        if (!ApplyApprovalChain.isOpenForDecision(t.getStatus())) {
             throw new CommonException("申请单状态不可驳回: " + t.getStatus());
         }
         t.setStatus("rejected");
@@ -771,6 +788,61 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
             revertMetricAfterReject(t, param.getRemark());
         }
         return t;
+    }
+
+    /**
+     * 机密明文多级：Owner（或超管）在 pending 首签后转入 pending_security，等待安全加签。
+     * @return true 表示本调用已结束（尚未终审）
+     */
+    private boolean advanceOwnerToSecurityIfNeeded(
+            ApplyTicket t, ApplyTicketDecideParam param, Map<String, Object> r) {
+        JSONObject payload = ApplyApprovalChain.parsePayload(t.getPayload());
+        if (!ApplyApprovalChain.requiresSecurityCosign(payload)) {
+            return false;
+        }
+        if (!ApplyApprovalChain.STATUS_PENDING.equals(t.getStatus())) {
+            // pending_security：安全加签继续走终审
+            return false;
+        }
+        String userId = LhLoginUsers.requireUserId();
+        payload.set("approvalStep", ApplyApprovalChain.STEP_SECURITY);
+        payload.set("ownerApprovedBy", userId);
+        payload.set("ownerApprovedAt", new Date().getTime());
+        if (StrUtil.isNotBlank(param.getRemark())) {
+            payload.set("ownerRemark", param.getRemark());
+        }
+        t.setPayload(payload.toString());
+        t.setStatus(ApplyApprovalChain.STATUS_PENDING_SECURITY);
+        t.setRemark(param.getRemark());
+        t.setUpdateTime(new Date());
+        t.setUpdateUser(userId);
+        ticketMapper.updateById(t);
+        r.put("ticket", t);
+        r.put("ticketNo", t.getTicketNo());
+        r.put("status", t.getStatus());
+        r.put("awaitingSecurity", true);
+        r.put("approvalStep", ApplyApprovalChain.STEP_SECURITY);
+        r.put("approvalChain", ApplyApprovalChain.CHAIN_OWNER_SECURITY);
+        r.put("grantId", null);
+        r.put("gravProjected", false);
+        r.put("message", "Owner 已签，待安全岗加签");
+        return true;
+    }
+
+    /** 安全加签终审前写入 payload 痕迹（单级单无需）。 */
+    private void stampSecurityCosignIfNeeded(ApplyTicket t, ApplyTicketDecideParam param) {
+        JSONObject payload = ApplyApprovalChain.parsePayload(t.getPayload());
+        if (!ApplyApprovalChain.requiresSecurityCosign(payload)) {
+            return;
+        }
+        String userId = LhLoginUsers.requireUserId();
+        payload.set("approvalStep", "done");
+        payload.set("securityApprovedBy", userId);
+        payload.set("securityApprovedAt", new Date().getTime());
+        if (StrUtil.isNotBlank(param.getRemark())) {
+            payload.set("securityRemark", param.getRemark());
+        }
+        t.setPayload(payload.toString());
     }
 
     @Override

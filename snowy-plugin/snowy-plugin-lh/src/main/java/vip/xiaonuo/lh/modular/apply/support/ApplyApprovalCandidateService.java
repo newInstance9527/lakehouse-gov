@@ -1,6 +1,7 @@
 package vip.xiaonuo.lh.modular.apply.support;
 
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
@@ -27,7 +28,11 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * G1：审批候选人 = 超管 | 资产 Owner（gov_asset tech/biz/create）| 空间 Owner（gov_ws_member.Owner / 创建人）。
+ * G1 + J2：审批候选人随步骤变化。
+ * <ul>
+ *   <li>{@code pending}（含单级 / 多级 Owner 步）：超管 | 资产 Owner | 空间 Owner</li>
+ *   <li>{@code pending_security}（机密明文安全加签）：超管 | 空间 SecurityOfficer</li>
+ * </ul>
  * 授权结果仍只写 grant/Grav，不写回空间成员 ACL。
  */
 @Service
@@ -35,6 +40,7 @@ public class ApplyApprovalCandidateService {
 
     private static final String NOT_DELETE = "NOT_DELETE";
     private static final String STATUS_ACTIVE = "active";
+    private static final String ROLE_SECURITY = "SecurityOfficer";
 
     @Resource
     private GovWsMemberMapper memberMapper;
@@ -49,17 +55,30 @@ public class ApplyApprovalCandidateService {
         if (canDecide(ticket)) {
             return;
         }
+        String step = ApplyApprovalChain.currentStep(
+                ticket == null ? null : ticket.getStatus(),
+                ticket == null ? null : ApplyApprovalChain.parsePayload(ticket.getPayload()));
+        if (ApplyApprovalChain.STEP_SECURITY.equals(step)) {
+            throw new CommonException("仅空间安全岗（SecurityOfficer）或超管可加签本单");
+        }
         throw new CommonException("仅资产 Owner、空间 Owner 或超管可审批本单");
     }
 
     public boolean canDecide(ApplyTicket ticket) {
-        if (ticket == null) {
+        if (ticket == null || !ApplyApprovalChain.isOpenForDecision(ticket.getStatus())) {
             return false;
         }
         if (LhLoginUsers.isSuperAdmin()) {
             return true;
         }
         SaBaseLoginUser user = LhLoginUsers.requireUser();
+        JSONObject payload = ApplyApprovalChain.parsePayload(ticket.getPayload());
+        String step = ApplyApprovalChain.currentStep(ticket.getStatus(), payload);
+
+        if (ApplyApprovalChain.STEP_SECURITY.equals(step)) {
+            return isSecurityOfficerOfWs(user, ticket.getWs());
+        }
+        // Owner 步（单级或机密多级首步）
         Set<String> ownedWs = resolveOwnedWsCodes(user);
         if (ownedWs.contains(normWs(ticket.getWs()))) {
             return true;
@@ -84,6 +103,7 @@ public class ApplyApprovalCandidateService {
         }
         SaBaseLoginUser user = LhLoginUsers.requireUser();
         Set<String> ownedWs = resolveOwnedWsCodes(user);
+        Set<String> securityWs = resolveSecurityWsCodes(user);
         Map<String, String> ticketAssetIds = loadTicketAssetIds(
                 tickets.stream().map(ApplyTicket::getId).collect(Collectors.toList()));
         Set<String> assetIds = ticketAssetIds.values().stream()
@@ -93,6 +113,11 @@ public class ApplyApprovalCandidateService {
 
         return tickets.stream()
                 .filter(t -> {
+                    JSONObject payload = ApplyApprovalChain.parsePayload(t.getPayload());
+                    String step = ApplyApprovalChain.currentStep(t.getStatus(), payload);
+                    if (ApplyApprovalChain.STEP_SECURITY.equals(step)) {
+                        return securityWs.contains(normWs(t.getWs()));
+                    }
                     if (ownedWs.contains(normWs(t.getWs()))) {
                         return true;
                     }
@@ -107,6 +132,14 @@ public class ApplyApprovalCandidateService {
     }
 
     Set<String> resolveOwnedWsCodes(SaBaseLoginUser user) {
+        return resolveWsCodesByRole(user, "Owner", true);
+    }
+
+    Set<String> resolveSecurityWsCodes(SaBaseLoginUser user) {
+        return resolveWsCodesByRole(user, ROLE_SECURITY, false);
+    }
+
+    private Set<String> resolveWsCodesByRole(SaBaseLoginUser user, String roleCode, boolean includeCreatorAsOwner) {
         if (user == null) {
             return Set.of();
         }
@@ -117,7 +150,7 @@ public class ApplyApprovalCandidateService {
                 .eq(GovWsMember::getDeleteFlag, NOT_DELETE)
                 .eq(GovWsMember::getStatus, STATUS_ACTIVE)
                 .eq(GovWsMember::getSubjectType, "user")
-                .eq(GovWsMember::getRoleCode, "Owner")
+                .eq(GovWsMember::getRoleCode, roleCode)
                 .and(w -> {
                     if (StrUtil.isNotBlank(uid) && StrUtil.isNotBlank(account)) {
                         w.eq(GovWsMember::getSubjectId, uid).or().eq(GovWsMember::getSubjectId, account);
@@ -134,16 +167,21 @@ public class ApplyApprovalCandidateService {
                 codes.add(normWs(m.getWsCode()));
             }
         }
-        // 兼容：创建人视为 Owner（成员表尚未写入时）
-        List<GovWs> spaces = wsMapper.selectList(new QueryWrapper<GovWs>().lambda()
-                .eq(GovWs::getDeleteFlag, NOT_DELETE)
-                .eq(GovWs::getStatus, STATUS_ACTIVE));
-        for (GovWs ws : spaces) {
-            if (LhOwnerGuard.isOwner(user, ws.getCreateUser()) && StrUtil.isNotBlank(ws.getWsCode())) {
-                codes.add(normWs(ws.getWsCode()));
+        if (includeCreatorAsOwner) {
+            List<GovWs> spaces = wsMapper.selectList(new QueryWrapper<GovWs>().lambda()
+                    .eq(GovWs::getDeleteFlag, NOT_DELETE)
+                    .eq(GovWs::getStatus, STATUS_ACTIVE));
+            for (GovWs ws : spaces) {
+                if (LhOwnerGuard.isOwner(user, ws.getCreateUser()) && StrUtil.isNotBlank(ws.getWsCode())) {
+                    codes.add(normWs(ws.getWsCode()));
+                }
             }
         }
         return codes;
+    }
+
+    private boolean isSecurityOfficerOfWs(SaBaseLoginUser user, String wsCode) {
+        return resolveSecurityWsCodes(user).contains(normWs(wsCode));
     }
 
     private boolean isAssetOwner(SaBaseLoginUser user, GovAsset asset) {
