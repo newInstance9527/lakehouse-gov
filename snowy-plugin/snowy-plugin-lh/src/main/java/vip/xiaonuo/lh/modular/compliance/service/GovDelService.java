@@ -3,9 +3,11 @@ package vip.xiaonuo.lh.modular.compliance.service;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelDekRegisterParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelIntakeParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
@@ -93,4 +95,18 @@ public interface GovDelService {
 
     /** E7：出湖预检——源表是否命中 restricted。 */
     Map<String, Object> exportGateCheck(GovDelExportGateParam param);
+
+    /**
+     * J3：外部 DSR webhook 送单。须校验 {@code X-Lh-Intake-Signature}；
+     * 同 {@code sourceSystem+sourceRef} 幂等返回已有单。
+     */
+    Map<String, Object> intake(GovDelIntakeParam param, String signatureHeader, String timestampHeader);
+
+    /**
+     * J3：登记每主体 PII 列 DEK（信封加密前置）；DEK 进 Vault，表只留 fingerprint。
+     */
+    Map<String, Object> registerDek(GovDelDekRegisterParam param);
+
+    /** J3：DEK 登记列表（无密钥材料）。 */
+    List<Map<String, Object>> listDeks(String ws, String subjectIdHash, String status);
 }

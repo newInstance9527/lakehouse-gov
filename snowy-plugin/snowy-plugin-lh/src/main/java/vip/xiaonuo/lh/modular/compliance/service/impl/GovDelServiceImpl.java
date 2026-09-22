@@ -21,19 +21,23 @@ import vip.xiaonuo.lh.modular.compliance.entity.GovDelEvidence;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelExec;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelHold;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelRequest;
+import vip.xiaonuo.lh.modular.compliance.entity.GovDelSubjectDek;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelSubjectMap;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelTarget;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelEvidenceMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelExecMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelHoldMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelRequestMapper;
+import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSubjectDekMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSubjectMapMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelTargetMapper;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelDekRegisterParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelIntakeParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
@@ -50,9 +54,12 @@ import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelCryptoShredSupport;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelEvidenceObjectStore;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelIntakeSignature;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelObjectPurgeExecutor;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelSinkExecutor;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcTableActionParam;
 import vip.xiaonuo.lh.modular.lifecycle.result.GovLcRunVo;
@@ -94,9 +101,11 @@ public class GovDelServiceImpl implements GovDelService {
     private static final Map<String, Integer> CARRIER_ORDER = Map.ofEntries(
             Map.entry("source", 10),
             Map.entry("iceberg", 20),
+            Map.entry("crypto", 25),
             Map.entry("ck", 30),
             Map.entry("sink", 40),
             Map.entry("export", 50),
+            Map.entry("object", 55),
             Map.entry("platform", 60),
             Map.entry("ai", 60),
             Map.entry("meta", 70),
@@ -108,9 +117,11 @@ public class GovDelServiceImpl implements GovDelService {
     private static final Map<String, String> CARRIER_LABEL = Map.ofEntries(
             Map.entry("source", "源库"),
             Map.entry("iceberg", "湖表 Iceberg"),
+            Map.entry("crypto", "信封加密 / 删钥"),
             Map.entry("ck", "ClickHouse"),
             Map.entry("sink", "回流副本"),
             Map.entry("export", "出湖副本"),
+            Map.entry("object", "非结构化对象"),
             Map.entry("platform", "平台留存"),
             Map.entry("ai", "AI / 知识库"),
             Map.entry("meta", "元数据样例"),
@@ -127,6 +138,8 @@ public class GovDelServiceImpl implements GovDelService {
             Map.entry("sink_delete", "下游按主键删除"),
             Map.entry("notify", "发删除请求并取回执"),
             Map.entry("purge", "物理清除"),
+            Map.entry("shred", "删钥即擦除（crypto-shredding）"),
+            Map.entry("object_purge", "对象前缀擦除"),
             Map.entry("register", "登记到期销毁"),
             Map.entry("retention", "保留期到期自然消亡"),
             Map.entry("manual", "人工处理")
@@ -187,7 +200,11 @@ public class GovDelServiceImpl implements GovDelService {
     @Resource
     private GovDelEvidenceObjectStore evidenceObjectStore;
     @Resource
+    private GovDelObjectPurgeExecutor objectPurgeExecutor;
+    @Resource
     private GovDelProcessingGate processingGate;
+    @Resource
+    private GovDelSubjectDekMapper subjectDekMapper;
     @Resource
     private LhProperties lhProperties;
     @Resource
@@ -652,6 +669,8 @@ public class GovDelServiceImpl implements GovDelService {
         int icebergRunning = 0;
         int ckRunning = 0;
         int sinkRunning = 0;
+        int cryptoDone = 0;
+        int objectDone = 0;
         int failed = 0;
         int pending = 0;
         for (GovDelTarget t : targets) {
@@ -673,6 +692,20 @@ public class GovDelServiceImpl implements GovDelService {
                 case "source", "sink" -> {
                     if (executeSink(req, t, execKey)) {
                         sinkRunning++;
+                    } else {
+                        failed++;
+                    }
+                }
+                case "crypto" -> {
+                    if (executeCryptoShred(req, t, execKey)) {
+                        cryptoDone++;
+                    } else {
+                        failed++;
+                    }
+                }
+                case "object" -> {
+                    if (executeObjectPurge(req, t, execKey)) {
+                        objectDone++;
                     } else {
                         failed++;
                     }
@@ -710,12 +743,14 @@ public class GovDelServiceImpl implements GovDelService {
 
         int engineRunning = icebergRunning + ckRunning + sinkRunning;
         req.setExecutedAt(new Date());
-        req.setStatus(failed > 0 && engineRunning == 0 ? "partial_failed" : "verifying");
+        req.setStatus(failed > 0 && engineRunning == 0 && cryptoDone == 0 && objectDone == 0
+                ? "partial_failed" : "verifying");
         req.setRevision(nvlInt(req.getRevision()) + 1);
         req.setUpdateTime(new Date());
         requestMapper.updateById(req);
         logExec(req, null, "exec.finish", failed > 0 ? "warn" : "success", execKey, null,
                 "已提交待验证 Iceberg=" + icebergRunning + " CK=" + ckRunning + " sink=" + sinkRunning
+                        + " crypto=" + cryptoDone + " object=" + objectDone
                         + "，回执/登记等待 " + pending + " 项，失败 " + failed
                         + " 项；未反查为 0 的载体不标完成");
         addEvidence(req, "execute", "sa_compliance", JSONUtil.toJsonStr(sinkExecutor.saSummary()));
@@ -874,6 +909,110 @@ public class GovDelServiceImpl implements GovDelService {
             targetMapper.updateById(t);
             logExec(req, t, "sink.delete", "failed", execKey, null,
                     StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "sink 删除失败"), 500));
+            return false;
+        }
+    }
+
+    /**
+     * crypto-shredding：删除 Vault 中该主体相关 DEK；密文不可再解即完成擦除。
+     */
+    private boolean executeCryptoShred(GovDelRequest req, GovDelTarget t, String execKey) {
+        try {
+            if (StrUtil.isBlank(req.getSubjectIdHash())) {
+                throw new IllegalArgumentException("主体摘要缺失，拒绝删钥");
+            }
+            String tableFqn = GovDelCryptoShredSupport.stripColumnFromFqn(t.getObjectFqn());
+            String column = GovDelCryptoShredSupport.resolveColumn(t.getObjectFqn(), subjectColumn(t));
+            List<GovDelSubjectDek> deks = subjectDekMapper.selectList(new QueryWrapper<GovDelSubjectDek>().lambda()
+                    .eq(GovDelSubjectDek::getSubjectIdHash, req.getSubjectIdHash())
+                    .eq(GovDelSubjectDek::getStatus, "active")
+                    .eq(GovDelSubjectDek::getDeleteFlag, NOT_DELETE)
+                    .and(w -> w.eq(GovDelSubjectDek::getObjectFqn, tableFqn)
+                            .or().eq(GovDelSubjectDek::getObjectFqn, t.getObjectFqn())
+                            .or().eq(GovDelSubjectDek::getColumnName, column)));
+            if (deks.isEmpty()) {
+                // 兼容：按 vault 约定路径直接删（未走登记表的联调）
+                String fallbackPath = GovDelCryptoShredSupport.dekVaultPath(
+                        req.getSubjectIdHash(), tableFqn, column);
+                if (vaultClient.exists(fallbackPath)) {
+                    vaultClient.delete(fallbackPath);
+                    t.setStatus("done");
+                    t.setRowsVerified(0L);
+                    t.setEngineRef("vault:" + fallbackPath);
+                    t.setUpdateTime(new Date());
+                    targetMapper.updateById(t);
+                    logExec(req, t, "crypto.shred", "success", execKey, fallbackPath,
+                            "按约定路径删钥（无 DEK 登记行）");
+                    addEvidence(req, "crypto", "删钥 " + t.getObjectFqn(),
+                            JSONUtil.toJsonStr(Map.of("vaultPath", fallbackPath, "mode", "fallback")));
+                    return true;
+                }
+                throw new IllegalStateException("无 active DEK 可删：" + tableFqn + "#" + column);
+            }
+            Date now = new Date();
+            int shredded = 0;
+            List<String> paths = new ArrayList<>();
+            for (GovDelSubjectDek dek : deks) {
+                if (StrUtil.isNotBlank(dek.getVaultPath()) && vaultClient.exists(dek.getVaultPath())) {
+                    vaultClient.delete(dek.getVaultPath());
+                }
+                dek.setStatus("shredded");
+                dek.setShredReqId(req.getId());
+                dek.setShreddedAt(now);
+                dek.setRevision(nvlInt(dek.getRevision()) + 1);
+                dek.setUpdateTime(now);
+                subjectDekMapper.updateById(dek);
+                shredded++;
+                paths.add(dek.getVaultPath());
+            }
+            t.setStatus("done");
+            t.setRowsVerified(0L);
+            t.setEngineRef("shredded:" + shredded);
+            t.setUpdateTime(now);
+            targetMapper.updateById(t);
+            logExec(req, t, "crypto.shred", "success", execKey, t.getEngineRef(),
+                    "已删钥 " + shredded + " 把：" + String.join(",", paths));
+            addEvidence(req, "crypto", "crypto-shredding " + t.getObjectFqn(),
+                    JSONUtil.toJsonStr(Map.of("shredded", shredded, "vaultPaths", paths)));
+            return true;
+        } catch (Exception e) {
+            t.setStatus("failed");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "crypto.shred", "failed", execKey, null,
+                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "删钥失败"), 500));
+            return false;
+        }
+    }
+
+    /**
+     * 非结构化：按主体前缀 List+RemoveObject。
+     */
+    private boolean executeObjectPurge(GovDelRequest req, GovDelTarget t, String execKey) {
+        try {
+            if (StrUtil.isBlank(req.getSubjectIdHash())) {
+                throw new IllegalArgumentException("主体摘要缺失，拒绝对象擦除");
+            }
+            GovDelObjectPurgeExecutor.PurgeResult r = objectPurgeExecutor.purge(
+                    t.getObjectFqn(), req.getSubjectIdHash());
+            if (!r.ok()) {
+                throw new IllegalStateException(StrUtil.blankToDefault(r.message(), "对象擦除失败"));
+            }
+            t.setStatus("done");
+            t.setRowsVerified(0L);
+            t.setEngineRef(StrUtil.blankToDefault(r.engineRef(), "object:purged"));
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "object.purge", "success", execKey, r.engineRef(), r.message());
+            addEvidence(req, "object", "非结构化擦除 " + t.getObjectFqn(),
+                    JSONUtil.toJsonStr(r.toMap()));
+            return true;
+        } catch (Exception e) {
+            t.setStatus("failed");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "object.purge", "failed", execKey, null,
+                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "对象擦除失败"), 500));
             return false;
         }
     }
@@ -1259,6 +1398,38 @@ public class GovDelServiceImpl implements GovDelService {
             } else if (("sink".equals(t.getCarrier()) || "source".equals(t.getCarrier()))
                     && "running".equals(status)) {
                 status = advanceSink(req, t);
+            } else if ("object".equals(t.getCarrier()) && "done".equals(status)) {
+                long left = objectPurgeExecutor.countRemaining(t.getObjectFqn(), req.getSubjectIdHash());
+                if (left > 0) {
+                    t.setStatus("failed");
+                    t.setRowsVerified(left);
+                    t.setUpdateTime(new Date());
+                    targetMapper.updateById(t);
+                    logExec(req, t, "object.verify", "failed", null, t.getEngineRef(),
+                            "残留对象 " + left + " 个");
+                    status = "failed";
+                } else if (left == 0) {
+                    t.setRowsVerified(0L);
+                    t.setUpdateTime(new Date());
+                    targetMapper.updateById(t);
+                }
+                // left < 0：引擎不可达 soft-fail，保留 done
+            } else if ("crypto".equals(t.getCarrier()) && "done".equals(status)) {
+                // 删钥后 Vault 路径应不存在；若仍存在则失败
+                String tableFqn = GovDelCryptoShredSupport.stripColumnFromFqn(t.getObjectFqn());
+                String column = GovDelCryptoShredSupport.resolveColumn(t.getObjectFqn(), subjectColumn(t));
+                String path = GovDelCryptoShredSupport.dekVaultPath(req.getSubjectIdHash(), tableFqn, column);
+                if (vaultClient.exists(path)) {
+                    t.setStatus("failed");
+                    t.setUpdateTime(new Date());
+                    targetMapper.updateById(t);
+                    logExec(req, t, "crypto.verify", "failed", null, path, "Vault DEK 仍存在");
+                    status = "failed";
+                } else {
+                    t.setRowsVerified(0L);
+                    t.setUpdateTime(new Date());
+                    targetMapper.updateById(t);
+                }
             }
             switch (status) {
                 case "done" -> {
@@ -1846,6 +2017,234 @@ public class GovDelServiceImpl implements GovDelService {
         return processingGate.exportCheck(param.getExportTable());
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> intake(GovDelIntakeParam param, String signatureHeader, String timestampHeader) {
+        String secret = resolveIntakeWebhookSecret();
+        String canon = GovDelIntakeSignature.canonical(
+                param.getSubjectType(), param.getSubjectId(),
+                param.getSourceSystem(), param.getSourceRef(), param.getReqType());
+        if (!GovDelIntakeSignature.verify(secret, canon, signatureHeader)) {
+            throw new CommonException("intake 签名校验失败（检查 X-Lh-Intake-Signature）");
+        }
+        LhProperties.Compliance cfg = lhProperties.getCompliance();
+        long skew = cfg != null ? cfg.getIntakeSkewSeconds() : GovDelIntakeSignature.DEFAULT_SKEW_SECONDS;
+        if (skew > 0 && !GovDelIntakeSignature.timestampOk(
+                timestampHeader, System.currentTimeMillis() / 1000L, skew)) {
+            throw new CommonException("intake 时间戳超窗或非法（X-Lh-Intake-Timestamp）");
+        }
+
+        String sourceSystem = StrUtil.blankToDefault(param.getSourceSystem(), "external").trim();
+        String sourceRef = StrUtil.trim(param.getSourceRef());
+        if (StrUtil.isNotBlank(sourceRef)) {
+            GovDelRequest existing = requestMapper.selectOne(new QueryWrapper<GovDelRequest>().lambda()
+                    .eq(GovDelRequest::getSourceSystem, sourceSystem)
+                    .eq(GovDelRequest::getSourceRef, sourceRef)
+                    .eq(GovDelRequest::getDeleteFlag, NOT_DELETE)
+                    .orderByDesc(GovDelRequest::getCreateTime)
+                    .last("LIMIT 1"));
+            if (existing != null) {
+                Map<String, Object> replay = new LinkedHashMap<>();
+                replay.put("idempotent", true);
+                replay.put("reqId", existing.getId());
+                replay.put("reqNo", existing.getReqNo());
+                replay.put("status", existing.getStatus());
+                replay.put("subjectMasked", existing.getSubjectMasked());
+                return replay;
+            }
+        }
+
+        GovDelRequestCreateParam create = new GovDelRequestCreateParam();
+        create.setSubjectId(param.getSubjectId());
+        create.setSubjectType(param.getSubjectType());
+        create.setReqType(param.getReqType());
+        create.setLegalBasis(StrUtil.blankToDefault(param.getLegalBasis(), "外部 DSR webhook 送单"));
+        create.setSourceSystem(sourceSystem);
+        create.setSourceRef(sourceRef);
+        create.setWs(param.getWs());
+        String remark = StrUtil.blankToDefault(param.getRemark(), "");
+        if (StrUtil.isNotBlank(param.getExternalId())) {
+            remark = (StrUtil.isBlank(remark) ? "" : remark + " · ") + "externalId=" + param.getExternalId();
+        }
+        create.setRemark(StrUtil.blankToDefault(remark, "intake"));
+        create.setAutoAssess(param.getAutoAssess() == null || Boolean.TRUE.equals(param.getAutoAssess()));
+        GovDelRequestVo vo = create(create);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("idempotent", false);
+        out.put("reqId", vo.getId());
+        out.put("reqNo", vo.getReqNo());
+        out.put("status", vo.getStatus());
+        out.put("subjectMasked", vo.getSubjectMasked());
+        out.put("sourceSystem", sourceSystem);
+        out.put("sourceRef", sourceRef);
+        return out;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> registerDek(GovDelDekRegisterParam param) {
+        String workspace = wsOrDefault(param.getWs());
+        String subjectType = StrUtil.blankToDefault(param.getSubjectType(), "user").trim().toLowerCase(Locale.ROOT);
+        String plain = StrUtil.trim(param.getSubjectId());
+        String subjectHash = hashSubject(subjectType, plain);
+        String column = GovDelCryptoShredSupport.resolveColumn(param.getObjectFqn(), param.getColumnName());
+        String tableFqn = GovDelCryptoShredSupport.stripColumnFromFqn(param.getObjectFqn());
+        if (StrUtil.isBlank(tableFqn)) {
+            throw new CommonException("objectFqn 不能为空");
+        }
+
+        GovDelSubjectDek existing = subjectDekMapper.selectOne(new QueryWrapper<GovDelSubjectDek>().lambda()
+                .eq(GovDelSubjectDek::getWs, workspace)
+                .eq(GovDelSubjectDek::getSubjectIdHash, subjectHash)
+                .eq(GovDelSubjectDek::getObjectFqn, tableFqn)
+                .eq(GovDelSubjectDek::getColumnName, column)
+                .eq(GovDelSubjectDek::getDeleteFlag, NOT_DELETE)
+                .last("LIMIT 1"));
+        if (existing != null && "active".equals(existing.getStatus())
+                && vaultClient.exists(existing.getVaultPath())) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("id", existing.getId());
+            out.put("status", existing.getStatus());
+            out.put("vaultPath", existing.getVaultPath());
+            out.put("dekFingerprint", existing.getDekFingerprint());
+            out.put("reused", true);
+            return out;
+        }
+
+        String kekPath = cfgCryptoKekPath();
+        String kek = vaultClient.getString(kekPath, "kekMaterial");
+        if (StrUtil.isBlank(kek)) {
+            Map<String, Object> seed = new LinkedHashMap<>();
+            LhProperties.Compliance cfg = lhProperties.getCompliance();
+            String bootstrap = cfg != null && StrUtil.isNotBlank(cfg.getCryptoKekMaterial())
+                    ? cfg.getCryptoKekMaterial().trim()
+                    : "lh-compliance-dev-crypto-kek";
+            seed.put("kekMaterial", bootstrap);
+            vaultClient.writeIfAbsent(kekPath, seed);
+            kek = vaultClient.getString(kekPath, "kekMaterial");
+        }
+        if (StrUtil.isBlank(kek)) {
+            throw new CommonException("crypto KEK 未配置：" + kekPath);
+        }
+
+        byte[] dek = GovDelCryptoShredSupport.generateDek();
+        String wrapped = GovDelCryptoShredSupport.wrapDek(dek, kek);
+        String fingerprint = GovDelCryptoShredSupport.fingerprint(wrapped);
+        String vaultPath = GovDelCryptoShredSupport.dekVaultPath(subjectHash, tableFqn, column);
+
+        Map<String, Object> secret = new LinkedHashMap<>();
+        secret.put("wrappedDek", wrapped);
+        secret.put("algorithm", "AES-256");
+        secret.put("kekRef", kekPath);
+        secret.put("objectFqn", tableFqn);
+        secret.put("columnName", column);
+        secret.put("subjectIdHash", subjectHash);
+        vaultClient.write(vaultPath, secret);
+
+        Date now = new Date();
+        GovDelSubjectDek row;
+        if (existing != null) {
+            row = existing;
+            row.setRevision(nvlInt(row.getRevision()) + 1);
+        } else {
+            row = new GovDelSubjectDek();
+            row.setId(IdUtil.getSnowflakeNextIdStr());
+            row.setRevision(1);
+            row.setDeleteFlag(NOT_DELETE);
+            row.setCreateTime(now);
+        }
+        row.setStatus("active");
+        row.setWs(workspace);
+        row.setRemark(param.getRemark());
+        row.setSubjectType(subjectType);
+        row.setSubjectIdHash(subjectHash);
+        row.setObjectFqn(tableFqn);
+        row.setColumnName(column);
+        row.setVaultPath(vaultPath);
+        row.setKekRef(kekPath);
+        row.setDekFingerprint(fingerprint);
+        row.setShredReqId(null);
+        row.setShreddedAt(null);
+        row.setUpdateTime(now);
+        if (existing != null) {
+            subjectDekMapper.updateById(row);
+        } else {
+            subjectDekMapper.insert(row);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", row.getId());
+        out.put("status", row.getStatus());
+        out.put("objectFqn", tableFqn);
+        out.put("columnName", column);
+        out.put("subjectIdHash", subjectHash);
+        out.put("vaultPath", vaultPath);
+        out.put("kekRef", kekPath);
+        out.put("dekFingerprint", fingerprint);
+        out.put("reused", false);
+        return out;
+    }
+
+    @Override
+    public List<Map<String, Object>> listDeks(String ws, String subjectIdHash, String status) {
+        String workspace = wsOrDefault(ws);
+        List<GovDelSubjectDek> rows = subjectDekMapper.selectList(new QueryWrapper<GovDelSubjectDek>().lambda()
+                .eq(GovDelSubjectDek::getWs, workspace)
+                .eq(StrUtil.isNotBlank(subjectIdHash), GovDelSubjectDek::getSubjectIdHash, StrUtil.trim(subjectIdHash))
+                .eq(StrUtil.isNotBlank(status), GovDelSubjectDek::getStatus, StrUtil.trim(status))
+                .eq(GovDelSubjectDek::getDeleteFlag, NOT_DELETE)
+                .orderByDesc(GovDelSubjectDek::getCreateTime)
+                .last("LIMIT 200"));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (GovDelSubjectDek d : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", d.getId());
+            m.put("status", d.getStatus());
+            m.put("subjectType", d.getSubjectType());
+            m.put("subjectIdHash", d.getSubjectIdHash());
+            m.put("objectFqn", d.getObjectFqn());
+            m.put("columnName", d.getColumnName());
+            m.put("vaultPath", d.getVaultPath());
+            m.put("kekRef", d.getKekRef());
+            m.put("dekFingerprint", d.getDekFingerprint());
+            m.put("shredReqId", d.getShredReqId());
+            m.put("shreddedAt", d.getShreddedAt());
+            m.put("vaultAlive", vaultClient.exists(d.getVaultPath()));
+            out.add(m);
+        }
+        return out;
+    }
+
+    private String resolveIntakeWebhookSecret() {
+        LhProperties.Compliance cfg = lhProperties.getCompliance();
+        String path = cfg != null && StrUtil.isNotBlank(cfg.getIntakeWebhookVaultPath())
+                ? cfg.getIntakeWebhookVaultPath()
+                : LhVaultPaths.COMPLIANCE_INTAKE_WEBHOOK;
+        String fromVault = vaultClient.getString(path, "webhookSecret");
+        if (StrUtil.isNotBlank(fromVault)) {
+            return fromVault.trim();
+        }
+        String bootstrap = cfg != null && StrUtil.isNotBlank(cfg.getIntakeWebhookSecret())
+                ? cfg.getIntakeWebhookSecret().trim()
+                : "lh-compliance-dev-intake-secret";
+        Map<String, Object> seed = new LinkedHashMap<>();
+        seed.put("webhookSecret", bootstrap);
+        vaultClient.writeIfAbsent(path, seed);
+        String again = vaultClient.getString(path, "webhookSecret");
+        if (StrUtil.isBlank(again)) {
+            throw new CommonException("intake webhook secret 未配置：" + path);
+        }
+        return again.trim();
+    }
+
+    private String cfgCryptoKekPath() {
+        LhProperties.Compliance cfg = lhProperties.getCompliance();
+        return cfg != null && StrUtil.isNotBlank(cfg.getCryptoKekVaultPath())
+                ? cfg.getCryptoKekVaultPath()
+                : LhVaultPaths.COMPLIANCE_CRYPTO_KEK;
+    }
+
     // ───────────────────────────── 内部 ─────────────────────────────
 
     /** 按主体索引展开计划，再经 lineage.expand（impact 下游）补表；已执行/限制处理/人工补充的项保留。 */
@@ -2411,6 +2810,8 @@ public class GovDelServiceImpl implements GovDelService {
             case "export" -> "notify";
             case "backup" -> "register";
             case "kafka" -> "retention";
+            case "crypto" -> "shred";
+            case "object" -> "object_purge";
             case "platform", "ai", "meta", "log" -> "purge";
             default -> "cow";
         };

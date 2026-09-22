@@ -10,15 +10,18 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelDekRegisterParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelIntakeParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
@@ -28,6 +31,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelSubjectMapUpsertParam;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelRequestVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
 import vip.xiaonuo.lh.modular.compliance.service.GovDelService;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelIntakeSignature;
 
 import java.util.List;
 import java.util.Map;
@@ -200,5 +204,31 @@ public class GovDelController {
     @PostMapping({"/lh/compliance/gate/export-check", "/api/governance/compliance/gate/export-check"})
     public CommonResult<Map<String, Object>> exportGateCheck(@RequestBody @Valid GovDelExportGateParam param) {
         return CommonResult.data(govDelService.exportGateCheck(param));
+    }
+
+    @Operation(summary = "J3 外部 DSR webhook 送单（签名校验；sourceSystem+sourceRef 幂等）")
+    @CommonLog("合规删除外部送单")
+    @PostMapping({"/lh/compliance/intake", "/api/governance/compliance/intake"})
+    public CommonResult<Map<String, Object>> intake(
+            @RequestBody @Valid GovDelIntakeParam param,
+            @RequestHeader(value = GovDelIntakeSignature.HEADER, required = false) String signature,
+            @RequestHeader(value = GovDelIntakeSignature.HEADER_TS, required = false) String timestamp) {
+        return CommonResult.data(govDelService.intake(param, signature, timestamp));
+    }
+
+    @Operation(summary = "J3 登记每主体 PII 列 DEK（crypto-shredding 前置；密钥进 Vault）")
+    @CommonLog("合规删除登记 DEK")
+    @PutMapping({"/lh/compliance/crypto/deks", "/api/governance/compliance/crypto/deks"})
+    public CommonResult<Map<String, Object>> registerDek(@RequestBody @Valid GovDelDekRegisterParam param) {
+        return CommonResult.data(govDelService.registerDek(param));
+    }
+
+    @Operation(summary = "J3 DEK 登记列表（无密钥材料）")
+    @GetMapping({"/lh/compliance/crypto/deks", "/api/governance/compliance/crypto/deks"})
+    public CommonResult<List<Map<String, Object>>> listDeks(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String subjectIdHash,
+            @RequestParam(required = false) String status) {
+        return CommonResult.data(govDelService.listDeks(ws, subjectIdHash, status));
     }
 }

@@ -85,4 +85,16 @@ public final class LhVaultPaths {
     public static String complianceSubject(String reqNo) {
         return "lh/compliance/subject/" + reqNo;
     }
+
+    /**
+     * crypto-shredding KEK（平台级信封加密主密钥）。
+     * 字段约定：{@code kekMaterial}
+     */
+    public static final String COMPLIANCE_CRYPTO_KEK = "platform/compliance/crypto-kek";
+
+    /**
+     * 外部 DSR webhook 签名密钥。
+     * 字段约定：{@code webhookSecret}
+     */
+    public static final String COMPLIANCE_INTAKE_WEBHOOK = "platform/compliance/intake-webhook";
 }

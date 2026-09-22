@@ -174,6 +174,10 @@ public class GlobalConfigure implements WebMvcConfigurer {
             /* 文件下载 */
             "/dev/file/download",
 
+            /* 合规外部 DSR webhook（签名校验，见 GovDelIntakeSignature） */
+            "/lh/compliance/intake",
+            "/api/governance/compliance/intake",
+
             /* 可视化大屏插件放行 */
             "/screen/project/releaseDetail",
             "/screen/project/verifyAccessPassword",

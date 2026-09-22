@@ -520,6 +520,16 @@ public class LhProperties {
         private String saPassword = "";
         /** Gravitino 主体名（审批发放写权限后登记）；身份名固定 sa_compliance */
         private String saGravitinoUser = "sa_compliance";
+        /** crypto-shredding KEK Vault 路径 */
+        private String cryptoKekVaultPath = LhVaultPaths.COMPLIANCE_CRYPTO_KEK;
+        /** bootstrap：KEK 材料（生产导入后应清空） */
+        private String cryptoKekMaterial = "lh-compliance-dev-crypto-kek";
+        /** 外部 DSR intake webhook 签名密钥 Vault 路径 */
+        private String intakeWebhookVaultPath = LhVaultPaths.COMPLIANCE_INTAKE_WEBHOOK;
+        /** bootstrap：webhook HMAC secret（生产导入后应清空） */
+        private String intakeWebhookSecret = "lh-compliance-dev-intake-secret";
+        /** intake 时间戳允许偏移（秒）；0=不校验时间戳 */
+        private long intakeSkewSeconds = 300L;
     }
 
     /**

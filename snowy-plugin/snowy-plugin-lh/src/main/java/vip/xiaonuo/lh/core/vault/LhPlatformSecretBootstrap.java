@@ -161,6 +161,26 @@ public class LhPlatformSecretBootstrap implements ApplicationRunner {
             }
         }
 
+        if (compliance != null && StrUtil.isNotBlank(compliance.getCryptoKekVaultPath())
+                && StrUtil.isNotBlank(compliance.getCryptoKekMaterial())) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("kekMaterial", compliance.getCryptoKekMaterial().trim());
+            if (vaultClient.writeIfAbsent(compliance.getCryptoKekVaultPath(), m)) {
+                n++;
+                log.info("[LhVault] seeded {}", compliance.getCryptoKekVaultPath());
+            }
+        }
+
+        if (compliance != null && StrUtil.isNotBlank(compliance.getIntakeWebhookVaultPath())
+                && StrUtil.isNotBlank(compliance.getIntakeWebhookSecret())) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("webhookSecret", compliance.getIntakeWebhookSecret().trim());
+            if (vaultClient.writeIfAbsent(compliance.getIntakeWebhookVaultPath(), m)) {
+                n++;
+                log.info("[LhVault] seeded {}", compliance.getIntakeWebhookVaultPath());
+            }
+        }
+
         log.info("[LhVault] platform secret bootstrap done, newly seeded={}", n);
     }
 
