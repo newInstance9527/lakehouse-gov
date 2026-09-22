@@ -89,7 +89,13 @@ public class GovAiModelController {
         return CommonResult.data(govAiModelService.patrol(ws));
     }
 
-    @Operation(summary = "启停模型")
+    @Operation(summary = "LiteLLM 同步探针（D3；未启用则 skipped/degraded）")
+    @GetMapping("/lh/ai/models/gateway/probe")
+    public CommonResult<Map<String, Object>> gatewayProbe() {
+        return CommonResult.data(govAiModelService.gatewayProbe());
+    }
+
+    @Operation(summary = "启停模型（联动 LiteLLM 别名；网关不可达软降级）")
     @CommonLog("启停AI模型")
     @PostMapping("/lh/ai/models/{id}/enable")
     public CommonResult<GovAiModelVo> enable(

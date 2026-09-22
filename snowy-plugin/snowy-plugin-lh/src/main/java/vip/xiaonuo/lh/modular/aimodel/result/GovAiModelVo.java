@@ -41,4 +41,10 @@ public class GovAiModelVo {
     private String ws;
     private Integer revision;
     private Date updateTime;
+    /** LiteLLM 别名 lh/{id}（D3） */
+    private String litellmAlias;
+    /** 最近一次同步结果摘要（写操作后填充；列表可空） */
+    private Boolean litellmSyncOk;
+    private Boolean litellmSyncSkipped;
+    private String litellmSyncMessage;
 }

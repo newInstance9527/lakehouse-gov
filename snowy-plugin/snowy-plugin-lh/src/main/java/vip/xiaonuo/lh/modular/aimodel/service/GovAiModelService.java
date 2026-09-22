@@ -39,6 +39,12 @@ public interface GovAiModelService {
      */
     Map<String, Object> patrol(String ws);
 
+    /**
+     * LiteLLM 同步探针（D3）：enabled / reachable / syncCapable / mode。
+     * 现网未起网关时 mode=skipped|degraded，不阻断门户。
+     */
+    Map<String, Object> gatewayProbe();
+
     List<GovAiRouteVo> listRoutes(String ws);
 
     List<GovAiRouteVo> saveRoutes(List<GovAiRouteUpsertParam> params);

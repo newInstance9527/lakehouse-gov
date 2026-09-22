@@ -94,6 +94,12 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         out.put("monthCost", cost.setScale(2, RoundingMode.HALF_UP));
         out.put("avgLatencyMs", Math.round(avgLatency));
         out.put("ws", workspace);
+        Map<String, Object> gw = liteLlmClient.probeSync();
+        out.put("litellmEnabled", Boolean.TRUE.equals(gw.get("enabled")));
+        out.put("litellmReachable", Boolean.TRUE.equals(gw.get("reachable")));
+        out.put("litellmSyncCapable", Boolean.TRUE.equals(gw.get("syncCapable")));
+        out.put("litellmSyncMode", gw.get("mode"));
+        out.put("litellmAliasPrefix", gw.get("aliasPrefix"));
         return out;
     }
 
@@ -169,7 +175,9 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         row.setKeyExpiresAt(param.getKeyExpiresAt());
         row.setDeleteFlag(NOT_DELETE);
         modelMapper.insert(row);
-        return toVo(row);
+        GovAiModelVo vo = toVo(row);
+        attachSync(vo, syncToLiteLlm(row, true));
+        return vo;
     }
 
     @Override
@@ -225,7 +233,9 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         }
         row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
         modelMapper.updateById(row);
-        return toVo(row);
+        GovAiModelVo vo = toVo(row);
+        attachSync(vo, syncToLiteLlm(row, Boolean.TRUE.equals(row.getEnabled())));
+        return vo;
     }
 
     @Override
@@ -287,14 +297,23 @@ public class GovAiModelServiceImpl implements GovAiModelService {
 
         boolean ok;
         String message;
+        String callModel = LhLiteLlmClient.aliasOf(row.getId());
         if ("embed".equalsIgnoreCase(row.getKind())) {
-            List<float[]> vecs = liteLlmClient.embed(row.getModelName(), List.of("ping"));
+            List<float[]> vecs = liteLlmClient.embed(callModel, List.of("ping"));
+            if (vecs == null || vecs.isEmpty()) {
+                vecs = liteLlmClient.embed(row.getModelName(), List.of("ping"));
+                callModel = row.getModelName();
+            }
             ok = vecs != null && !vecs.isEmpty();
-            message = ok ? "Embedding 连通成功" : "Embedding 调用失败或空响应";
+            message = ok ? "Embedding 连通成功（" + callModel + "）" : "Embedding 调用失败或空响应";
         } else {
-            String reply = liteLlmClient.chatSimple(row.getModelName(), "ping", "reply ok");
+            String reply = liteLlmClient.chatSimple(callModel, "ping", "reply ok");
+            if (StrUtil.isBlank(reply)) {
+                reply = liteLlmClient.chatSimple(row.getModelName(), "ping", "reply ok");
+                callModel = row.getModelName();
+            }
             ok = StrUtil.isNotBlank(reply);
-            message = ok ? "连通成功" : "调用失败或空响应";
+            message = ok ? "连通成功（" + callModel + "）" : "调用失败或空响应";
         }
         if (!vaultOk) {
             ok = false;
@@ -372,6 +391,11 @@ public class GovAiModelServiceImpl implements GovAiModelService {
     }
 
     @Override
+    public Map<String, Object> gatewayProbe() {
+        return liteLlmClient.probeSync();
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public GovAiModelVo enable(String id, GovAiModelEnableParam param) {
         GovAiModel row = requireModel(id);
@@ -383,7 +407,10 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             row.setStatus("ok");
         }
         modelMapper.updateById(row);
-        return toVo(row);
+        GovAiModelVo vo = toVo(row);
+        attachSync(vo, liteLlmClient.setAliasEnabled(
+                row.getId(), enabled, row.getVendor(), row.getModelName(), row.getBaseUrl(), row.getKind()));
+        return vo;
     }
 
     @Override
@@ -439,6 +466,27 @@ public class GovAiModelServiceImpl implements GovAiModelService {
                 routeMapper.updateById(row);
             }
             out.add(toRouteVo(row, nameMap));
+        }
+        // D3：主/备 → LiteLLM fallbacks（软降级）
+        try {
+            List<Map<String, List<String>>> fallbacks = new ArrayList<>();
+            for (GovAiRouteVo r : out) {
+                if (r == null || !Boolean.TRUE.equals(r.getEnabled())) {
+                    continue;
+                }
+                if (StrUtil.isBlank(r.getPrimaryModelId()) || StrUtil.isBlank(r.getFallbackModelId())) {
+                    continue;
+                }
+                Map<String, List<String>> one = new LinkedHashMap<>();
+                one.put(LhLiteLlmClient.aliasOf(r.getPrimaryModelId()),
+                        List.of(LhLiteLlmClient.aliasOf(r.getFallbackModelId())));
+                fallbacks.add(one);
+            }
+            if (!fallbacks.isEmpty()) {
+                liteLlmClient.syncFallbacks(fallbacks);
+            }
+        } catch (Exception ignored) {
+            // 门户路由已保存
         }
         return out;
     }
@@ -623,7 +671,28 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         vo.setWs(row.getWs());
         vo.setRevision(row.getRevision());
         vo.setUpdateTime(row.getUpdateTime());
+        vo.setLitellmAlias(LhLiteLlmClient.aliasOf(row.getId()));
         return vo;
+    }
+
+    private Map<String, Object> syncToLiteLlm(GovAiModel row, boolean enabled) {
+        return liteLlmClient.upsertAlias(
+                row.getId(), row.getVendor(), row.getModelName(), row.getBaseUrl(), row.getKind(), enabled);
+    }
+
+    private static void attachSync(GovAiModelVo vo, Map<String, Object> sync) {
+        if (vo == null || sync == null) {
+            return;
+        }
+        if (sync.get("alias") != null) {
+            vo.setLitellmAlias(String.valueOf(sync.get("alias")));
+        }
+        vo.setLitellmSyncOk(Boolean.TRUE.equals(sync.get("ok")));
+        vo.setLitellmSyncSkipped(Boolean.TRUE.equals(sync.get("skipped")));
+        Object msg = sync.get("message");
+        if (msg != null) {
+            vo.setLitellmSyncMessage(String.valueOf(msg));
+        }
     }
 
     private GovAiRouteVo toRouteVo(GovAiRoute row, Map<String, String> nameMap) {
