@@ -49,6 +49,12 @@ public interface GovLcService {
 
     Page<GovLcRunVo> pageRuns(GovLcRunPageParam param);
 
-    /** 按 DS processInstanceId 回写 gov_lc_run 状态 */
+    /** 按 DS processInstanceId 回写 gov_lc_run 状态（门户主动拉） */
     GovLcRunVo syncRun(String runId);
+
+    /**
+     * DS/Worker 推送回调回写（J6）。
+     * body: runId, status?, dsState?, processInstanceId?, message?, steps?[{stepName,status}]
+     */
+    GovLcRunVo applyRunCallback(Map<String, Object> body);
 }

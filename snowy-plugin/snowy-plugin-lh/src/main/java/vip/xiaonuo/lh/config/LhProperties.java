@@ -410,6 +410,16 @@ public class LhProperties {
          * 分层 → 桶名（days-to-full 取该桶 capacity）。空则用内置 ODS→iceberg-ods 等默认。
          */
         private java.util.Map<String, String> layerBucketMap = new java.util.LinkedHashMap<>();
+        /**
+         * DS 推送回调：门户可达基址（例 http://gov:82）。空=不挂 notify 尾节点，仍接受已登录调用。
+         * 完整路径为 {@code {base}/lh/lifecycle/runs/callback}。
+         */
+        private String callbackBaseUrl = "";
+        /**
+         * DS/Worker 回调共享 token（头 {@code X-Lh-Lc-Callback-Token}）。
+         * 与 {@link #callbackBaseUrl} 同时非空时，投影尾节点 SHELL 自动 curl 回写。
+         */
+        private String callbackToken = "";
     }
 
     /**

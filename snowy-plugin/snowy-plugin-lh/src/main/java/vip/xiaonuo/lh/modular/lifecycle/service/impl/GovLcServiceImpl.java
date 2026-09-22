@@ -613,32 +613,137 @@ public class GovLcServiceImpl implements GovLcService {
         if (run == null || !NOT_DELETE.equals(run.getDeleteFlag())) {
             throw new CommonException("运行记录不存在：" + runId);
         }
+        String dsId = resolveProcessInstanceId(run);
+        if (StrUtil.isBlank(dsId)) {
+            if ("success".equals(run.getStatus())) {
+                try {
+                    adviceWriter.markDoneByRunId(run.getId());
+                } catch (Exception ignored) {
+                    /* ignore */
+                }
+            }
+            return toRunVo(run);
+        }
+        Map<String, Object> inst = dsLauncher.syncInstance(dsId);
+        String mapped = StrUtil.blankToDefault(String.valueOf(inst.get("mappedStatus")), run.getStatus());
+        Map<String, Object> extras = new LinkedHashMap<>();
+        extras.put("dsState", inst.get("state"));
+        extras.put("syncedAt", new Date().toString());
+        extras.put("syncSource", "pull");
+        if ("failed".equals(mapped)) {
+            extras.put("errorHint", StrUtil.blankToDefault(String.valueOf(inst.get("message")),
+                    "DS state=" + inst.get("state")));
+        }
+        return applyMappedStatus(run, mapped, extras, null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovLcRunVo applyRunCallback(Map<String, Object> body) {
+        if (body == null || StrUtil.isBlank(str(body.get("runId"), null))) {
+            throw new CommonException("runId 必填");
+        }
+        String runId = str(body.get("runId"), null).trim();
+        GovLcRun run = runMapper.selectById(runId);
+        if (run == null || !NOT_DELETE.equals(run.getDeleteFlag())) {
+            throw new CommonException("运行记录不存在：" + runId);
+        }
+        String instanceId = str(body.get("processInstanceId"), null);
+        if (StrUtil.isNotBlank(instanceId)) {
+            run.setDsTaskId(instanceId.trim());
+        }
+        // 可选步骤回写（日作业 gov_lc_job_step.step_name）
+        Object stepsObj = body.get("steps");
+        if (stepsObj instanceof List<?> list && StrUtil.isNotBlank(run.getBatchId())) {
+            Date now = new Date();
+            for (Object o : list) {
+                if (!(o instanceof Map<?, ?> raw)) {
+                    continue;
+                }
+                String stepName = str(raw.get("stepName"), str(raw.get("nodeKey"), null));
+                String st = str(raw.get("status"), null);
+                if (StrUtil.isBlank(stepName) || StrUtil.isBlank(st)) {
+                    continue;
+                }
+                List<GovLcJobStep> found = jobStepMapper.selectList(new QueryWrapper<GovLcJobStep>().lambda()
+                        .eq(GovLcJobStep::getBatchId, run.getBatchId())
+                        .eq(GovLcJobStep::getStepName, stepName.trim())
+                        .eq(GovLcJobStep::getDeleteFlag, NOT_DELETE));
+                for (GovLcJobStep s : found) {
+                    s.setStatus(st.trim().toLowerCase(Locale.ROOT));
+                    s.setUpdateTime(now);
+                    if (raw.get("message") != null) {
+                        s.setDetail(StrUtil.maxLength(String.valueOf(raw.get("message")), 500));
+                    }
+                    jobStepMapper.updateById(s);
+                }
+            }
+        }
+        String status = str(body.get("status"), null);
+        if (StrUtil.isBlank(status) && body.get("dsState") != null) {
+            status = GovLcDsLauncher.mapDsState(String.valueOf(body.get("dsState")));
+        }
+        if (StrUtil.isBlank(status)) {
+            // 无显式状态：有实例则回落主动拉；否则原样返回
+            String dsId = resolveProcessInstanceId(run);
+            if (StrUtil.isNotBlank(dsId)) {
+                return syncRun(runId);
+            }
+            return toRunVo(run);
+        }
+        String mapped = normalizeRunStatus(status);
+        Map<String, Object> extras = new LinkedHashMap<>();
+        extras.put("callbackAt", new Date().toString());
+        extras.put("syncSource", "push");
+        if (body.get("dsState") != null) {
+            extras.put("dsState", body.get("dsState"));
+        }
+        if (body.get("source") != null) {
+            extras.put("callbackSource", body.get("source"));
+        }
+        if ("failed".equals(mapped) && body.get("message") != null) {
+            extras.put("errorHint", String.valueOf(body.get("message")));
+        }
+        return applyMappedStatus(run, mapped, extras, str(body.get("message"), null));
+    }
+
+    private String resolveProcessInstanceId(GovLcRun run) {
         String dsId = run.getDsTaskId();
         if (StrUtil.isBlank(dsId) || dsId.startsWith("ds-stub-") || dsId.startsWith("wf:")) {
-            // wf: 仅有定义无实例时尝试用 metrics 内 processInstanceId
             Map<?, ?> metrics = StrUtil.isNotBlank(run.getMetricsJson())
                     ? JSONUtil.parseObj(run.getMetricsJson())
                     : Map.of();
             Object pid = metrics.get("processInstanceId");
             if (pid != null && StrUtil.isNotBlank(String.valueOf(pid))) {
-                dsId = String.valueOf(pid);
-            } else {
-                // 无 DS 实例可同步时，若已成功仍闭合建议
-                if ("success".equals(run.getStatus())) {
-                    try {
-                        adviceWriter.markDoneByRunId(run.getId());
-                    } catch (Exception ignored) {
-                        /* ignore */
-                    }
-                }
-                return toRunVo(run);
+                return String.valueOf(pid);
             }
+            return null;
         }
-        Map<String, Object> inst = dsLauncher.syncInstance(dsId);
-        String mapped = StrUtil.blankToDefault(String.valueOf(inst.get("mappedStatus")), run.getStatus());
+        return dsId;
+    }
+
+    private static String normalizeRunStatus(String status) {
+        String s = StrUtil.blankToDefault(status, "").trim().toLowerCase(Locale.ROOT);
+        return switch (s) {
+            case "success", "succeeded", "finished", "complete", "completed", "ok" -> "success";
+            case "failed", "fail", "failure", "killed", "stopped", "error" -> "failed";
+            case "running", "executing" -> "running";
+            case "queued", "pending", "submitted" -> "queued";
+            default -> GovLcDsLauncher.mapDsState(status);
+        };
+    }
+
+    /**
+     * 统一写回 run 状态 + 终态副作用（effect / advice done / 日作业步骤）。
+     */
+    private GovLcRunVo applyMappedStatus(
+            GovLcRun run, String mapped, Map<String, Object> extras, String errorMsg) {
         Map<String, Object> metrics = StrUtil.isNotBlank(run.getMetricsJson())
                 ? new LinkedHashMap<>(JSONUtil.parseObj(run.getMetricsJson()))
                 : new LinkedHashMap<>();
+        if (extras != null) {
+            metrics.putAll(extras);
+        }
         boolean changed = !mapped.equals(run.getStatus());
         if (changed) {
             run.setStatus(mapped);
@@ -648,12 +753,10 @@ public class GovLcServiceImpl implements GovLcService {
                 run.setFinishedAt(new Date());
             }
             if ("failed".equals(mapped)) {
-                run.setErrorMsg(StrUtil.blankToDefault(String.valueOf(inst.get("message")),
-                        "DS state=" + inst.get("state")));
+                run.setErrorMsg(StrUtil.blankToDefault(errorMsg,
+                        StrUtil.blankToDefault(str(extras != null ? extras.get("errorHint") : null, null),
+                                "callback/sync failed")));
             }
-            metrics.put("dsState", inst.get("state"));
-            metrics.put("syncedAt", new Date().toString());
-
             if (StrUtil.isNotBlank(run.getBatchId()) && ("success".equals(mapped) || "failed".equals(mapped))) {
                 List<GovLcJobStep> steps = jobStepMapper.selectList(new QueryWrapper<GovLcJobStep>().lambda()
                         .eq(GovLcJobStep::getBatchId, run.getBatchId())
@@ -678,7 +781,6 @@ public class GovLcServiceImpl implements GovLcService {
             }
             changed = true;
         }
-        // 建议闭环：linked → done
         if ("success".equals(mapped) && !Boolean.TRUE.equals(metrics.get("adviceDone"))) {
             try {
                 int n = adviceWriter.markDoneByRunId(run.getId());
@@ -690,12 +792,20 @@ public class GovLcServiceImpl implements GovLcService {
                 changed = true;
             }
         }
-        if (changed) {
+        if (changed || (extras != null && !extras.isEmpty())) {
             run.setMetricsJson(JSONUtil.toJsonStr(metrics));
             run.setUpdateTime(new Date());
             runMapper.updateById(run);
         }
         return toRunVo(run);
+    }
+
+    private static String str(Object o, String dft) {
+        if (o == null) {
+            return dft;
+        }
+        String s = String.valueOf(o);
+        return StrUtil.isBlank(s) || "null".equalsIgnoreCase(s) ? dft : s;
     }
 
     private void assertComplianceOverride(GovLcTableActionParam param, String kind) {

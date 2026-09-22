@@ -10,10 +10,16 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import cn.dev33.satoken.stp.StpUtil;
+import cn.hutool.core.util.StrUtil;
 import vip.xiaonuo.common.annotation.CommonLog;
+import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.pojo.CommonResult;
+import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcCallbackAuth;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcOrphanScanParam;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcPolicyUpsertParam;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcRunNowParam;
@@ -38,6 +44,8 @@ public class GovLcController {
 
     @Resource
     private GovLcService govLcService;
+    @Resource
+    private LhProperties lhProperties;
 
     @Operation(summary = "KPI 概览")
     @GetMapping({"/lh/lifecycle/overview", "/api/governance/lifecycle/overview"})
@@ -171,9 +179,41 @@ public class GovLcController {
         return CommonResult.data(govLcService.pageRuns(param));
     }
 
-    @Operation(summary = "从 DS 回写运行状态")
+    @Operation(summary = "从 DS 回写运行状态（门户主动拉）")
     @PostMapping({"/lh/lifecycle/runs/sync", "/api/governance/lifecycle/runs/sync"})
     public CommonResult<GovLcRunVo> syncRun(@RequestParam("runId") String runId) {
         return CommonResult.data(govLcService.syncRun(runId));
+    }
+
+    @Operation(summary = "DS/Worker 推送回调回写运行状态（J6）")
+    @CommonLog("生命周期运行回调")
+    @PostMapping({"/lh/lifecycle/runs/callback", "/api/governance/lifecycle/runs/callback"})
+    public CommonResult<GovLcRunVo> runCallback(
+            @RequestBody Map<String, Object> body,
+            @RequestHeader(value = GovLcCallbackAuth.HEADER, required = false) String callbackToken) {
+        assertCallbackAllowed(callbackToken);
+        return CommonResult.data(govLcService.applyRunCallback(body));
+    }
+
+    /**
+     * 放行条件：共享 token 匹配，或已登录门户用户（联调兜底）。
+     */
+    private void assertCallbackAllowed(String presentedToken) {
+        String configured = lhProperties.getLifecycle() != null
+                ? lhProperties.getLifecycle().getCallbackToken() : null;
+        if (GovLcCallbackAuth.tokenMatches(configured, presentedToken)) {
+            return;
+        }
+        try {
+            if (StpUtil.isLogin()) {
+                return;
+            }
+        } catch (Exception ignored) {
+            /* not login */
+        }
+        if (StrUtil.isBlank(configured)) {
+            throw new CommonException("生命周期回调未配置 token，且当前未登录");
+        }
+        throw new CommonException("生命周期回调鉴权失败（检查 " + GovLcCallbackAuth.HEADER + "）");
     }
 }

@@ -259,26 +259,6 @@ public class GovLcDsLauncher {
             int timeoutMinutes,
             String cron) {
 
-        Map<String, Object> workflow = new LinkedHashMap<>();
-        workflow.put("workflowCode", processName);
-        workflow.put("name", processName);
-        workflow.put("description", "lakehouse lifecycle " + kind + " run=" + runId
-                + " job_principal=" + jobPrincipal());
-        workflow.put("trial", true);
-        workflow.put("executionType", "PARALLEL");
-        workflow.put("tasks", tasks);
-        workflow.put("taskRelation", relations);
-        workflow.put("taskCount", tasks.size());
-        workflow.put("edgeCount", relations.size());
-        if (StrUtil.isNotBlank(cron)) {
-            workflow.put("cron", cron);
-        }
-
-        Map<String, Object> create = dsClient.createOrUpdateWorkflow(workflow);
-        String wfCode = StrUtil.blankToDefault(String.valueOf(create.get("workflowCode")), processName);
-        boolean createDegraded = Boolean.TRUE.equals(create.get("degraded"))
-                || Boolean.FALSE.equals(create.get("ok"));
-
         Map<String, Object> startParams = new LinkedHashMap<>();
         startParams.put("run_id", runId);
         startParams.put("kind", kind);
@@ -291,6 +271,41 @@ public class GovLcDsLauncher {
             startParams.put("order", "delete,compact,expire");
             startParams.put("retain_last", "1");
         }
+        String callbackUrl = callbackUrl();
+        if (StrUtil.isNotBlank(callbackUrl)) {
+            startParams.put("callback_url", callbackUrl);
+            startParams.put("callback_enabled", "true");
+        }
+
+        List<Map<String, Object>> submitTasks = new ArrayList<>(tasks);
+        List<Map<String, Object>> submitRels = new ArrayList<>(relations);
+        if (StrUtil.isNotBlank(callbackUrl) && StrUtil.isNotBlank(callbackToken()) && !submitTasks.isEmpty()) {
+            String lastKey = str(submitTasks.get(submitTasks.size() - 1).get("nodeKey"), null);
+            if (StrUtil.isNotBlank(lastKey)) {
+                submitTasks.add(notifyShellTask(runId, callbackUrl, callbackToken(), List.of(lastKey)));
+                submitRels.add(Map.of("from", lastKey, "to", "notify_portal"));
+            }
+        }
+
+        Map<String, Object> workflow = new LinkedHashMap<>();
+        workflow.put("workflowCode", processName);
+        workflow.put("name", processName);
+        workflow.put("description", "lakehouse lifecycle " + kind + " run=" + runId
+                + " job_principal=" + jobPrincipal());
+        workflow.put("trial", true);
+        workflow.put("executionType", "PARALLEL");
+        workflow.put("tasks", submitTasks);
+        workflow.put("taskRelation", submitRels);
+        workflow.put("taskCount", submitTasks.size());
+        workflow.put("edgeCount", submitRels.size());
+        if (StrUtil.isNotBlank(cron)) {
+            workflow.put("cron", cron);
+        }
+
+        Map<String, Object> create = dsClient.createOrUpdateWorkflow(workflow);
+        String wfCode = StrUtil.blankToDefault(String.valueOf(create.get("workflowCode")), processName);
+        boolean createDegraded = Boolean.TRUE.equals(create.get("degraded"))
+                || Boolean.FALSE.equals(create.get("ok"));
 
         Map<String, Object> start = Map.of();
         String instanceId = null;
@@ -321,6 +336,67 @@ public class GovLcDsLauncher {
             log.warn("lifecycle DS launch degraded kind={} table={} msg={}", kind, tableFqn, r.message);
         }
         return r;
+    }
+
+    private Map<String, Object> notifyShellTask(
+            String runId, String callbackUrl, String token, List<String> preTasks) {
+        String safeRun = shellSingleQuote(runId);
+        String safeUrl = shellSingleQuote(callbackUrl);
+        String safeToken = shellSingleQuote(token);
+        String script = ""
+                + "#!/bin/bash\n"
+                + "set -euo pipefail\n"
+                + "RUN_ID='" + safeRun + "'\n"
+                + "URL='" + safeUrl + "'\n"
+                + "TOKEN='" + safeToken + "'\n"
+                + "BODY=$(printf '{\"runId\":\"%s\",\"status\":\"success\",\"source\":\"ds_notify\"}' \"$RUN_ID\")\n"
+                + "curl -sS -m 30 -X POST \"$URL\" \\\n"
+                + "  -H 'Content-Type: application/json' \\\n"
+                + "  -H \"X-Lh-Lc-Callback-Token: $TOKEN\" \\\n"
+                + "  -d \"$BODY\" || echo \"lifecycle callback soft-fail\"\n";
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("localParams", List.of());
+        params.put("resourceList", List.of());
+        params.put("rawScript", script);
+        params.put("lhPreferShell", true);
+
+        Map<String, Object> task = new LinkedHashMap<>();
+        task.put("nodeKey", "notify_portal");
+        task.put("name", "通知门户回调");
+        task.put("engine", "shell");
+        task.put("taskType", "SHELL");
+        task.put("description", "POST /lh/lifecycle/runs/callback");
+        task.put("failRetryTimes", 2);
+        task.put("failRetryInterval", 5);
+        task.put("timeout", 5);
+        task.put("timeoutFlag", "OPEN");
+        task.put("timeoutNotifyStrategy", "FAILED");
+        task.put("preTasks", preTasks == null ? List.of() : preTasks);
+        task.put("taskParams", params);
+        task.put("x", 420);
+        task.put("y", 180);
+        return task;
+    }
+
+    private String callbackUrl() {
+        LhProperties.Lifecycle lc = lhProperties.getLifecycle();
+        if (lc == null || StrUtil.isBlank(lc.getCallbackBaseUrl())) {
+            return null;
+        }
+        String base = lc.getCallbackBaseUrl().trim().replaceAll("/+$", "");
+        return base + "/lh/lifecycle/runs/callback";
+    }
+
+    private String callbackToken() {
+        LhProperties.Lifecycle lc = lhProperties.getLifecycle();
+        if (lc == null || StrUtil.isBlank(lc.getCallbackToken())) {
+            return null;
+        }
+        return lc.getCallbackToken().trim();
+    }
+
+    private static String shellSingleQuote(String raw) {
+        return StrUtil.blankToDefault(raw, "").replace("'", "'\"'\"'");
     }
 
     private Map<String, Object> sparkTask(

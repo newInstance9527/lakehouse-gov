@@ -178,6 +178,10 @@ public class GlobalConfigure implements WebMvcConfigurer {
             "/lh/compliance/intake",
             "/api/governance/compliance/intake",
 
+            /* 生命周期 DS 推送回调（token 校验，见 GovLcCallbackAuth） */
+            "/lh/lifecycle/runs/callback",
+            "/api/governance/lifecycle/runs/callback",
+
             /* 可视化大屏插件放行 */
             "/screen/project/releaseDetail",
             "/screen/project/verifyAccessPassword",
