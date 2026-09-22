@@ -23,4 +23,9 @@ public class IgEtlBackfillParam {
     private String markValue;
 
     private String env;
+
+    /**
+     * 命中已删分区时二次确认：回填合规请求号（如 DEL-2026-0038）。
+     */
+    private String confirmReqNo;
 }

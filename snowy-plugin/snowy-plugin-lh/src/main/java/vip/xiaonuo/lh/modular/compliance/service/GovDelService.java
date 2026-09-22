@@ -2,7 +2,9 @@ package vip.xiaonuo.lh.modular.compliance.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
@@ -85,4 +87,10 @@ public interface GovDelService {
 
     /** 覆盖率：高敏资产中已登记主体索引的比例 + 缺口清单。 */
     Map<String, Object> coverage(String ws);
+
+    /** E7：补数预检——表×分区是否命中已执行删除。 */
+    Map<String, Object> backfillGateCheck(GovDelBackfillGateParam param);
+
+    /** E7：出湖预检——源表是否命中 restricted。 */
+    Map<String, Object> exportGateCheck(GovDelExportGateParam param);
 }

@@ -15,7 +15,9 @@ import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
@@ -186,5 +188,17 @@ public class GovDelController {
     @GetMapping({"/lh/compliance/coverage", "/api/governance/compliance/coverage"})
     public CommonResult<Map<String, Object>> coverage(@RequestParam(required = false) String ws) {
         return CommonResult.data(govDelService.coverage(ws));
+    }
+
+    @Operation(summary = "E7 补数门禁预检：表×分区是否命中已删分区")
+    @PostMapping({"/lh/compliance/gate/backfill-check", "/api/governance/compliance/gate/backfill-check"})
+    public CommonResult<Map<String, Object>> backfillGateCheck(@RequestBody @Valid GovDelBackfillGateParam param) {
+        return CommonResult.data(govDelService.backfillGateCheck(param));
+    }
+
+    @Operation(summary = "E7 出湖门禁预检：源表是否命中 restricted")
+    @PostMapping({"/lh/compliance/gate/export-check", "/api/governance/compliance/gate/export-check"})
+    public CommonResult<Map<String, Object>> exportGateCheck(@RequestBody @Valid GovDelExportGateParam param) {
+        return CommonResult.data(govDelService.exportGateCheck(param));
     }
 }

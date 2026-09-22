@@ -30,7 +30,9 @@ import vip.xiaonuo.lh.modular.compliance.mapper.GovDelRequestMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSubjectMapMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelTargetMapper;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
@@ -48,6 +50,7 @@ import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelEvidenceObjectStore;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelSinkExecutor;
@@ -183,6 +186,8 @@ public class GovDelServiceImpl implements GovDelService {
     private GovDelSinkExecutor sinkExecutor;
     @Resource
     private GovDelEvidenceObjectStore evidenceObjectStore;
+    @Resource
+    private GovDelProcessingGate processingGate;
     @Resource
     private LhProperties lhProperties;
     @Resource
@@ -1826,6 +1831,19 @@ public class GovDelServiceImpl implements GovDelService {
         out.put("coveragePct", total == 0 ? 100 : Math.round(covered * 100.0 / total));
         out.put("gapTables", gaps.stream().limit(50).toList());
         return out;
+    }
+
+    @Override
+    public Map<String, Object> backfillGateCheck(GovDelBackfillGateParam param) {
+        return processingGate.backfillCheck(
+                param.getTables() == null ? List.of() : param.getTables(),
+                param.getMarkKey(),
+                param.getMarkValue());
+    }
+
+    @Override
+    public Map<String, Object> exportGateCheck(GovDelExportGateParam param) {
+        return processingGate.exportCheck(param.getExportTable());
     }
 
     // ───────────────────────────── 内部 ─────────────────────────────

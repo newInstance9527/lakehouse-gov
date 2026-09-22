@@ -22,6 +22,7 @@ import vip.xiaonuo.lh.modular.apply.param.ApplyTicketPageParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
 import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.mapper.DataapiApiBindingMapper;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
@@ -76,6 +77,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     @Resource
     @Lazy
     private GovMetricService govMetricService;
+    @Resource
+    private GovDelProcessingGate govDelProcessingGate;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -385,6 +388,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (StrUtil.isBlank(exportTarget)) {
             throw new CommonException("出湖申请须填写 exportTarget（目标）");
         }
+        // E7：restricted 主体/载体命中直接拒绝
+        govDelProcessingGate.assertLakeExportAllowed(exportTable);
         GovAsset asset = null;
         if (StrUtil.isNotBlank(param.getAssetId())) {
             try {
@@ -663,6 +668,19 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
         if (t.getExpiresAt() != null && t.getExpiresAt().before(new Date())) {
             throw new CommonException("出湖申请已过期: " + no);
+        }
+        // E7：审批后若转 restricted，ETL sink 校验仍拒绝
+        String exportTable = null;
+        if (StrUtil.isNotBlank(t.getPayload())) {
+            try {
+                JSONObject payload = JSONUtil.parseObj(t.getPayload());
+                exportTable = StrUtil.trim(payload.getStr("exportTable"));
+            } catch (Exception ignored) {
+                // payload 异常时跳过表级门禁，仍保留单号/状态校验
+            }
+        }
+        if (StrUtil.isNotBlank(exportTable)) {
+            govDelProcessingGate.assertLakeExportAllowed(exportTable);
         }
     }
 

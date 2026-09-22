@@ -50,6 +50,7 @@ import vip.xiaonuo.lh.modular.etl.support.IgEtlRunResultPreview;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlSinkTargetChecker;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlVaultInjector;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.ArrayList;
@@ -109,6 +110,8 @@ public class IgEtlServiceImpl implements IgEtlService {
     private IgEtlLocalTrialExecutor localTrialExecutor;
     @Resource
     private ApplyTicketService applyTicketService;
+    @Resource
+    private GovDelProcessingGate govDelProcessingGate;
     @Resource
     private SecAuthGrantService secAuthGrantService;
     @Resource
@@ -769,6 +772,11 @@ public class IgEtlServiceImpl implements IgEtlService {
         String markValue = param.getMarkValue().trim();
         String env = StrUtil.blankToDefault(param.getEnv(), StrUtil.blankToDefault(dag.getEnv(), "prod"));
 
+        // E7：命中已执行删除的表×分区 → 须回填合规请求号二次确认 + 告警载荷
+        List<String> tableFqns = collectDagTableFqns(dag.getId());
+        List<Map<String, Object>> delHits = govDelProcessingGate.assertBackfillAllowed(
+                tableFqns, markKey, markValue, param.getConfirmReqNo());
+
         String runId = "bf-" + IdUtil.getSnowflakeNextIdStr();
         Date now = new Date();
         IgEtlRun run = new IgEtlRun();
@@ -788,6 +796,9 @@ public class IgEtlServiceImpl implements IgEtlService {
         startParams.put("mark_value", markValue);
         startParams.put("run_id", runId);
         startParams.put("dag_code", dag.getDagCode());
+        if (!delHits.isEmpty()) {
+            startParams.put("compliance_ack_req_no", StrUtil.trim(param.getConfirmReqNo()));
+        }
         Map<String, Object> dsResp = dsClient.startProcessInstance(dag.getDsWorkflowCode(), startParams);
         String instanceId = str(dsResp.get("processInstanceId"), null);
         if (Boolean.TRUE.equals(dsResp.get("degraded")) || StrUtil.isBlank(instanceId)) {
@@ -798,6 +809,9 @@ public class IgEtlServiceImpl implements IgEtlService {
             run.setStatus("running");
             run.setMessage("补数已提交 DS 实例 " + instanceId + " · " + markKey + "=" + markValue);
             run.setDsRunId(instanceId);
+        }
+        if (!delHits.isEmpty()) {
+            run.setMessage(run.getMessage() + " · 已确认合规门禁 " + StrUtil.trim(param.getConfirmReqNo()));
         }
         runMapper.insert(run);
 
@@ -815,7 +829,61 @@ public class IgEtlServiceImpl implements IgEtlService {
         r.put("markValue", markValue);
         r.put("ds", dsResp);
         r.put("opsPath", "/ops?runId=" + runId + "&dagId=" + dag.getId());
+        if (!delHits.isEmpty()) {
+            r.put("complianceGate", Map.of(
+                    "acknowledged", true,
+                    "confirmReqNo", StrUtil.trim(param.getConfirmReqNo()),
+                    "hits", delHits));
+            Map<String, Object> alert = runAlertBuilder.build(
+                    dag, runId, "acknowledged",
+                    "补数命中已删分区并已二次确认 · " + markKey + "=" + markValue
+                            + " · req=" + StrUtil.trim(param.getConfirmReqNo()),
+                    "P0");
+            alert.put("title", "ETL 补数门禁 · " + StrUtil.blankToDefault(dag.getDagCode(), dag.getId()));
+            alert.put("kind", "compliance_backfill_gate");
+            r.put("alert", alert);
+        }
         return r;
+    }
+
+    /** 收集 DAG source / sink 表 FQN，供合规补数门禁匹配。 */
+    private List<String> collectDagTableFqns(String dagId) {
+        List<IgEtlNode> nodes = nodeMapper.selectList(new QueryWrapper<IgEtlNode>().lambda()
+                .eq(IgEtlNode::getDagId, dagId));
+        List<String> fqns = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (IgEtlNode n : nodes) {
+            String type = n.getNodeType();
+            JSONObject conf = StrUtil.isBlank(n.getConfJson())
+                    ? JSONUtil.createObj()
+                    : JSONUtil.parseObj(n.getConfJson());
+            if ("sink_iceberg".equals(type) || "sink_ck".equals(type) || "sink_rdb".equals(type)) {
+                IgEtlSinkTargetChecker.TargetRef ref = sinkTargetChecker.resolveSinkTarget(type, conf);
+                if (ref != null && StrUtil.isNotBlank(ref.fqn()) && seen.add(ref.fqn())) {
+                    fqns.add(ref.fqn());
+                }
+            } else if ("source".equals(type)) {
+                String table = conf.getStr("table");
+                if (StrUtil.isBlank(table)) {
+                    table = conf.getStr("src");
+                }
+                JSONArray tables = conf.getJSONArray("tables");
+                if (StrUtil.isBlank(table) && tables != null && !tables.isEmpty()) {
+                    table = tables.getStr(0);
+                }
+                if (StrUtil.isBlank(table)) {
+                    continue;
+                }
+                String db = StrUtil.blankToDefault(conf.getStr("database"), conf.getStr("schema"));
+                String fqn = table.contains(".")
+                        ? table.trim()
+                        : (StrUtil.isNotBlank(db) ? db.trim() + "." + table.trim() : table.trim());
+                if (seen.add(fqn)) {
+                    fqns.add(fqn);
+                }
+            }
+        }
+        return fqns;
     }
 
     @Override
