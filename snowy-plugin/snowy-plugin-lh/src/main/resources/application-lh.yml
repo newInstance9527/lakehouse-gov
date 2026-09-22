@@ -28,7 +28,11 @@ lh:
     tenant-code: root
     # token:  # 本环境勿配；必须 user/password → /login 取 sessionId（切勿带 token 请求头，会 401）
   flink:
+    # UI / 门户：经dev3 ui-auth 反代到dev2 JM
     url: http://127.0.0.1:8081
+    # DS Worker → JM REST（内网）
+    rest-address: 10.0.0.181
+    rest-port: 8081
     vault-path: platform/flink/ui
     user: admin
     password: ""

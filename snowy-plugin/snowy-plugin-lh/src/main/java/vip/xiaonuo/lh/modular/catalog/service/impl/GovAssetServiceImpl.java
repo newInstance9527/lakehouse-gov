@@ -58,6 +58,7 @@ import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDsTableMapper;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
 import vip.xiaonuo.lh.modular.datasource.service.LhPortalInventoryOmBridge;
+import vip.xiaonuo.lh.modular.datasource.support.LhIcebergNamespaceNames;
 import vip.xiaonuo.lh.modular.plat.service.PlatOutboxService;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbOmAssetRef;
@@ -168,7 +169,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             boolean asc = CommonSortOrderEnum.ASC.getValue().equalsIgnoreCase(param.getSortOrder());
             qw.orderBy(true, asc, StrUtil.toUnderlineCase(param.getSortField()));
         } else {
-            qw.lambda().orderByDesc(GovAsset::getUpdateTime).orderByDesc(GovAsset::getCreateTime);
+            qw.lambda().orderByDesc(GovAsset::getCreateTime).orderByDesc(GovAsset::getId);
         }
 
         Page<GovAsset> raw = this.page(CommonPageRequest.defaultPage(), qw);
@@ -421,6 +422,18 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             softRefreshOm(asset, ds);
         } catch (Exception e) {
             log.warn("Asset register OM soft-fail id={}: {}", asset.getId(), e.getMessage());
+        }
+        // soft-fail：可投影类型挂接 Grav 指针，否则即席 schema-tree 永久为空（仅查面 iceberg，ds_* 不进树）
+        try {
+            if (gravitinoProjector.supportsGravitino(ds.getType())) {
+                Map<String, Object> grav = upsertGravBridge(asset, List.of(link));
+                if (!Boolean.TRUE.equals(grav.get("ok"))) {
+                    log.warn("Asset register Grav soft-skip id={} reason={}",
+                            asset.getId(), grav.getOrDefault("reason", grav.get("message")));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Asset register Grav soft-fail id={}: {}", asset.getId(), e.getMessage());
         }
 
         GovAssetIdParam idParam = new GovAssetIdParam();
@@ -767,8 +780,16 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         }
         String metalake = lhProperties.getGravitino().getMetalake();
         String catalog = gravitinoProjector.catalogNameOf(ds);
-        String schema = StrUtil.blankToDefault(ds.getDatabaseName(), "default");
-        String table = primary.getObjectName();
+        LhIcebergNamespaceNames.SchemaTable st = LhIcebergNamespaceNames.resolveSchemaTable(
+                ds, primary.getObjectName());
+        String schema = st.schema();
+        String table = st.table();
+        if (StrUtil.isBlank(table)) {
+            r.put("ok", false);
+            r.put("skipped", true);
+            r.put("reason", "blank_table_name");
+            return r;
+        }
         if (StrUtil.isNotBlank(asset.getGravAssetId())) {
             CbGravAssetRef existing = gravAssetRefMapper.selectById(asset.getGravAssetId());
             if (existing != null) {
@@ -912,7 +933,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
 
         r.put("available", false);
         r.put("source", "none");
-        r.put("hint", "无 Grav 表指针且 OM 实体不可用；可先 refresh 或确认湖表已投影");
+        r.put("hint", "无 Grav 表指针且 OM 实体不可用；可先 refresh。"
+                + "PostgreSQL 裸表名默认 schema=public（不是库名）；Iceberg 用 objectName 的 namespace.table");
         return r;
     }
 
@@ -1087,9 +1109,10 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
                 if (ds != null && gravitinoProjector.supportsGravitino(ds.getType())) {
                     metalake = StrUtil.blankToDefault(metalake, lhProperties.getGravitino().getMetalake());
                     catalog = StrUtil.blankToDefault(catalog, gravitinoProjector.catalogNameOf(ds));
-                    schema = StrUtil.blankToDefault(schema,
-                            StrUtil.blankToDefault(ds.getDatabaseName(), "default"));
-                    table = StrUtil.blankToDefault(table, primary.getObjectName());
+                    LhIcebergNamespaceNames.SchemaTable st = LhIcebergNamespaceNames.resolveSchemaTable(
+                            ds, primary.getObjectName());
+                    schema = StrUtil.blankToDefault(schema, st.schema());
+                    table = StrUtil.blankToDefault(table, st.table());
                 }
             }
         }

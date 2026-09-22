@@ -64,22 +64,69 @@ public final class LhIcebergNamespaceNames {
                 .toList();
     }
 
+    /**
+     * 从清单/资产 objectName 解析 Grav schema + table。
+     * <p>{@code log.ods_xxx} → schema=log, table=ods_xxx；
+     * {@code iceberg.log.ods_xxx} → schema=log, table=ods_xxx；
+     * 无点号时用 fallbackSchema（勿把 HMS 占位 {@code hms} 当成真实 Iceberg NS——有点号时一律以 objectName 为准）。</p>
+     */
+    public static SchemaTable parseSchemaTable(String objectName, String fallbackSchema) {
+        String fb = StrUtil.blankToDefault(StrUtil.trim(fallbackSchema), "default");
+        String s = StrUtil.trim(objectName);
+        if (StrUtil.isBlank(s) || s.contains("://") || s.contains("/")
+                || s.toLowerCase(Locale.ROOT).startsWith("s3")) {
+            return new SchemaTable(fb, null);
+        }
+        String[] parts = s.split("\\.");
+        if (parts.length >= 3 && "iceberg".equalsIgnoreCase(parts[0])) {
+            return new SchemaTable(parts[1], parts[parts.length - 1]);
+        }
+        if (parts.length >= 2) {
+            return new SchemaTable(parts[0], parts[parts.length - 1]);
+        }
+        return new SchemaTable(fb, parts[0]);
+    }
+
+    /**
+     * 按数据源类型选择默认 Grav schema，再解析 objectName。
+     * <ul>
+     *   <li>PostgreSQL：库名 ≠ schema；裸表名默认 {@code public}</li>
+     *   <li>MySQL / Doris：库名即 schema</li>
+     *   <li>Iceberg：默认命名空间用 dataSource.databaseName</li>
+     * </ul>
+     */
+    public static SchemaTable resolveSchemaTable(LhDatasource ds, String objectName) {
+        String type = ds == null ? "" : StrUtil.blankToDefault(ds.getType(), "").toLowerCase(Locale.ROOT);
+        String fallback;
+        if (type.contains("postgres")) {
+            fallback = "public";
+        } else if ("iceberg".equals(type)) {
+            fallback = StrUtil.blankToDefault(ds.getDatabaseName(), "default");
+        } else {
+            // mysql / doris / hive / 其它：库名常即 Grav schema
+            fallback = StrUtil.blankToDefault(ds == null ? null : ds.getDatabaseName(), "default");
+        }
+        return parseSchemaTable(objectName, fallback);
+    }
+
+    /** Grav 坐标：schema（namespace）+ table 短名。 */
+    public record SchemaTable(String schema, String table) {
+    }
+
     static void addObject(Set<String> out, String raw) {
         String s = StrUtil.trim(raw);
         if (StrUtil.isBlank(s) || s.contains("://") || s.contains("/")
                 || s.toLowerCase(Locale.ROOT).startsWith("s3")) {
             return;
         }
-        String[] parts = s.split("\\.");
-        String ns;
-        if (parts.length >= 3 && "iceberg".equalsIgnoreCase(parts[0])) {
-            ns = parts[1];
-        } else if (parts.length >= 2) {
-            ns = parts[0];
-        } else {
-            ns = parts[0];
+        if (!s.contains(".")) {
+            addIdent(out, s);
+            return;
         }
-        addIdent(out, ns);
+        SchemaTable st = parseSchemaTable(s, null);
+        if (st != null && StrUtil.isNotBlank(st.schema())) {
+            addIdent(out, st.schema());
+        }
     }
 
     static void addIdent(Set<String> out, String ns) {

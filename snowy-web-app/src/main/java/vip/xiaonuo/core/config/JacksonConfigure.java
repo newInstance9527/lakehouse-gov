@@ -156,6 +156,14 @@ public class JacksonConfigure {
             addSerializer(Long.class, longSerializer);
             addSerializer(Long.TYPE, longSerializer);
             addSerializer(java.math.BigInteger.class, bigIntSerializer);
+            // Hutool JSONNull：Trino/HTTP 等解析结果里的 JSON null，否则 MVC 写响应报 Type definition error
+            addSerializer(cn.hutool.json.JSONNull.class, new JsonSerializer<>() {
+                @Override
+                public void serialize(cn.hutool.json.JSONNull value, JsonGenerator gen, SerializerProvider provider)
+                        throws IOException {
+                    gen.writeNull();
+                }
+            });
         }});
 
         return objectMapper;

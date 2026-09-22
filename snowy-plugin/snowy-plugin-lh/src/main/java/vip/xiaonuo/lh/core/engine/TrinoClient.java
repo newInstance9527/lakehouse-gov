@@ -22,6 +22,7 @@ import jakarta.annotation.Resource;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.core.json.HutoolJsonPlain;
 import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
 import vip.xiaonuo.lh.modular.query.support.CpQueryScanGuard;
 
@@ -343,7 +344,8 @@ public class TrinoClient {
                 JSONArray line = data.getJSONArray(i);
                 Map<String, Object> row = new LinkedHashMap<>();
                 for (int c = 0; c < columns.size() && c < line.size(); c++) {
-                    row.put(columns.get(c), line.get(c));
+                    // Hutool JSONNull → null，避免资产预览 / 即席结果 Jackson 序列化失败
+                    row.put(columns.get(c), HutoolJsonPlain.plain(line.get(c)));
                 }
                 rows.add(row);
             }

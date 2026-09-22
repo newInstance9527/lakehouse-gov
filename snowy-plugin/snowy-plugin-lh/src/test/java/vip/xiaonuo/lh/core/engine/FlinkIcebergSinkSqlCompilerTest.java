@@ -47,6 +47,7 @@ class FlinkIcebergSinkSqlCompilerTest {
         assertTrue(sql.contains("'catalog-database' = 'log'"), sql);
         assertTrue(sql.contains("'catalog-table' = 'ods_lakehouse_gov_dev_log'"), sql);
         assertTrue(sql.contains("'warehouse' = 's3a://warehouse/'"), sql);
+        assertFalse(sql.contains("S3FileIO"), sql);
         assertTrue(sql.contains("INSERT INTO `_lh_sink_ods_lakehouse_gov_dev_log` SELECT * FROM `_lh_src_lh_ods_dev_log`"), sql);
         assertTrue(sql.contains("`ID` STRING"), sql);
     }

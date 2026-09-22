@@ -380,7 +380,7 @@ public class DsClient {
     }
 
     /** 按 DS 原生任务类型组装 taskParams（对齐 3.2 插件字段） */
-    private static Map<String, Object> toDsTaskParams(
+    private Map<String, Object> toDsTaskParams(
             Map<String, Object> raw, String dsType, String nodeKey, String engine) {
         Map<String, Object> p = baseTaskParams();
         // 保留 Vault 注入的 localParams / env，供 ${LH_JDBC_*} 运行时替换
@@ -525,13 +525,36 @@ public class DsClient {
     }
 
     /**
-     * DS Flink SQL standalone：提交到 Docker 内 lh-flink-jm，便于 Flink Web UI 可见。
+     * DS Flink SQL standalone：提交到 Flink JM REST（可跨机）。
      * {@code execution.attached=true}：sql-client 等 BATCH 写完再退出，避免 DS 仅因「已提交」判 SUCCESS。
      */
-    private static String defaultFlinkRemoteInitScript() {
+    private String defaultFlinkRemoteInitScript() {
+        String host = "flink-jobmanager";
+        int port = 8081;
+        if (lhProperties != null && lhProperties.getFlink() != null) {
+            LhProperties.Flink f = lhProperties.getFlink();
+            if (f.getRestPort() != null && f.getRestPort() > 0) {
+                port = f.getRestPort();
+            }
+            if (StrUtil.isNotBlank(f.getRestAddress())) {
+                host = f.getRestAddress().trim();
+            } else if (StrUtil.isNotBlank(f.getUrl())) {
+                try {
+                    java.net.URI u = java.net.URI.create(f.getUrl().trim());
+                    if (StrUtil.isNotBlank(u.getHost())) {
+                        host = u.getHost();
+                    }
+                    if (u.getPort() > 0) {
+                        port = u.getPort();
+                    }
+                } catch (Exception ignore) {
+                    // keep defaults
+                }
+            }
+        }
         return "SET 'execution.target' = 'remote';\n"
-                + "SET 'rest.address' = 'flink-jobmanager';\n"
-                + "SET 'rest.port' = '8081';\n"
+                + "SET 'rest.address' = '" + host + "';\n"
+                + "SET 'rest.port' = '" + port + "';\n"
                 + "SET 'execution.attached' = 'true';\n"
                 + "SET 'execution.shutdown-on-attached-exit' = 'true';\n";
     }

@@ -144,7 +144,8 @@ public final class DsWorkflowBuilder {
             Map<String, Object> task = new LinkedHashMap<>();
             long taskCode = taskCodeByNode.get(n.getNodeKey());
             task.put("code", taskCode);
-            task.put("name", StrUtil.blankToDefault(n.getName(), n.getNodeKey()));
+            // DS 任务实例 name 必须可回查到 nodeKey；仅用人名时门户拉日志会 no_ds_task_instance
+            task.put("name", dsTaskDisplayName(n));
             task.put("nodeKey", n.getNodeKey());
             task.put("nodeType", n.getNodeType());
             task.put("engine", engine);
@@ -334,6 +335,17 @@ public final class DsWorkflowBuilder {
             return "DS_SQL";
         }
         return "DS_SHELL";
+    }
+
+    /** DS 任务名：始终带上 nodeKey，便于实例日志按 key 回查。 */
+    static String dsTaskDisplayName(IgEtlNode n) {
+        String key = StrUtil.blankToDefault(n == null ? null : n.getNodeKey(), "task").trim();
+        String label = StrUtil.blankToDefault(n == null ? null : n.getName(), "").trim();
+        if (StrUtil.isBlank(label) || label.equals(key) || label.contains(key)) {
+            return key;
+        }
+        String combined = key + " · " + label;
+        return combined.length() > 64 ? key : combined;
     }
 
     private static String resolveUpstreamTable(

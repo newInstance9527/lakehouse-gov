@@ -162,9 +162,8 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             qw.orderBy(true, param.getSortOrder().equals(CommonSortOrderEnum.ASC.getValue()),
                     StrUtil.toUnderlineCase(param.getSortField()));
         } else {
-            qw.lambda().orderByAsc(LhDatasource::getCategory)
-                    .orderByAsc(LhDatasource::getType)
-                    .orderByAsc(LhDatasource::getName);
+            qw.lambda().orderByDesc(LhDatasource::getCreateTime)
+                    .orderByDesc(LhDatasource::getId);
         }
         Page<LhDatasource> raw = this.page(CommonPageRequest.defaultPage(), qw);
         Page<LhDatasourceVo> page = new Page<>(raw.getCurrent(), raw.getSize(), raw.getTotal());
@@ -918,6 +917,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             LhDsTable row = dsTableMapper.selectOne(new QueryWrapper<LhDsTable>().lambda()
                     .eq(LhDsTable::getDsId, ds.getId())
                     .eq(LhDsTable::getTableName, meta.name));
+            // PG 历史清单只有裸表名：同步到 schema.table 时原地升级，避免删旧建新导致资产 objectName 悬空
+            if (row == null && meta.name.contains(".")) {
+                row = upgradeBareInventoryName(ds.getId(), meta.name);
+            }
             if (row == null) {
                 row = new LhDsTable();
                 row.setId(IdUtil.getSnowflakeNextIdStr());
@@ -1293,21 +1296,28 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     }
 
     private List<RemoteTableMeta> discoverPgTables(Connection conn) throws Exception {
-        String sql = "SELECT c.relname AS table_name, "
+        // MUST 写入 schema.table：PG 库名 ≠ schema，裸表名无法唯一定位（public/cp/...）
+        String sql = "SELECT n.nspname AS schema_name, c.relname AS table_name, "
                 + "COALESCE(obj_description(c.oid), '') AS table_comment, "
                 + "COALESCE(s.n_live_tup, 0) AS table_rows "
                 + "FROM pg_class c "
                 + "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 + "LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid "
                 + "WHERE c.relkind IN ('r','p','v','m') "
-                + "AND n.nspname NOT IN ('pg_catalog','information_schema') "
-                + "ORDER BY c.relname";
+                + "AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') "
+                + "AND n.nspname NOT LIKE 'pg_temp_%' AND n.nspname NOT LIKE 'pg_toast_temp_%' "
+                + "ORDER BY n.nspname, c.relname";
         List<RemoteTableMeta> list = new ArrayList<>();
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             while (rs.next()) {
+                String schema = rs.getString("schema_name");
+                String table = rs.getString("table_name");
+                if (StrUtil.isBlank(table)) {
+                    continue;
+                }
                 RemoteTableMeta m = new RemoteTableMeta();
-                m.name = rs.getString("table_name");
+                m.name = StrUtil.isNotBlank(schema) ? schema + "." + table : table;
                 m.comment = rs.getString("table_comment");
                 m.rowCount = rs.getLong("table_rows");
                 m.engine = "heap";
@@ -1323,13 +1333,49 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         try (ResultSet rs = conn.getMetaData().getTables(conn.getCatalog(), null, "%",
                 new String[]{"TABLE", "VIEW"})) {
             while (rs.next()) {
+                String table = rs.getString("TABLE_NAME");
+                if (StrUtil.isBlank(table)) {
+                    continue;
+                }
+                String schem = rs.getString("TABLE_SCHEM");
                 RemoteTableMeta m = new RemoteTableMeta();
-                m.name = rs.getString("TABLE_NAME");
+                if (StrUtil.isNotBlank(schem) && !"null".equalsIgnoreCase(schem)) {
+                    m.name = schem + "." + table;
+                } else {
+                    m.name = table;
+                }
                 m.comment = rs.getString("REMARKS");
                 list.add(m);
             }
         }
         return list;
+    }
+
+    /**
+     * 将历史裸表名升级为 schema.table（仅当该 ds 下裸名唯一命中时）。
+     * 同时回写 gov_asset_source_link.object_name，避免资产仍指向旧名。
+     */
+    private LhDsTable upgradeBareInventoryName(String dsId, String schemaTable) {
+        String bare = schemaTable.substring(schemaTable.lastIndexOf('.') + 1);
+        if (StrUtil.isBlank(bare) || bare.equals(schemaTable)) {
+            return null;
+        }
+        List<LhDsTable> hits = dsTableMapper.selectList(new QueryWrapper<LhDsTable>().lambda()
+                .eq(LhDsTable::getDsId, dsId)
+                .eq(LhDsTable::getTableName, bare));
+        if (hits == null || hits.size() != 1) {
+            return null;
+        }
+        LhDsTable row = hits.get(0);
+        String oldName = row.getTableName();
+        row.setTableName(schemaTable);
+        try {
+            // soft：资产源绑定同名对象一并升级
+            govAssetSourceReconcile.renameObjectName(dsId, oldName, schemaTable);
+        } catch (Exception e) {
+            log.warn("rename asset objectName {} -> {} soft-fail: {}", oldName, schemaTable, e.getMessage());
+        }
+        return row;
     }
 
     private void applyRemoteMeta(LhDsTable row, RemoteTableMeta meta, Date now) {

@@ -23,6 +23,7 @@ import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
+import vip.xiaonuo.lh.modular.datasource.support.LhIcebergNamespaceNames;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
@@ -30,6 +31,7 @@ import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -129,14 +131,21 @@ public class IcebergGravPreviewAdapter implements GovAssetPreviewAdapter {
             } else {
                 @SuppressWarnings("unchecked")
                 List<String> trinoCols = (List<String>) exec.getOrDefault("columns", List.of());
-                if (columns.isEmpty() && trinoCols != null) {
-                    columns.addAll(trinoCols);
-                }
                 @SuppressWarnings("unchecked")
                 List<Map<String, Object>> trinoRows =
                         (List<Map<String, Object>>) exec.getOrDefault("rows", List.of());
-                if (trinoRows != null) {
-                    rows.addAll(trinoRows);
+                if (trinoRows != null && !trinoRows.isEmpty()) {
+                    // Grav 列名大小写常与 Trino 不一致（如 ID vs id）；按显示列名对齐行键，避免前端 row[col] 全空显示 —
+                    if (columns.isEmpty() && trinoCols != null && !trinoCols.isEmpty()) {
+                        columns.addAll(trinoCols);
+                        rows.addAll(trinoRows);
+                    } else if (!columns.isEmpty()) {
+                        rows.addAll(alignRowsToColumns(columns, trinoRows));
+                    } else {
+                        rows.addAll(trinoRows);
+                    }
+                } else if (columns.isEmpty() && trinoCols != null) {
+                    columns.addAll(trinoCols);
                 }
             }
         } catch (Exception e) {
@@ -197,7 +206,7 @@ public class IcebergGravPreviewAdapter implements GovAssetPreviewAdapter {
             }
         }
         LhDatasource ds = ctx.getPrimaryDs();
-        if (ds != null && StrUtil.isBlank(schema)) {
+        if (ds != null) {
             try {
                 String cat = gravitinoProjector.catalogNameOf(ds);
                 if (StrUtil.isNotBlank(cat)) {
@@ -206,11 +215,20 @@ public class IcebergGravPreviewAdapter implements GovAssetPreviewAdapter {
             } catch (Exception ignored) {
                 // soft
             }
-            schema = PreviewAdapterSupport.firstNonBlank(ds.getDatabaseName(),
-                    buildLayerDomainSchema(asset), "default");
         }
-        if (StrUtil.isBlank(table)) {
-            table = PreviewAdapterSupport.shortName(ctx.getObjectName());
+        if (StrUtil.isBlank(schema) || StrUtil.isBlank(table)) {
+            String fallbackSchema = PreviewAdapterSupport.firstNonBlank(
+                    ds != null ? ds.getDatabaseName() : null,
+                    buildLayerDomainSchema(asset),
+                    "default");
+            LhIcebergNamespaceNames.SchemaTable st = LhIcebergNamespaceNames.parseSchemaTable(
+                    ctx.getObjectName(), fallbackSchema);
+            if (StrUtil.isBlank(schema)) {
+                schema = st.schema();
+            }
+            if (StrUtil.isBlank(table)) {
+                table = st.table();
+            }
         }
         if (StrUtil.isBlank(schema)) {
             schema = PreviewAdapterSupport.firstNonBlank(buildLayerDomainSchema(asset), "default");
@@ -235,6 +253,41 @@ public class IcebergGravPreviewAdapter implements GovAssetPreviewAdapter {
             return asset.getLayer() + "_" + asset.getDomainCode();
         }
         return asset.getLayer();
+    }
+
+    /**
+     * 将 Trino 行 Map 的键对齐到展示列名（忽略大小写），避免 Grav 大写列名 + Trino 小写键导致 UI 全 —
+     */
+    static List<Map<String, Object>> alignRowsToColumns(List<String> columns,
+                                                        List<Map<String, Object>> trinoRows) {
+        if (columns == null || columns.isEmpty() || trinoRows == null || trinoRows.isEmpty()) {
+            return trinoRows == null ? List.of() : trinoRows;
+        }
+        List<Map<String, Object>> out = new ArrayList<>(trinoRows.size());
+        for (Map<String, Object> src : trinoRows) {
+            if (src == null) {
+                continue;
+            }
+            Map<String, Object> lower = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> e : src.entrySet()) {
+                if (e.getKey() != null) {
+                    lower.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
+                }
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (String col : columns) {
+                if (StrUtil.isBlank(col)) {
+                    continue;
+                }
+                Object v = src.get(col);
+                if (v == null) {
+                    v = lower.get(col.toLowerCase(Locale.ROOT));
+                }
+                row.put(col, v);
+            }
+            out.add(row);
+        }
+        return out;
     }
 
     private static final class Coord {

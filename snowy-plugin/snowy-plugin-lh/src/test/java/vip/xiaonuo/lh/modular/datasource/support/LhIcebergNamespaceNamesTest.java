@@ -28,6 +28,42 @@ class LhIcebergNamespaceNamesTest {
     }
 
     @Test
+    void parseSchemaTable_prefers_object_name_over_hms_placeholder() {
+        var st = LhIcebergNamespaceNames.parseSchemaTable("log.ods_lakehouse_gov_dev_log", "hms");
+        assertEquals("log", st.schema());
+        assertEquals("ods_lakehouse_gov_dev_log", st.table());
+
+        var fqn = LhIcebergNamespaceNames.parseSchemaTable("iceberg.log.ods_x", "hms");
+        assertEquals("log", fqn.schema());
+        assertEquals("ods_x", fqn.table());
+
+        var bare = LhIcebergNamespaceNames.parseSchemaTable("ods_only", "log");
+        assertEquals("log", bare.schema());
+        assertEquals("ods_only", bare.table());
+    }
+
+    @Test
+    void resolveSchemaTable_postgres_defaults_public_not_database() {
+        LhDatasource pg = new LhDatasource();
+        pg.setType("postgresql");
+        pg.setDatabaseName("lakehouse_gov");
+        var bare = LhIcebergNamespaceNames.resolveSchemaTable(pg, "dev_log");
+        assertEquals("public", bare.schema());
+        assertEquals("dev_log", bare.table());
+
+        var dotted = LhIcebergNamespaceNames.resolveSchemaTable(pg, "cp.dev_log");
+        assertEquals("cp", dotted.schema());
+        assertEquals("dev_log", dotted.table());
+
+        LhDatasource mysql = new LhDatasource();
+        mysql.setType("mysql");
+        mysql.setDatabaseName("lakehouse_gov");
+        var m = LhIcebergNamespaceNames.resolveSchemaTable(mysql, "dev_log");
+        assertEquals("lakehouse_gov", m.schema());
+        assertEquals("dev_log", m.table());
+    }
+
+    @Test
     void skips_invalid_and_system() {
         LhDatasource ds = new LhDatasource();
         ds.setDatabaseName("information_schema");

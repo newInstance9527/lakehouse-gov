@@ -993,9 +993,16 @@ public class IgEtlServiceImpl implements IgEtlService {
             out.put("ok", false);
             out.put("degraded", true);
             out.put("source", "portal");
-            out.put("content", StrUtil.blankToDefault(rn.getMessage(), "暂无 DS 任务实例，无法拉实时日志（本地试跑或尚未调度）"));
+            out.put("code", "no_ds_task_instance");
+            String hint = StrUtil.isBlank(run.getDsRunId())
+                    ? "本 run 无 dsRunId（本地试跑或未提交 DS）"
+                    : (run.getDsRunId().startsWith("WF_") || !run.getDsRunId().trim().matches("\\d+")
+                    ? "dsRunId=" + run.getDsRunId() + " 不是进程实例 id"
+                    : "dsRunId=" + run.getDsRunId() + " 下未匹配到节点「"
+                            + rn.getNodeKey() + "」的 DS 任务（常见于旧流程任务名只有中文展示名；请重新发布后再试跑）");
+            out.put("content", "暂无 DS 任务实例，无法拉实时日志。" + hint);
             out.put("lineNum", skip);
-            out.put("message", "no_ds_task_instance");
+            out.put("message", "暂无 DS 任务实例，无法拉实时日志");
             return out;
         }
         Map<String, Object> log = dsClient.queryTaskInstanceLog(taskId, skip, lim);
@@ -1036,21 +1043,79 @@ public class IgEtlServiceImpl implements IgEtlService {
         if (!Boolean.TRUE.equals(taskSync.get("ok")) || !(taskSync.get("tasks") instanceof List<?> tasks)) {
             return null;
         }
+        String displayName = lookupNodeDisplayName(run.getDagId(), rn.getNodeKey());
+        Map<String, Object> matched = matchDsTask(tasks, rn, displayName);
+        return matched == null ? null : str(matched.get("id"), null);
+    }
+
+    /** 门户节点展示名（DS 任务 name 常用这个，而不是 nodeKey） */
+    private String lookupNodeDisplayName(String dagId, String nodeKey) {
+        if (StrUtil.isBlank(dagId) || StrUtil.isBlank(nodeKey)) {
+            return null;
+        }
+        IgEtlNode n = nodeMapper.selectOne(new QueryWrapper<IgEtlNode>().lambda()
+                .eq(IgEtlNode::getDagId, dagId)
+                .eq(IgEtlNode::getNodeKey, nodeKey.trim())
+                .last("LIMIT 1"));
+        return n == null ? null : n.getName();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> matchDsTask(List<?> tasks, IgEtlRunNode rn, String displayName) {
+        if (tasks == null || rn == null) {
+            return null;
+        }
+        String key = StrUtil.blankToDefault(rn.getNodeKey(), "").trim();
+        String label = StrUtil.blankToDefault(displayName, "").trim();
+        String labelDs = sanitizeDsTaskName(label);
+        Map<String, Object> byKey = null;
+        Map<String, Object> byLabel = null;
         for (Object o : tasks) {
             if (!(o instanceof Map<?, ?> raw)) {
                 continue;
             }
             Map<String, Object> t = (Map<String, Object>) raw;
-            String name = str(t.get("name"), "");
+            String name = String.valueOf(t.get("name")).trim();
             if (StrUtil.isBlank(name)) {
                 continue;
             }
-            if (name.equals(rn.getNodeKey()) || name.contains(rn.getNodeKey())
-                    || name.contains(StrUtil.blankToDefault(rn.getNodeType(), "___"))) {
-                return str(t.get("id"), null);
+            String nameDs = sanitizeDsTaskName(name);
+            if (StrUtil.isNotBlank(key) && (nameDs.equals(key) || nameDs.startsWith(key + " ")
+                    || nameDs.startsWith(key + "·") || nameDs.startsWith(key + " ·")
+                    || nameDs.contains(key) || name.contains(key))) {
+                byKey = t;
+                break;
+            }
+            if (byLabel == null && StrUtil.isNotBlank(labelDs)
+                    && (nameDs.equals(labelDs) || nameDs.contains(labelDs) || labelDs.contains(nameDs)
+                    || name.equals(label) || name.contains(label) || label.contains(name))) {
+                byLabel = t;
             }
         }
+        if (byKey != null) {
+            return byKey;
+        }
+        if (byLabel != null) {
+            return byLabel;
+        }
+        // 单节点 DAG：仅 1 个 DS 任务时直接绑定
+        if (tasks.size() == 1 && tasks.get(0) instanceof Map<?, ?> only) {
+            return (Map<String, Object>) only;
+        }
         return null;
+    }
+
+    /**
+     * 与 {@code DsClient.sanitizeTaskName} 对齐：DS 建任务时会把 {@code /} 等替换成 {@code _}，
+     * 门户展示名仍是「CDC / 库表」而 DS 任务名是「CDC _ 库表」，直接 equals 会匹配失败。
+     */
+    private static String sanitizeDsTaskName(String name) {
+        String n = StrUtil.blankToDefault(name, "").trim();
+        if (n.isEmpty()) {
+            return n;
+        }
+        n = n.replaceAll("[\\\\/:*?\"<>|]", "_");
+        return n.length() > 64 ? n.substring(0, 64) : n;
     }
 
     private static String parseDsTaskId(String logRef) {
@@ -1264,15 +1329,14 @@ public class IgEtlServiceImpl implements IgEtlService {
 
     /**
      * 若 dsRunId 像 DS 实例 id，则轮询实例 + 任务态并回写 ig_etl_run / run_node。
+     * 终态 run 仍会回写缺失的 logRef（供节点日志），但不再改 run 头状态。
      */
     private Map<String, Object> syncRunFromDs(IgEtlRun run) {
         if (run == null || StrUtil.isBlank(run.getDsRunId())) {
             return null;
         }
         String status = StrUtil.blankToDefault(run.getStatus(), "");
-        if ("success".equals(status) || "failed".equals(status) || "blocked".equals(status)) {
-            return null;
-        }
+        boolean terminal = "success".equals(status) || "failed".equals(status) || "blocked".equals(status);
         String dsId = run.getDsRunId().trim();
         if (dsId.startsWith("WF_") || !dsId.matches("\\d+")) {
             return null;
@@ -1282,17 +1346,24 @@ public class IgEtlServiceImpl implements IgEtlService {
             return ds;
         }
 
-        // 任务级回写
+        // 任务级回写（终态也补 logRef）
         Map<String, Object> taskSync = dsClient.listTaskInstances(dsId);
         int nodeSynced = 0;
         if (Boolean.TRUE.equals(taskSync.get("ok")) && taskSync.get("tasks") instanceof List<?> tasks) {
-            nodeSynced = syncRunNodesFromDsTasks(run.getRunId(), tasks);
+            nodeSynced = syncRunNodesFromDsTasks(run.getRunId(), run.getDagId(), tasks);
             ds.put("taskSync", Map.of(
                     "ok", true,
                     "taskCount", tasks.size(),
                     "nodeSynced", nodeSynced));
         } else {
             ds.put("taskSync", taskSync);
+        }
+
+        if (terminal) {
+            ds.put("mappedStatus", status);
+            ds.put("synced", nodeSynced > 0);
+            ds.put("terminalLogRefOnly", true);
+            return ds;
         }
 
         String mapped = mapDsStateToRunStatus(str(ds.get("state"), null));
@@ -1317,62 +1388,65 @@ public class IgEtlServiceImpl implements IgEtlService {
             runMapper.updateById(run);
         }
         ds.put("mappedStatus", mapped);
-        ds.put("synced", changed);
+        ds.put("synced", changed || nodeSynced > 0);
         return ds;
     }
 
     @SuppressWarnings("unchecked")
-    private int syncRunNodesFromDsTasks(String runId, List<?> tasks) {
+    private int syncRunNodesFromDsTasks(String runId, String dagId, List<?> tasks) {
         List<IgEtlRunNode> nodes = runNodeMapper.selectList(new QueryWrapper<IgEtlRunNode>().lambda()
                 .eq(IgEtlRunNode::getRunId, runId));
         if (nodes.isEmpty() || tasks == null || tasks.isEmpty()) {
             return 0;
         }
+        Map<String, String> namesByKey = new LinkedHashMap<>();
+        if (StrUtil.isNotBlank(dagId)) {
+            List<IgEtlNode> defs = nodeMapper.selectList(new QueryWrapper<IgEtlNode>().lambda()
+                    .eq(IgEtlNode::getDagId, dagId));
+            for (IgEtlNode d : defs) {
+                if (d != null && StrUtil.isNotBlank(d.getNodeKey())) {
+                    namesByKey.put(d.getNodeKey(), d.getName());
+                }
+            }
+        }
         int updated = 0;
         Date now = new Date();
         for (IgEtlRunNode rn : nodes) {
-            if ("success".equals(rn.getStatus()) || "failed".equals(rn.getStatus())
-                    || "blocked".equals(rn.getStatus())) {
-                continue;
-            }
-            Map<String, Object> matched = null;
-            for (Object o : tasks) {
-                if (!(o instanceof Map<?, ?> raw)) {
-                    continue;
-                }
-                Map<String, Object> t = (Map<String, Object>) raw;
-                String name = str(t.get("name"), "");
-                if (StrUtil.isBlank(name)) {
-                    continue;
-                }
-                if (name.equals(rn.getNodeKey()) || name.contains(rn.getNodeKey())
-                        || name.contains(StrUtil.blankToDefault(rn.getNodeType(), "___"))) {
-                    matched = t;
-                    break;
-                }
-            }
+            String displayName = namesByKey.get(rn.getNodeKey());
+            Map<String, Object> matched = matchDsTask(tasks, rn, displayName);
             if (matched == null) {
                 continue;
             }
-            String mapped = mapDsStateToRunStatus(str(matched.get("state"), null));
-            if (mapped == null) {
+            String taskId = str(matched.get("id"), null);
+            boolean hasLogRef = StrUtil.isNotBlank(parseDsTaskId(rn.getLogRef()));
+            boolean terminalNode = "success".equals(rn.getStatus()) || "failed".equals(rn.getStatus())
+                    || "blocked".equals(rn.getStatus());
+            // 终态节点若已有 dsTask logRef 则跳过；缺失时仍补写，否则查看日志永久 no_ds_task_instance
+            if (terminalNode && hasLogRef) {
                 continue;
             }
-            rn.setStatus(mapped);
-            String taskId = str(matched.get("id"), null);
+            String mapped = mapDsStateToRunStatus(str(matched.get("state"), null));
+            if (!terminalNode) {
+                if (mapped == null) {
+                    continue;
+                }
+                rn.setStatus(mapped);
+                if ("running".equals(mapped) && rn.getStartedAt() == null) {
+                    rn.setStartedAt(now);
+                }
+                if ("success".equals(mapped) || "failed".equals(mapped)) {
+                    rn.setFinishedAt(now);
+                }
+            }
             if (StrUtil.isNotBlank(taskId)) {
                 rn.setLogRef("dsTask:" + taskId);
-            } else {
+            } else if (!hasLogRef) {
                 rn.setLogRef(str(matched.get("logPath"), rn.getLogRef()));
             }
             String path = str(matched.get("logPath"), null);
-            rn.setMessage("DS task state=" + matched.get("state")
-                    + (StrUtil.isNotBlank(path) ? " · logPath=" + path : ""));
-            if ("running".equals(mapped) && rn.getStartedAt() == null) {
-                rn.setStartedAt(now);
-            }
-            if ("success".equals(mapped) || "failed".equals(mapped)) {
-                rn.setFinishedAt(now);
+            if (!terminalNode || StrUtil.isBlank(rn.getMessage())) {
+                rn.setMessage("DS task state=" + matched.get("state")
+                        + (StrUtil.isNotBlank(path) ? " · logPath=" + path : ""));
             }
             runNodeMapper.updateById(rn);
             updated++;

@@ -78,16 +78,20 @@ public final class DsTaskScriptBuilder {
             params.put("flinkVersion", ">=1.13");
             params.put("parallelism", conf.getInt("parallelism", 1));
             params.put("jobManagerMemory", StrUtil.blankToDefault(conf.getStr("jobManagerMemory"), "1G"));
-            params.put("taskManagerMemory", StrUtil.blankToDefault(conf.getStr("taskManagerMemory"), "2G"));
+            // standalone 远程提交吃集群 flink-conf；此字段主要给 YARN/K8s。默认抬到 4G，避免 Iceberg upsert OOM。
+            params.put("taskManagerMemory", StrUtil.blankToDefault(conf.getStr("taskManagerMemory"), "4G"));
             params.put("slot", conf.getInt("slot", 1));
             params.put("taskManager", conf.getInt("taskManager", 2));
             params.put("appName", "lh_" + safeIdent(n.getNodeKey()));
             params.put("lhFlinkJarId", conf.getStr("jarId"));
             if (StrUtil.isBlank(conf.getStr("initScript"))) {
+                // 跨机 Flink：rest.address 由发布侧 DsClient 按 lh.flink.url/restAddress 覆盖；此处给本地默认
+                String restHost = firstNonBlank(conf.getStr("flinkRestAddress"), conf.getStr("restAddress"), "10.0.0.181");
+                String restPort = firstNonBlank(conf.getStr("flinkRestPort"), conf.getStr("restPort"), "8081");
                 params.put("initScript",
                         "SET 'execution.target' = 'remote';\n"
-                                + "SET 'rest.address' = 'flink-jobmanager';\n"
-                                + "SET 'rest.port' = '8081';\n"
+                                + "SET 'rest.address' = '" + restHost + "';\n"
+                                + "SET 'rest.port' = '" + restPort + "';\n"
                                 + "SET 'execution.attached' = 'true';\n"
                                 + "SET 'execution.shutdown-on-attached-exit' = 'true';\n");
             }

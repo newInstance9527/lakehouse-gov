@@ -133,20 +133,29 @@ public final class FlinkIcebergSinkSqlCompiler {
         sb.append("  'catalog-database' = '").append(esc(schema)).append("',\n");
         sb.append("  'catalog-table' = '").append(esc(table)).append("',\n");
         sb.append("  'format-version' = '").append(esc(StrUtil.blankToDefault(conf.getStr("formatVersion"), "2"))).append("'");
-        String s3Endpoint = firstNonBlank(conf.getStr("s3Endpoint"), conf.getStr("fs.s3a.endpoint"));
-        if (StrUtil.isNotBlank(s3Endpoint)) {
+        // 默认走 Hadoop S3A（flink-conf + hadoop-aws）。勿默认 S3FileIO：需 AWS SDK v2，缺 jar 会 CNF。
+        // 显式 conf.useS3FileIo=true 时才注入 io-impl（运维已装 iceberg-aws-bundle 时可用）。
+        if (Boolean.TRUE.equals(conf.getBool("useS3FileIo"))
+                || "true".equalsIgnoreCase(StrUtil.blankToDefault(conf.getStr("useS3FileIo"), ""))) {
+            sb.append(",\n  'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'");
+            String s3Endpoint = firstNonBlank(
+                    conf.getStr("s3Endpoint"), conf.getStr("fs.s3a.endpoint"), "http://182.44.68.9:9009");
             sb.append(",\n  's3.endpoint' = '").append(esc(s3Endpoint)).append("'");
             sb.append(",\n  's3.path-style-access' = 'true'");
-        }
-        String ak = firstNonBlank(conf.getStr("s3AccessKey"), conf.getStr("accessKey"));
-        String sk = firstNonBlank(conf.getStr("s3SecretKey"), conf.getStr("secretKey"));
-        if (StrUtil.isNotBlank(ak)) {
-            sb.append(",\n  's3.access-key-id' = '").append(esc(ak)).append("'");
-        }
-        if (StrUtil.isNotBlank(sk)) {
-            sb.append(",\n  's3.secret-access-key' = '").append(esc(sk)).append("'");
-        } else if (StrUtil.isNotBlank(ak)) {
-            sb.append(",\n  's3.secret-access-key' = '${LH_S3_SECRET_KEY}'");
+            sb.append(",\n  'client.region' = '").append(esc(StrUtil.blankToDefault(conf.getStr("s3Region"), "us-east-1"))).append("'");
+            sb.append(",\n  's3.region' = '").append(esc(StrUtil.blankToDefault(conf.getStr("s3Region"), "us-east-1"))).append("'");
+            String ak = firstNonBlank(conf.getStr("s3AccessKey"), conf.getStr("accessKey"));
+            String sk = firstNonBlank(conf.getStr("s3SecretKey"), conf.getStr("secretKey"));
+            if (StrUtil.isNotBlank(ak)) {
+                sb.append(",\n  's3.access-key-id' = '").append(esc(ak)).append("'");
+            } else {
+                sb.append(",\n  's3.access-key-id' = '${LH_S3_ACCESS_KEY}'");
+            }
+            if (StrUtil.isNotBlank(sk)) {
+                sb.append(",\n  's3.secret-access-key' = '").append(esc(sk)).append("'");
+            } else {
+                sb.append(",\n  's3.secret-access-key' = '${LH_S3_SECRET_KEY}'");
+            }
         }
         sb.append("\n);\n");
         return sb.toString();

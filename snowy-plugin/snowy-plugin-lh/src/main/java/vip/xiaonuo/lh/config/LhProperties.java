@@ -126,6 +126,13 @@ public class LhProperties {
          * DS FLINK SQL 任务会执行裸 {@code sql-client.sh}，依赖 PATH 或 FLINK_HOME。
          */
         private String home = "/opt/flink";
+        /**
+         * DS Flink SQL {@code SET rest.address}（Worker→JM）。
+         * 空则从 {@link #url} 解析 host；跨机部署时填 JM 可达地址，如 {@code 10.0.0.181}。
+         */
+        private String restAddress;
+        /** 对应 {@code SET rest.port}，默认 8081 */
+        private Integer restPort = 8081;
     }
 
     @Getter

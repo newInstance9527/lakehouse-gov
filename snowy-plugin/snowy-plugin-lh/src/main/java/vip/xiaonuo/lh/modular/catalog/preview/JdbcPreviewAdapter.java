@@ -19,6 +19,7 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
+import vip.xiaonuo.lh.modular.datasource.support.LhIcebergNamespaceNames;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -71,8 +72,9 @@ public class JdbcPreviewAdapter implements GovAssetPreviewAdapter {
         } else {
             sql = "SELECT * FROM " + tableRef + " LIMIT " + limit;
         }
-        r.put("qualifiedName", StrUtil.blankToDefault(ds.getDatabaseName(), ds.getDsCode())
-                + "." + PreviewAdapterSupport.shortName(objectName));
+        LhIcebergNamespaceNames.SchemaTable coord = LhIcebergNamespaceNames.resolveSchemaTable(ds, objectName);
+        r.put("qualifiedName", StrUtil.blankToDefault(coord.schema(), "public")
+                + "." + StrUtil.blankToDefault(coord.table(), PreviewAdapterSupport.shortName(objectName)));
         r.put("sql", sql);
         try {
             if (StrUtil.isBlank(ds.getVaultPath())) {
@@ -124,24 +126,17 @@ public class JdbcPreviewAdapter implements GovAssetPreviewAdapter {
 
     private static String jdbcTableRef(String objectName, LhDatasource ds) {
         String type = PreviewAdapterSupport.dsType(ds);
+        LhIcebergNamespaceNames.SchemaTable st = LhIcebergNamespaceNames.resolveSchemaTable(ds, objectName);
+        String schema = st.schema();
+        String table = StrUtil.blankToDefault(st.table(), PreviewAdapterSupport.shortName(objectName));
+        // 兼容误拼成 mysql.schema.table / postgresql.public.t 的清单名
         String[] parts = StrUtil.blankToDefault(objectName, "object").trim().split("\\.");
-        String schema;
-        String table;
         if (parts.length >= 3) {
             String cat = parts[parts.length - 3].toLowerCase(Locale.ROOT);
             if (isRdbInventedCatalog(cat)) {
                 schema = parts[parts.length - 2];
                 table = parts[parts.length - 1];
-            } else {
-                schema = parts[parts.length - 2];
-                table = parts[parts.length - 1];
             }
-        } else if (parts.length == 2) {
-            schema = parts[0];
-            table = parts[1];
-        } else {
-            table = parts[0];
-            schema = ds == null ? null : ds.getDatabaseName();
         }
         if (type.contains("postgres") || "pg".equals(type) || type.contains("oracle")) {
             if (StrUtil.isNotBlank(schema)) {
@@ -155,6 +150,7 @@ public class JdbcPreviewAdapter implements GovAssetPreviewAdapter {
             }
             return "[" + table.replace("]", "]]") + "]";
         }
+        // MySQL：库已在 jdbcUrl；仅当 objectName 显式带 schema 且不是库名时才双段
         if (StrUtil.isNotBlank(schema) && (ds == null || !schema.equalsIgnoreCase(ds.getDatabaseName()))) {
             return "`" + schema.replace("`", "``") + "`.`" + table.replace("`", "``") + "`";
         }

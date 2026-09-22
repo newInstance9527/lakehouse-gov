@@ -99,6 +99,39 @@ public class GovAssetSourceReconcile {
     }
 
     /**
+     * 清单对象改名（如裸表名 → schema.table）：回写同源 link.object_name。
+     * soft-fail 由调用方吞；本方法不抛业务异常。
+     */
+    public void renameObjectName(String dsId, String oldName, String newName) {
+        if (StrUtil.isBlank(dsId) || StrUtil.isBlank(oldName) || StrUtil.isBlank(newName) || oldName.equals(newName)) {
+            return;
+        }
+        List<GovAssetSourceLink> links = linkMapper.selectList(new QueryWrapper<GovAssetSourceLink>().lambda()
+                .eq(GovAssetSourceLink::getDsId, dsId)
+                .eq(GovAssetSourceLink::getObjectName, oldName)
+                .eq(GovAssetSourceLink::getDeleteFlag, NOT_DELETE));
+        if (links == null || links.isEmpty()) {
+            return;
+        }
+        Date now = new Date();
+        for (GovAssetSourceLink link : links) {
+            link.setObjectName(newName);
+            link.setRevision(link.getRevision() == null ? 1 : link.getRevision() + 1);
+            link.setRemark("inventory rename " + oldName + " -> " + newName);
+            linkMapper.updateById(link);
+            if (LINK_PRIMARY.equals(link.getLinkRole()) && StrUtil.isNotBlank(link.getAssetId())) {
+                GovAsset asset = assetMapper.selectById(link.getAssetId());
+                if (asset != null) {
+                    asset.setLastSyncAt(now);
+                    asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
+                    assetMapper.updateById(asset);
+                }
+            }
+        }
+        log.info("renamed source links dsId={} {} -> {} count={}", dsId, oldName, newName, links.size());
+    }
+
+    /**
      * 资产 refresh：primary 对象不在 ig_ds_table → stale/degraded。
      */
     public Map<String, Object> reconcileAsset(GovAsset asset) {

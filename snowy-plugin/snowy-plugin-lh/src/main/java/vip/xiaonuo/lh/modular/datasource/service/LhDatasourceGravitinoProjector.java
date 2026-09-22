@@ -462,6 +462,13 @@ public class LhDatasourceGravitinoProjector {
             props.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
             props.put("s3.endpoint", endpoint);
             props.put("s3.path-style-access", "true");
+            // MinIO：AWS SDK v2 必须有 region，否则 DefaultAwsRegionProviderChain 失败
+            String region = first(secret, "s3.region", "client.region", "region");
+            if (StrUtil.isBlank(region)) {
+                region = "us-east-1";
+            }
+            props.put("s3.region", region);
+            props.put("client.region", region);
             String access = first(secret, "s3.access-key-id", "accessKey", "access-key");
             String secretKey = first(secret, "s3.secret-access-key", "secretKey", "secret-key");
             if (StrUtil.isNotBlank(access)) {

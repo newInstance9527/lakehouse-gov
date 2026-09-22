@@ -301,15 +301,16 @@ public class LhDatasourcePostRegisterBridge {
         List<String> msgs = new ArrayList<>();
         try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
             List<String> tables = listJdbcTableNames(conn, ds, secret);
-            for (String table : tables) {
+            for (String tableRef : tables) {
                 try {
-                    GravitinoClient.GravTable gt = loadJdbcAsGrav(conn, catalog, omSchema, table);
-                    openMetadataClient.upsertTableStructure(omService, omDatabase, omSchema, gt, classify);
+                    String[] st = splitSchemaTable(tableRef, omSchema);
+                    GravitinoClient.GravTable gt = loadJdbcAsGrav(conn, catalog, st[0], st[1], ds.getType());
+                    openMetadataClient.upsertTableStructure(omService, omDatabase, st[0], gt, classify);
                     upserted++;
                 } catch (Exception e) {
                     errors++;
                     if (msgs.size() < 10) {
-                        msgs.add(table + ": " + e.getMessage());
+                        msgs.add(tableRef + ": " + e.getMessage());
                     }
                 }
             }
@@ -331,7 +332,7 @@ public class LhDatasourcePostRegisterBridge {
             throws Exception {
         List<String> names = new ArrayList<>();
         String schema = firstNonBlank(str(secret.get("database")), ds.getDatabaseName(), conn.getCatalog());
-        String type = ds.getType();
+        String type = StrUtil.blankToDefault(ds.getType(), "").toLowerCase(Locale.ROOT);
         if ("mysql".equals(type) || "doris".equals(type)) {
             try (var ps = conn.prepareStatement(
                     "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_TYPE='BASE TABLE'")) {
@@ -344,17 +345,57 @@ public class LhDatasourcePostRegisterBridge {
             }
             return names;
         }
-        String schemaPattern = "postgresql".equals(type) || "pg".equals(type) ? "public" : null;
+        if ("postgresql".equals(type) || "pg".equals(type)) {
+            // 与门户清单一致：schema.table（含非 public）
+            String sql = "SELECT n.nspname, c.relname FROM pg_class c "
+                    + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    + "WHERE c.relkind IN ('r','p','v','m') "
+                    + "AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') "
+                    + "AND n.nspname NOT LIKE 'pg_temp_%' AND n.nspname NOT LIKE 'pg_toast_temp_%' "
+                    + "ORDER BY n.nspname, c.relname";
+            try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+                while (rs.next()) {
+                    String sch = rs.getString(1);
+                    String tbl = rs.getString(2);
+                    if (StrUtil.isNotBlank(tbl)) {
+                        names.add(StrUtil.isNotBlank(sch) ? sch + "." + tbl : tbl);
+                    }
+                }
+            }
+            return names;
+        }
         try (ResultSet rs = conn.getMetaData().getTables(
-                conn.getCatalog(), schemaPattern, "%", new String[]{"TABLE"})) {
+                conn.getCatalog(), null, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
-                names.add(rs.getString("TABLE_NAME"));
+                String tbl = rs.getString("TABLE_NAME");
+                String sch = rs.getString("TABLE_SCHEM");
+                if (StrUtil.isBlank(tbl)) {
+                    continue;
+                }
+                if (StrUtil.isNotBlank(sch) && !"null".equalsIgnoreCase(sch)) {
+                    names.add(sch + "." + tbl);
+                } else {
+                    names.add(tbl);
+                }
             }
         }
         return names;
     }
 
-    private GravitinoClient.GravTable loadJdbcAsGrav(Connection conn, String catalog, String schema, String table)
+    /** @return [schema, table] */
+    private static String[] splitSchemaTable(String tableRef, String defaultSchema) {
+        if (StrUtil.isBlank(tableRef)) {
+            return new String[]{StrUtil.blankToDefault(defaultSchema, "public"), ""};
+        }
+        int dot = tableRef.indexOf('.');
+        if (dot > 0 && dot < tableRef.length() - 1) {
+            return new String[]{tableRef.substring(0, dot), tableRef.substring(dot + 1)};
+        }
+        return new String[]{StrUtil.blankToDefault(defaultSchema, "public"), tableRef};
+    }
+
+    private GravitinoClient.GravTable loadJdbcAsGrav(Connection conn, String catalog, String schema, String table,
+                                                    String dsType)
             throws Exception {
         GravitinoClient.GravTable gt = new GravitinoClient.GravTable();
         gt.metalake = lhProperties.getGravitino().getMetalake();
@@ -362,6 +403,23 @@ public class LhDatasourcePostRegisterBridge {
         gt.schema = schema;
         gt.name = table;
         gt.auditVersion = System.currentTimeMillis();
+        boolean pg = "postgresql".equalsIgnoreCase(dsType) || "pg".equalsIgnoreCase(dsType);
+        if (pg) {
+            try (ResultSet rs = conn.getMetaData().getColumns(conn.getCatalog(), schema, table, "%")) {
+                while (rs.next()) {
+                    if (!table.equalsIgnoreCase(rs.getString("TABLE_NAME"))) {
+                        continue;
+                    }
+                    GravitinoClient.GravColumn col = new GravitinoClient.GravColumn();
+                    col.name = rs.getString("COLUMN_NAME");
+                    col.type = rs.getString("TYPE_NAME");
+                    col.nullable = rs.getInt("NULLABLE") != java.sql.DatabaseMetaData.columnNoNulls;
+                    col.comment = rs.getString("REMARKS");
+                    gt.columns.add(col);
+                }
+            }
+            return gt;
+        }
         // MySQL：information_schema 比 DatabaseMetaData 更稳
         try (var ps = conn.prepareStatement(
                 "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, "

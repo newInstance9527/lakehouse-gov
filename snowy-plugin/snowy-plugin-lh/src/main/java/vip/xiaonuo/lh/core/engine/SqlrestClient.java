@@ -478,8 +478,8 @@ public class SqlrestClient {
         m.put("code", code);
         m.put("message", json.getStr("message"));
         // Hutool 把 JSON null 存成 JSONNull；直接放进响应会被 Jackson 拒绝
-        m.put("data", plain(json.get("data")));
-        Object pagination = plain(json.get("pagination"));
+        m.put("data", vip.xiaonuo.lh.core.json.HutoolJsonPlain.plain(json.get("data")));
+        Object pagination = vip.xiaonuo.lh.core.json.HutoolJsonPlain.plain(json.get("pagination"));
         if (pagination != null) {
             m.put("pagination", pagination);
         }
@@ -487,26 +487,6 @@ public class SqlrestClient {
             m.put("degraded", true);
         }
         return m;
-    }
-
-    /** JSONObject/JSONArray/JSONNull → Map/List/null，避免 HttpMessageConversionException。 */
-    private static Object plain(Object v) {
-        if (v == null || v instanceof cn.hutool.json.JSONNull) {
-            return null;
-        }
-        if (v instanceof JSONObject jo) {
-            Map<String, Object> out = new LinkedHashMap<>();
-            jo.forEach((k, val) -> out.put(k, plain(val)));
-            return out;
-        }
-        if (v instanceof JSONArray ja) {
-            List<Object> out = new ArrayList<>(ja.size());
-            for (Object item : ja) {
-                out.add(plain(item));
-            }
-            return out;
-        }
-        return v;
     }
 
     private Map<String, Object> degraded(String message) {
