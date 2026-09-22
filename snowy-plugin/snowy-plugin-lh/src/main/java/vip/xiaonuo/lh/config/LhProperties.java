@@ -236,6 +236,12 @@ public class LhProperties {
         private String vaultPath = LhVaultPaths.MINIO;
         private String accessKey;
         private String secretKey;
+        /** 平台自有对象桶（即席抽样 / 证据包等）；默认 lh-portal */
+        private String bucket = "lh-portal";
+        /** 即席数据集抽样对象前缀；完整 key = {prefix}/{ws}/{dsCode}/sample.json */
+        private String datasetPrefix = "adhoc/dataset";
+        /** AWS SDK / MinIO region；MinIO 常用 us-east-1 */
+        private String region = "us-east-1";
     }
 
     @Getter

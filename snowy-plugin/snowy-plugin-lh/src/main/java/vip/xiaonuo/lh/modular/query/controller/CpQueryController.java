@@ -177,6 +177,16 @@ public class CpQueryController {
         return CommonResult.data(cpQueryService.saveDataset(param));
     }
 
+    @Operation(summary = "读取抽样数据集（含行；优先对象存储）")
+    @GetMapping({
+            "/lh/compute/query/datasets/{id}",
+            "/lh/query/datasets/{id}",
+            "/api/compute/query/datasets/{id}"
+    })
+    public CommonResult<Map<String, Object>> getDataset(@PathVariable String id) {
+        return CommonResult.data(cpQueryService.getDataset(id));
+    }
+
     @Operation(summary = "我的数据集列表")
     @GetMapping({"/lh/compute/query/datasets", "/lh/query/datasets", "/api/compute/query/datasets"})
     public CommonResult<List<Map<String, Object>>> listDatasets(

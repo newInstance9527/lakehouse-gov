@@ -104,6 +104,9 @@ lh:
   minio:
     url: http://127.0.0.1:9009
     vault-path: platform/minio/s3
+    bucket: lh-portal
+    dataset-prefix: adhoc/dataset
+    region: us-east-1
     # access-key / secret-key 建议只写 Vault，此处可留空
   etl:
     default-engine: flink

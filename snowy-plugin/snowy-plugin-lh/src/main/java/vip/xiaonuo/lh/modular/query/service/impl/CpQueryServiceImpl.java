@@ -29,6 +29,8 @@ import vip.xiaonuo.lh.modular.query.support.CpQueryAssetCatalog;
 import vip.xiaonuo.lh.modular.query.support.CpQueryCatalogGuard;
 import vip.xiaonuo.lh.modular.query.support.CpQueryColumnMaskResolver;
 import vip.xiaonuo.lh.modular.query.support.CpQueryConcurrencyGuard;
+import vip.xiaonuo.lh.modular.query.support.CpQueryDatasetObjectKeys;
+import vip.xiaonuo.lh.modular.query.support.CpQueryDatasetObjectStore;
 import vip.xiaonuo.lh.modular.query.support.CpQueryElevateGate;
 import vip.xiaonuo.lh.modular.query.support.CpQueryParamBinder;
 import vip.xiaonuo.lh.modular.query.support.CpQueryPrincipalMapper;
@@ -78,6 +80,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private CpQueryRowFilterInjector rowFilterInjector;
     @Resource
     private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private CpQueryDatasetObjectStore datasetObjectStore;
 
     @Override
     public Map<String, Object> exec(CpQueryExecParam param) {
@@ -596,6 +600,7 @@ public class CpQueryServiceImpl implements CpQueryService {
         if (rows.size() > 200) {
             rows = rows.subList(0, 200);
         }
+        String sampleJson = JSONUtil.toJsonStr(rows);
         CpQueryDataset ds = new CpQueryDataset();
         ds.setId(IdUtil.getSnowflakeNextIdStr());
         ds.setDsCode("ds_" + IdUtil.getSnowflakeNextIdStr());
@@ -609,7 +614,6 @@ public class CpQueryServiceImpl implements CpQueryService {
             ds.setSqlHash(DigestUtil.sha256Hex(param.getSql()).substring(0, 32));
         }
         ds.setColumnsJson(JSONUtil.toJsonStr(param.getColumns() == null ? List.of() : param.getColumns()));
-        ds.setSampleJson(JSONUtil.toJsonStr(rows));
         ds.setRowCount(rows.size());
         ds.setScanBytes(param.getScanBytes());
         ds.setStatus("active");
@@ -618,13 +622,108 @@ public class CpQueryServiceImpl implements CpQueryService {
         ds.setCreateUser(user.id);
         ds.setUpdateTime(ds.getCreateTime());
         ds.setUpdateUser(user.id);
+
+        boolean objectOk = false;
+        String degradeReason = null;
+        try {
+            CpQueryDatasetObjectStore.PutResult put = datasetObjectStore.putSampleJson(ws, ds.getDsCode(), sampleJson);
+            ds.setSampleBucket(put.getBucket());
+            ds.setSampleObjectKey(put.getObjectKey());
+            ds.setSampleUri(put.getUri());
+            ds.setSampleSha256(put.getSha256());
+            ds.setSampleStorage(CpQueryDatasetObjectKeys.STORAGE_OBJECT);
+            ds.setSampleJson(null);
+            objectOk = true;
+        } catch (Exception e) {
+            degradeReason = StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName());
+            ds.setSampleJson(sampleJson);
+            ds.setSampleStorage(CpQueryDatasetObjectKeys.STORAGE_DB);
+            ds.setSampleSha256(DigestUtil.sha256Hex(sampleJson));
+        }
+
         datasetMapper.insert(ds);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", ds.getId());
         out.put("dsCode", ds.getDsCode());
         out.put("name", ds.getName());
         out.put("rowCount", ds.getRowCount());
-        out.put("message", "已保存抽样数据集（≤200 行，禁止全量落库）");
+        out.put("sampleStorage", ds.getSampleStorage());
+        out.put("sampleUri", ds.getSampleUri());
+        out.put("sampleObjectKey", ds.getSampleObjectKey());
+        out.put("sampleBucket", ds.getSampleBucket());
+        out.put("sampleSha256", ds.getSampleSha256());
+        out.put("sampleDegraded", !objectOk);
+        if (objectOk) {
+            out.put("message", "已保存抽样数据集至对象存储（≤200 行，门户库仅元数据）");
+        } else {
+            out.put("message", "对象存储不可用，已降级写入门户 sample_json（≤200 行）");
+            out.put("degradeReason", degradeReason);
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> getDataset(String id) {
+        if (StrUtil.isBlank(id)) {
+            throw new CommonException("数据集 id 不能为空");
+        }
+        UserSnap user = currentUser();
+        CpQueryDataset d = datasetMapper.selectById(id);
+        if (d == null || "DELETE".equals(d.getDeleteFlag()) || !user.id.equals(d.getUserId())) {
+            throw new CommonException("数据集不存在或无权访问");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", d.getId());
+        out.put("dsCode", d.getDsCode());
+        out.put("name", d.getName());
+        out.put("ws", d.getWs());
+        out.put("queryId", d.getQueryId());
+        out.put("sql", d.getSqlText());
+        out.put("rowCount", d.getRowCount());
+        out.put("scanBytes", d.getScanBytes());
+        out.put("sampleStorage", d.getSampleStorage());
+        out.put("sampleUri", d.getSampleUri());
+        out.put("sampleObjectKey", d.getSampleObjectKey());
+        out.put("sampleBucket", d.getSampleBucket());
+        out.put("sampleSha256", d.getSampleSha256());
+        out.put("createTime", formatTime(d.getCreateTime()));
+        try {
+            out.put("columns", JSONUtil.parseArray(
+                    StrUtil.blankToDefault(d.getColumnsJson(), "[]")));
+        } catch (Exception e) {
+            out.put("columns", List.of());
+        }
+
+        String sampleBody = null;
+        boolean sampleDegraded = false;
+        String sampleSource = null;
+        if (CpQueryDatasetObjectKeys.STORAGE_OBJECT.equals(d.getSampleStorage())
+                && StrUtil.isNotBlank(d.getSampleBucket())
+                && StrUtil.isNotBlank(d.getSampleObjectKey())) {
+            try {
+                sampleBody = datasetObjectStore.getSampleJson(d.getSampleBucket(), d.getSampleObjectKey());
+                sampleSource = CpQueryDatasetObjectKeys.STORAGE_OBJECT;
+            } catch (Exception e) {
+                sampleDegraded = true;
+                if (StrUtil.isNotBlank(d.getSampleJson())) {
+                    sampleBody = d.getSampleJson();
+                    sampleSource = CpQueryDatasetObjectKeys.STORAGE_DB;
+                }
+                out.put("sampleReadError", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            }
+        } else if (StrUtil.isNotBlank(d.getSampleJson())) {
+            sampleBody = d.getSampleJson();
+            sampleSource = CpQueryDatasetObjectKeys.STORAGE_DB;
+            sampleDegraded = !CpQueryDatasetObjectKeys.STORAGE_OBJECT.equals(d.getSampleStorage());
+        }
+        try {
+            out.put("rows", sampleBody == null ? List.of() : JSONUtil.parseArray(sampleBody));
+        } catch (Exception e) {
+            out.put("rows", List.of());
+            sampleDegraded = true;
+        }
+        out.put("sampleSource", sampleSource);
+        out.put("sampleDegraded", sampleDegraded);
         return out;
     }
 
@@ -650,6 +749,9 @@ public class CpQueryServiceImpl implements CpQueryService {
             m.put("queryId", d.getQueryId());
             m.put("rowCount", d.getRowCount());
             m.put("scanBytes", d.getScanBytes());
+            m.put("sampleStorage", d.getSampleStorage());
+            m.put("sampleUri", d.getSampleUri());
+            m.put("sampleDegraded", CpQueryDatasetObjectKeys.STORAGE_DB.equals(d.getSampleStorage()));
             m.put("createTime", formatTime(d.getCreateTime()));
             m.put("sql", d.getSqlText());
             out.add(m);

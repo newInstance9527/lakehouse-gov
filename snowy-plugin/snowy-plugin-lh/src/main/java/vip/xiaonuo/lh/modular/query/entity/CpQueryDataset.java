@@ -25,7 +25,14 @@ public class CpQueryDataset {
     private String sqlText;
     private String sqlHash;
     private String columnsJson;
+    /** 降级兜底：对象存储成功时应为 null */
     private String sampleJson;
+    private String sampleBucket;
+    private String sampleObjectKey;
+    private String sampleUri;
+    private String sampleSha256;
+    /** object | db */
+    private String sampleStorage;
     private Integer rowCount;
     private Long scanBytes;
     private String status;

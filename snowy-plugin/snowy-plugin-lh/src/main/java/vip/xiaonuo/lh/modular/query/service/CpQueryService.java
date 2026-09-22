@@ -45,6 +45,9 @@ public interface CpQueryService {
 
     Map<String, Object> saveDataset(CpQueryDatasetSaveParam param);
 
+    /** 读取我的数据集（含抽样行；优先对象存储） */
+    Map<String, Object> getDataset(String id);
+
     List<Map<String, Object>> listDatasets(String ws, Integer limit);
 
     /** 保存即席脚本到 cp_query_saved（同用户+ws+name 覆盖） */
