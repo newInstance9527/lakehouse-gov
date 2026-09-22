@@ -7,6 +7,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRestrictParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelRevealParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelSubjectMapUpsertParam;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelRequestVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
@@ -28,6 +29,12 @@ public interface GovDelService {
     GovDelRequestVo detail(String reqIdOrNo);
 
     GovDelRequestVo create(GovDelRequestCreateParam param);
+
+    /**
+     * 二次授权查看主体 ID 明文：须回填 req_no + 用途；从 Vault 读取并写审计流水。
+     * 响应含明文，不得写入列表/详情默认字段。
+     */
+    Map<String, Object> revealSubjectPlain(GovDelRevealParam param);
 
     /** 展开主体索引 + 血缘锚点，生成/刷新删除计划。 */
     GovDelRequestVo assess(GovDelActionParam param);

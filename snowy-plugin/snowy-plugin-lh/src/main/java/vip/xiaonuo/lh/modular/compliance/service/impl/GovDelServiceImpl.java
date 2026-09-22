@@ -7,7 +7,6 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.annotation.Resource;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
@@ -36,6 +35,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRestrictParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelRevealParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelSubjectMapUpsertParam;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelRequestVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
@@ -44,6 +44,8 @@ import vip.xiaonuo.lh.modular.compliance.service.GovDelService;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.ClickHouseClient;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
+import vip.xiaonuo.lh.core.vault.LhVaultClient;
+import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcTableActionParam;
@@ -141,9 +143,8 @@ public class GovDelServiceImpl implements GovDelService {
             "account_close", "账号注销"
     );
 
-    /** 生产须改为 Vault / KMS 下发；本 key 只用于开发与联调。 */
-    @Value("${lh.compliance.subject-hmac-key:}")
-    private String subjectHmacKey;
+    /** HMAC key 缓存（启动后首次 resolve 填充；轮换需重启或后续加 refresh）。 */
+    private volatile String resolvedHmacKey;
 
     @Resource
     private GovDelRequestMapper requestMapper;
@@ -171,6 +172,8 @@ public class GovDelServiceImpl implements GovDelService {
     private ClickHouseClient clickHouseClient;
     @Resource
     private LhProperties lhProperties;
+    @Resource
+    private LhVaultClient vaultClient;
 
     // ───────────────────────────── 看板 ─────────────────────────────
 
@@ -270,7 +273,8 @@ public class GovDelServiceImpl implements GovDelService {
         req.setSubjectType(subjectType);
         req.setSubjectIdHash(hashSubject(subjectType, plain));
         req.setSubjectMasked(mask(plain));
-        req.setVaultPath("lh/compliance/subject/" + req.getReqNo());
+        String vaultPath = LhVaultPaths.complianceSubject(req.getReqNo());
+        req.setVaultPath(vaultPath);
         req.setReqType(StrUtil.blankToDefault(param.getReqType(), "forget").trim().toLowerCase(Locale.ROOT));
         req.setLegalBasis(param.getLegalBasis());
         req.setScopeLabel(StrUtil.blankToDefault(param.getScopeLabel(), "指定行"));
@@ -282,15 +286,72 @@ public class GovDelServiceImpl implements GovDelService {
         req.setDeleteFlag(NOT_DELETE);
         req.setCreateTime(now);
         req.setUpdateTime(now);
+
+        // 明文仅进 Vault；门户表只留 hash + vault_path
+        Map<String, Object> secret = new LinkedHashMap<>();
+        secret.put("subjectId", plain);
+        secret.put("subjectType", subjectType);
+        secret.put("reqNo", req.getReqNo());
+        vaultClient.write(vaultPath, secret);
+
         requestMapper.insert(req);
 
         logExec(req, null, "request.create", "success", null, null,
-                "受理 " + reqTypeLabel(req.getReqType()) + "；SLA " + SLA_WORK_DAYS + " 工作日");
+                "受理 " + reqTypeLabel(req.getReqType()) + "；SLA " + SLA_WORK_DAYS + " 工作日；明文已入 Vault");
 
         if (param.getAutoAssess() == null || Boolean.TRUE.equals(param.getAutoAssess())) {
             buildPlan(req);
         }
         return detail(req.getId());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> revealSubjectPlain(GovDelRevealParam param) {
+        GovDelRequest req = requireRequest(param.getReqId());
+        String confirm = StrUtil.trim(param.getConfirmReqNo());
+        if (!req.getReqNo().equals(confirm)) {
+            throw new CommonException("二次确认失败：请回填正确的请求号 {}", req.getReqNo());
+        }
+        String reason = StrUtil.trim(param.getReason());
+        if (StrUtil.isBlank(reason) || reason.length() < 4) {
+            throw new CommonException("请填写查看用途（至少 4 字），将写入审计");
+        }
+        String vaultPath = StrUtil.blankToDefault(req.getVaultPath(),
+                LhVaultPaths.complianceSubject(req.getReqNo()));
+        if (!vaultClient.exists(vaultPath)) {
+            throw new CommonException("Vault 无主体明文（演示种子或已销毁）：{}", vaultPath);
+        }
+        String plain = vaultClient.getString(vaultPath, "subjectId");
+        if (StrUtil.isBlank(plain)) {
+            throw new CommonException("Vault 条目缺少 subjectId：{}", vaultPath);
+        }
+
+        // 审计流水：禁止写入明文
+        logExec(req, null, "subject.reveal", "success", null, null,
+                "二次授权查看明文 · 用途：" + StrUtil.maxLength(reason, 200)
+                        + " · 操作人：" + currentOperator());
+        addEvidence(req, "audit", "主体明文二次授权",
+                JSONUtil.toJsonStr(Map.of(
+                        "action", "subject.reveal",
+                        "reqNo", req.getReqNo(),
+                        "operator", currentOperator(),
+                        "reason", reason,
+                        "vaultPath", vaultPath,
+                        "at", new Date()
+                )));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("reqId", req.getId());
+        out.put("reqNo", req.getReqNo());
+        out.put("subjectType", req.getSubjectType());
+        out.put("subjectMasked", req.getSubjectMasked());
+        out.put("subjectId", plain);
+        out.put("vaultPath", vaultPath);
+        out.put("reason", reason);
+        out.put("operator", currentOperator());
+        out.put("revealedAt", new Date());
+        return out;
     }
 
     @Override
@@ -1721,7 +1782,43 @@ public class GovDelServiceImpl implements GovDelService {
     }
 
     private String hashSubject(String subjectType, String plain) {
-        return SecureUtil.hmacSha256(subjectHmacKey).digestHex(subjectType + ":" + plain);
+        return SecureUtil.hmacSha256(resolveHmacKey()).digestHex(subjectType + ":" + plain);
+    }
+
+    /**
+     * HMAC key：优先 Vault {@code platform/compliance/subject-hmac}；
+     * 缺失时用 yml bootstrap 并尝试 writeIfAbsent。
+     */
+    private String resolveHmacKey() {
+        String cached = resolvedHmacKey;
+        if (StrUtil.isNotBlank(cached)) {
+            return cached;
+        }
+        synchronized (this) {
+            if (StrUtil.isNotBlank(resolvedHmacKey)) {
+                return resolvedHmacKey;
+            }
+            LhProperties.Compliance cfg = lhProperties.getCompliance();
+            String path = cfg != null && StrUtil.isNotBlank(cfg.getHmacVaultPath())
+                    ? cfg.getHmacVaultPath()
+                    : LhVaultPaths.COMPLIANCE_SUBJECT_HMAC;
+            String fromVault = vaultClient.getString(path, "hmacKey");
+            if (StrUtil.isNotBlank(fromVault)) {
+                resolvedHmacKey = fromVault.trim();
+                return resolvedHmacKey;
+            }
+            String bootstrap = cfg != null ? StrUtil.trim(cfg.getSubjectHmacKey()) : null;
+            if (StrUtil.isBlank(bootstrap)) {
+                bootstrap = "";
+            }
+            Map<String, Object> seed = new LinkedHashMap<>();
+            seed.put("hmacKey", bootstrap);
+            vaultClient.writeIfAbsent(path, seed);
+            // 若并发已写入其它值，再读一次
+            String again = vaultClient.getString(path, "hmacKey");
+            resolvedHmacKey = StrUtil.blankToDefault(again, bootstrap).trim();
+            return resolvedHmacKey;
+        }
     }
 
     private String mask(String plain) {

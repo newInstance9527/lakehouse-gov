@@ -53,6 +53,7 @@ public class LhProperties {
     private Ai ai = new Ai();
     private Lifecycle lifecycle = new Lifecycle();
     private Compute compute = new Compute();
+    private Compliance compliance = new Compliance();
 
     @Getter
     @Setter
@@ -427,5 +428,21 @@ public class LhProperties {
         private String patrolCron = "0 0 * * * ?";
         /** Key 将在 N 天内过期 → status=warn */
         private int patrolWarnDays = 14;
+    }
+
+    /**
+     * 合规删除：主体 ID HMAC 密钥。
+     * <p>运行时优先读 Vault {@code vault-path}；yml 明文仅 bootstrap 种子。</p>
+     */
+    @Getter
+    @Setter
+    public static class Compliance {
+        /** HMAC key 存放路径（ig_secret_store） */
+        private String hmacVaultPath = LhVaultPaths.COMPLIANCE_SUBJECT_HMAC;
+        /**
+         * bootstrap only：首次写入 Vault 的 HMAC 密钥材料。
+         * 生产导入后应清空本字段，仅保留 vault-path。
+         */
+        private String subjectHmacKey = "";
     }
 }

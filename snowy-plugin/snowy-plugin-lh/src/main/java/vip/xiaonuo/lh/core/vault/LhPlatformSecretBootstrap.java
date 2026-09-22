@@ -118,6 +118,17 @@ public class LhPlatformSecretBootstrap implements ApplicationRunner {
             }
         }
 
+        LhProperties.Compliance compliance = lhProperties.getCompliance();
+        if (compliance != null && StrUtil.isNotBlank(compliance.getSubjectHmacKey())
+                && StrUtil.isNotBlank(compliance.getHmacVaultPath())) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("hmacKey", compliance.getSubjectHmacKey().trim());
+            if (vaultClient.writeIfAbsent(compliance.getHmacVaultPath(), m)) {
+                n++;
+                log.info("[LhVault] seeded {}", compliance.getHmacVaultPath());
+            }
+        }
+
         log.info("[LhVault] platform secret bootstrap done, newly seeded={}", n);
     }
 

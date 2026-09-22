@@ -65,4 +65,18 @@ public final class LhVaultPaths {
     public static String aiModel(String modelId) {
         return AI_MODEL_PREFIX + modelId;
     }
+
+    /**
+     * 合规删除主体 ID HMAC 密钥（平台级，全环境共用一把；轮换后旧 hash 不可验）。
+     * 字段约定：{@code hmacKey}
+     */
+    public static final String COMPLIANCE_SUBJECT_HMAC = "platform/compliance/subject-hmac";
+
+    /**
+     * 合规删除主体 ID 明文：{@code lh/compliance/subject/{reqNo}}
+     * 字段约定：{@code subjectId} / {@code subjectType} / {@code reqNo}
+     */
+    public static String complianceSubject(String reqNo) {
+        return "lh/compliance/subject/" + reqNo;
+    }
 }

@@ -20,6 +20,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRestrictParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelRevealParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelSubjectMapUpsertParam;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelRequestVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
@@ -59,11 +60,18 @@ public class GovDelController {
         return CommonResult.data(govDelService.detail(reqId));
     }
 
-    @Operation(summary = "受理请求（主体 ID 仅用于 HMAC 与掩码，不落库）")
+    @Operation(summary = "受理请求（主体 ID 即时 HMAC，明文进 Vault，不落库）")
     @CommonLog("合规删除受理")
     @PostMapping({"/lh/compliance/requests", "/api/governance/compliance/requests"})
     public CommonResult<GovDelRequestVo> create(@RequestBody @Valid GovDelRequestCreateParam param) {
         return CommonResult.data(govDelService.create(param));
+    }
+
+    @Operation(summary = "二次授权查看主体 ID 明文（回填请求号 + 用途；写审计）")
+    @CommonLog("合规删除查看主体明文")
+    @PostMapping({"/lh/compliance/subject-plain", "/api/governance/compliance/subject-plain"})
+    public CommonResult<Map<String, Object>> revealSubjectPlain(@RequestBody @Valid GovDelRevealParam param) {
+        return CommonResult.data(govDelService.revealSubjectPlain(param));
     }
 
     @Operation(summary = "评估：展开主体索引生成删除计划")

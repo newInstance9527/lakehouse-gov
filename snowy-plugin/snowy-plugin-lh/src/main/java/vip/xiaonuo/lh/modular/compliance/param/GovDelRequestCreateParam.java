@@ -8,14 +8,14 @@ import lombok.Setter;
 import java.util.Date;
 
 /**
- * 创建合规删除请求。{@code subjectId} 仅用于即时 HMAC 与掩码，不落库。
+ * 创建合规删除请求。{@code subjectId} 即时 HMAC + 掩码后写入 Vault，不落门户表。
  */
 @Getter
 @Setter
 public class GovDelRequestCreateParam {
 
     @NotBlank
-    @Schema(description = "主体 ID 明文（仅用于 HMAC 与掩码，不落库）")
+    @Schema(description = "主体 ID 明文（即时 HMAC 后进 Vault，不落门户表）")
     private String subjectId;
 
     @Schema(description = "主体类型：user/order/device/account/contract")

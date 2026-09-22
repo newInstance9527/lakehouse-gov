@@ -140,3 +140,7 @@ lh:
     profile-daily-enabled: false
     profile-table-timeout-ms: 60000
     profile-max-tables: 200
+  # 合规删除：HMAC key 进 Vault；yml 明文仅 bootstrap，导入后可清空
+  compliance:
+    hmac-vault-path: platform/compliance/subject-hmac
+    subject-hmac-key: 
