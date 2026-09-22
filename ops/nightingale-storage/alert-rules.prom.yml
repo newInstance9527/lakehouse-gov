@@ -1,0 +1,129 @@
+# 湖仓存储趋势 / 生命周期 · 夜莺可导入的 Prometheus 告警规则（C4）
+# 指标契约：doc/存储趋势.md §5.2 · ops/categraf-minio
+# 导入：夜莺 ≥8.2「告警规则 → 导入 Prometheus 规则」粘贴本文件；再批量挂通知规则。
+#
+# 分级（labels.severity）：critical≈P0/P1 · warning≈P1 · info≈P2（全栈 §30.3/§30.4）
+# 通知对象：导入后按 append 标签路由到「平台组」；表/桶 owner 依赖后续目录认责标签（残留）。
+
+groups:
+  - name: lh-storage-c4
+    interval: 60s
+    rules:
+      # —— 1. 桶 TTF / 表级 days-to-full < 45d（扩容 runway）——
+      - alert: LhTableDaysToFullP95Below45
+        expr: lh_table_storage_days_to_full{quantile="p95"} < 45 and lh_table_storage_days_to_full{quantile="p95"} > 0
+        for: 30m
+        labels:
+          severity: critical
+          domain: storage
+          route: platform
+        annotations:
+          summary: "表 {{ $labels.fqtn }} days-to-full(p95)={{ $value }}d < 45"
+          description: "分段线性预测写回 VM（C2）。深链 /lifecycle/storage?fqtn={{ $labels.fqtn }}&ws={{ $labels.ws }}"
+          runbook: "扩容或治理回收；勿在存储趋势页直接执行 compaction"
+
+      - alert: LhBucketDaysToFullBelow45
+        # 桶 TTF ≈ (capacity − used) / 近 7 日日均增量；仅增长为正时告警
+        expr: |
+          (
+            (lh_bucket_storage_capacity_bytes - on(bucket) lh_bucket_storage_used_bytes)
+            /
+            on(bucket) clamp_min((lh_bucket_storage_used_bytes - lh_bucket_storage_used_bytes offset 7d) / 7, 1)
+          ) < 45
+          and on(bucket)
+          (lh_bucket_storage_used_bytes - lh_bucket_storage_used_bytes offset 7d) > 0
+        for: 1h
+        labels:
+          severity: critical
+          domain: storage
+          route: platform
+        annotations:
+          summary: "桶 {{ $labels.bucket }} 估算 TTF < 45d（value={{ $value }}）"
+          description: "基于 lh_bucket_storage_{used,capacity}_bytes。无 capacity 时先导入 categraf-minio/capacity_overlay.prom 或 yaml 覆盖。深链 /lifecycle/storage?bucket={{ $labels.bucket }}"
+
+      # —— 2. 配额 / 桶水位 ≥ 80% ——
+      - alert: LhBucketUsageOver80Pct
+        expr: |
+          (lh_bucket_storage_used_bytes / on(bucket) lh_bucket_storage_capacity_bytes) >= 0.8
+        for: 30m
+        labels:
+          severity: warning
+          domain: storage
+          route: platform
+        annotations:
+          summary: "桶 {{ $labels.bucket }} 用量占比 ≥ 80%（{{ $value }}）"
+          description: "生命周期「桶水位 >80%」；与门户 buckets.alert 同源指标。"
+
+      - alert: LhWorkspaceStorageQuotaOver80Pct
+        # 空间配额 §28.1：须另有作业/旁路把 gov_ws_quota 投影为下列指标（见 README 残留）
+        expr: |
+          (lh_ws_storage_used_bytes / on(ws) lh_ws_storage_quota_bytes) >= 0.8
+        for: 15m
+        labels:
+          severity: warning
+          domain: workspace
+          route: platform
+        annotations:
+          summary: "空间 {{ $labels.ws }} 存储配额使用率 ≥ 80%（{{ $value }}）"
+          description: "熔断前置（§28.1）。深链 /workspace?ws={{ $labels.ws }}。指标未写入时本规则不会触发。"
+
+      # —— 3. 表级采集断流（日批 24h 无点）——
+      - alert: LhTableStorageCollectStale24h
+        expr: (time() - timestamp(lh_table_storage_bytes{kind="total"})) > 86400
+        for: 15m
+        labels:
+          severity: critical
+          domain: storage
+          route: platform
+        annotations:
+          summary: "表 {{ $labels.fqtn }} 存储画像断流 >24h"
+          description: "job.storage.profile_daily 应对齐写 lh_table_storage_*。平台组排查 Trino/VM import。"
+
+      - alert: LhTableStorageCollectAbsent25h
+        # 整仓无任何 total 点（日批整体失败）
+        expr: absent_over_time(lh_table_storage_bytes{kind="total"}[25h]) == 1
+        for: 10m
+        labels:
+          severity: critical
+          domain: storage
+          route: platform
+        annotations:
+          summary: "全仓 lh_table_storage_bytes{kind=total} 25h 内无点"
+          description: "采集作业未跑或 VM 不可写；非单表 staleness。"
+
+      # —— 4. 小文件 / compaction SLA ——
+      - alert: LhTableSmallFileRatioHigh
+        expr: lh_table_storage_small_file_ratio > 0.30
+        for: 2h
+        labels:
+          severity: warning
+          domain: lifecycle
+          route: platform
+        annotations:
+          summary: "表 {{ $labels.fqtn }} 小文件占比 {{ $value }} > 30%"
+          description: "对齐 §32.2；建议深链 /lifecycle?table={{ $labels.fqtn }}&action=compact（二次确认）。"
+
+      - alert: LhTableSmallFileWorsening
+        # compaction 赶不上 ingest：占比超阈且日环比上升
+        expr: |
+          lh_table_storage_small_file_ratio > 0.30
+          and (lh_table_storage_small_file_ratio - lh_table_storage_small_file_ratio offset 1d) > 0
+        for: 1h
+        labels:
+          severity: critical
+          domain: lifecycle
+          route: platform
+        annotations:
+          summary: "表 {{ $labels.fqtn }} 小文件恶化（>30% 且环比升）"
+          description: "compaction SLA 未达标（§23.3/§32.2）。挂表 owner 后改 route。"
+
+      - alert: LhTableAvgFileSizeTooSmall
+        expr: lh_table_storage_avg_file_bytes > 0 and lh_table_storage_avg_file_bytes < 33554432
+        for: 6h
+        labels:
+          severity: info
+          domain: lifecycle
+          route: platform
+        annotations:
+          summary: "表 {{ $labels.fqtn }} 活跃文件均大小 < 32MiB（{{ $value }}）"
+          description: "与 small_file_ratio 互补；避免仅看文件数刷屏。"
