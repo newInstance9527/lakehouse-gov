@@ -464,6 +464,64 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     }
 
     @Override
+    public Map<String, Object> kpi() {
+        String userId = LhLoginUsers.requireUserId();
+        Date monthStart = startOfMonth();
+        long pending = 0L;
+        if (LhLoginUsers.isSuperAdmin()) {
+            pending = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
+                    .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                    .eq(ApplyTicket::getStatus, "pending"));
+        }
+        long mine = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getApplicant, userId));
+        long minePending = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getApplicant, userId)
+                .eq(ApplyTicket::getStatus, "pending"));
+        long monthApproved = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getApplicant, userId)
+                .eq(ApplyTicket::getStatus, "approved")
+                .ge(ApplyTicket::getApprovedAt, monthStart));
+        long monthRejected = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getApplicant, userId)
+                .eq(ApplyTicket::getStatus, "rejected")
+                .ge(ApplyTicket::getApprovedAt, monthStart));
+        long metricPending = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getTicketType, TYPE_METRIC)
+                .eq(ApplyTicket::getStatus, "pending"));
+        long metricMine = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getTicketType, TYPE_METRIC)
+                .eq(ApplyTicket::getApplicant, userId));
+
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("pending", pending);
+        r.put("mine", mine);
+        r.put("minePending", minePending);
+        r.put("monthApproved", monthApproved);
+        r.put("monthRejected", monthRejected);
+        r.put("metricPending", metricPending);
+        r.put("metricMine", metricMine);
+        r.put("monthStart", monthStart);
+        return r;
+    }
+
+    private static Date startOfMonth() {
+        Calendar cal = Calendar.getInstance();
+        cal.set(Calendar.DAY_OF_MONTH, 1);
+        cal.set(Calendar.HOUR_OF_DAY, 0);
+        cal.set(Calendar.MINUTE, 0);
+        cal.set(Calendar.SECOND, 0);
+        cal.set(Calendar.MILLISECOND, 0);
+        return cal.getTime();
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> approve(ApplyTicketDecideParam param) {
         if (!LhLoginUsers.isSuperAdmin()) {

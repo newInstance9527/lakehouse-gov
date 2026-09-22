@@ -44,6 +44,12 @@ public class ApplyTicketController {
         return CommonResult.data(applyTicketService.pagePending(param));
     }
 
+    @Operation(summary = "看板 KPI（待我/我的/本月通过驳回）")
+    @GetMapping("/lh/apply/kpi")
+    public CommonResult<Map<String, Object>> kpi() {
+        return CommonResult.data(applyTicketService.kpi());
+    }
+
     @Operation(summary = "通过申请")
     @CommonLog("通过申请单")
     @PostMapping("/lh/apply/tickets/approve")

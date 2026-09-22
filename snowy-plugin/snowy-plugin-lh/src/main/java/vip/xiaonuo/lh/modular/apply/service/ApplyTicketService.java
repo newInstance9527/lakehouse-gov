@@ -16,6 +16,11 @@ public interface ApplyTicketService {
 
     Page<ApplyTicket> pagePending(ApplyTicketPageParam param);
 
+    /**
+     * 看板 KPI：待我审批 / 我申请的 / 本月通过 / 本月驳回（含 metric 等全票种）。
+     */
+    Map<String, Object> kpi();
+
     Map<String, Object> approve(ApplyTicketDecideParam param);
 
     ApplyTicket reject(ApplyTicketDecideParam param);
