@@ -11,8 +11,8 @@ lh:
     user: admin
     password: ""
     insecure-ssl: true
-    # 即席查询面：白名单 ∩ SHOW CATALOGS；默认仅湖表 iceberg
-    query-catalogs: iceberg
+    # 即席查询面：白名单 ∩ SHOW CATALOGS；湖表 iceberg + 联邦 clickhouse（须 Trino 已挂载）
+    query-catalogs: iceberg,clickhouse
     lake-catalogs: iceberg
     catalog-cache-ttl-ms: 300000
     show-unrunnable-in-tree: false

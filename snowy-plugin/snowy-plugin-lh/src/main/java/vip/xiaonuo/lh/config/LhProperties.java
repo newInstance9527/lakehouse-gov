@@ -79,9 +79,9 @@ public class LhProperties {
         private boolean impersonate = true;
         /**
          * 即席查询 catalog 白名单（逗号分隔），与 SHOW CATALOGS 求交后才可跑。
-         * 默认仅湖表；联邦源开通后追加真实 Trino catalog 名（不是 Grav 的 ds_*）。
+         * 默认 iceberg + 联邦 clickhouse（须 Trino 已挂载；不是 Grav 的 ds_*）。
          */
-        private String queryCatalogs = "iceberg";
+        private String queryCatalogs = "iceberg,clickhouse";
         /**
          * 视为湖表的 Grav/Trino catalog（逗号分隔）。湖表查询 FQN 优先落在此集合中的名。
          */

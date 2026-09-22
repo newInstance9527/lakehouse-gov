@@ -1,0 +1,7 @@
+# 现网 iceberg catalog 一般已在 /opt/softs/lakehouse/trino/catalog/iceberg.properties。
+# 本文件仅作对照示例，勿覆盖现网；字段以现网为准。
+#
+# connector.name=iceberg
+# iceberg.catalog.type=rest
+# iceberg.rest-catalog.uri=http://lh-gravitino:9001/iceberg/
+# ...
