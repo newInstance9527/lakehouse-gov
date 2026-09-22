@@ -15,7 +15,7 @@ import java.util.Map;
 
 /**
  * 日批派生 {@code gov_lc_storage_advice}：按可回收/小文件/采集失败生成建议；同日同表同 kind 覆盖（幂等）。
- * days-to-full 仍写 VM，不在本类。
+ * days-to-full 由 {@link GovLcStorageDaysToFullDeriver} 写 VM，不在本类。
  */
 @Component
 public class GovLcStorageAdviceWriter {

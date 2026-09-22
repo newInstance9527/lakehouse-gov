@@ -356,6 +356,14 @@ public class LhProperties {
         private String vmImportUrl = "";
         /** VM import 超时（毫秒） */
         private int vmImportTimeoutMs = 15_000;
+        /**
+         * days-to-full 默认容量（字节）。0=跳过派生写回。
+         * 正式应由桶 capacity（Categraf）承接；现网未配时可用软上限做闭环。
+         * 默认 20 TiB，对齐演示桶容量量级。
+         */
+        private long forecastDefaultCapacityBytes = 20L * 1024 * 1024 * 1024 * 1024;
+        /** 回收把握系数，对齐存储趋势 §4.4 */
+        private double forecastReclaimConfidence = 0.7;
     }
 
     /**

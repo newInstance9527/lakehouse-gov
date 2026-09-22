@@ -178,7 +178,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
             forecast.put("available", true);
             forecast.put("p50DaysToFull", 62);
             forecast.put("p95DaysToFull", 48);
-            forecast.put("note", "P0 stub；正式由分段线性写回 lh_table_storage_days_to_full");
+            forecast.put("note", "API stub；日批已派生 lh_table_storage_days_to_full 写 VM（现网 VM URL 未配则跳过）");
         } else {
             forecast.put("available", false);
             forecast.put("reason", "INSUFFICIENT");

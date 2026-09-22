@@ -57,6 +57,19 @@ public final class GovLcStorageMetricsFormatter {
         return lines;
     }
 
+    /**
+     * 派生指标 {@code lh_table_storage_days_to_full{quantile="p50|p95"}}；
+     * 仅在预测可用时写出（样本不足 / 斜率非正不写点，避免污染告警）。
+     */
+    public static List<String> formatDaysToFull(String fqtn, String ws, String layer,
+                                                double p50Days, double p95Days, long timestampMs) {
+        List<String> lines = new ArrayList<>(2);
+        String base = labels(fqtn, ws, layer);
+        lines.add(gauge("lh_table_storage_days_to_full", base + ",quantile=\"p50\"", p50Days, timestampMs));
+        lines.add(gauge("lh_table_storage_days_to_full", base + ",quantile=\"p95\"", p95Days, timestampMs));
+        return lines;
+    }
+
     public static String joinBody(List<String> lines) {
         if (lines == null || lines.isEmpty()) {
             return "";

@@ -59,6 +59,8 @@ public class GovLcStorageProfileCollector {
     private GovLcRunMapper runMapper;
     @Resource
     private GovLcStorageAdviceWriter adviceWriter;
+    @Resource
+    private GovLcStorageDaysToFullDeriver daysToFullDeriver;
 
     /** 日批：画像治理范围内的表，并登记 DS 流程 {@code job.storage.profile_daily}。 */
     public Map<String, Object> runDaily(String ws) {
@@ -97,6 +99,13 @@ public class GovLcStorageProfileCollector {
             }
         }
 
+        Map<String, Object> daysToFull = daysToFullDeriver.deriveAndFormat(workspace, rows, dayTs);
+        @SuppressWarnings("unchecked")
+        List<String> ttfLines = (List<String>) daysToFull.getOrDefault("lines", List.of());
+        if (ttfLines != null && !ttfLines.isEmpty()) {
+            metricLines.addAll(ttfLines);
+        }
+
         Map<String, Object> vmResult = writeVm(metricLines);
         int vmSamples = metricLines.isEmpty() ? 0 : metricLines.size();
         Date adviceDt = java.sql.Date.valueOf(
@@ -131,6 +140,7 @@ public class GovLcStorageProfileCollector {
             metrics.put("vmResult", vmResult);
             metrics.put("vmSampleLines", vmSamples);
             metrics.put("vmDayCutEpochMs", dayTs);
+            metrics.put("daysToFull", daysToFull);
             metrics.put("adviceCount", adviceRows.size());
             metrics.put("ok", ok);
             metrics.put("partial", partial);
@@ -163,9 +173,10 @@ public class GovLcStorageProfileCollector {
         out.put("tables", rows);
         out.put("vm", vmResult);
         out.put("vmDayCutEpochMs", dayTs);
+        out.put("daysToFull", daysToFull);
         out.put("adviceCount", adviceRows.size());
         out.put("advice", adviceRows);
-        out.put("source", "trino $files/$snapshots/$partitions → gov_lc_table_stat + lh_table_storage_*");
+        out.put("source", "trino $files/$snapshots/$partitions → gov_lc_table_stat + lh_table_storage_* + days_to_full");
         return out;
     }
 
@@ -257,6 +268,7 @@ public class GovLcStorageProfileCollector {
             Snapshot written = mark(ws, fqn, ref, status, error, new Numbers(
                     active, total, reclaimable, fileCount, avg, small, snapshots, partitions));
             row.put("collectStatus", status);
+            row.put("layer", written.layer);
             row.put("activeBytes", active);
             row.put("totalBytes", total);
             row.put("reclaimableBytes", reclaimable);

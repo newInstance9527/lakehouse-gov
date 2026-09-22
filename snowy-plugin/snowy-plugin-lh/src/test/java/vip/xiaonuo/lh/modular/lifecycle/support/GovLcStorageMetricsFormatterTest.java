@@ -37,6 +37,17 @@ class GovLcStorageMetricsFormatterTest {
     }
 
     @Test
+    void formatsDaysToFullQuantiles() {
+        long ts = Instant.parse("2026-09-23T00:00:00Z").toEpochMilli();
+        List<String> lines = GovLcStorageMetricsFormatter.formatDaysToFull(
+                "ods_trade.s_order", "default", "ODS", 62.5, 48.0, ts);
+        String body = GovLcStorageMetricsFormatter.joinBody(lines);
+        assertTrue(body.contains("lh_table_storage_days_to_full{fqtn=\"ods_trade.s_order\",ws=\"default\",layer=\"ODS\",quantile=\"p50\"} 62.500000 " + ts));
+        assertTrue(body.contains("quantile=\"p95\"} 48 "));
+        assertFalse(body.contains("cursor"));
+    }
+
+    @Test
     void escapesLabelQuotes() {
         assertEquals("a\\\"b", GovLcStorageMetricsFormatter.esc("a\"b"));
     }
