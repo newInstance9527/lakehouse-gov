@@ -35,6 +35,12 @@ public interface GovLcService {
 
     GovLcRunVo expire(GovLcTableActionParam param);
 
+    /**
+     * 合规 Iceberg 硬删独立 DAG：delete → compact → 定向 expire(retain_last=1)。
+     * 模板名 {@code job.compliance.delete.iceberg}，不可复用日作业 DAG。
+     */
+    GovLcRunVo complianceDeleteIceberg(GovLcTableActionParam param);
+
     Map<String, Object> orphanScan(GovLcOrphanScanParam param);
 
     GovLcRunVo runNow(GovLcRunNowParam param);

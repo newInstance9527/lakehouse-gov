@@ -293,6 +293,68 @@ public class GovLcServiceImpl implements GovLcService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public GovLcRunVo complianceDeleteIceberg(GovLcTableActionParam param) {
+        if (param == null || StrUtil.isBlank(param.getTableFqn())) {
+            throw new CommonException("tableFqn 不能为空");
+        }
+        if (StrUtil.isBlank(param.getReqNo())) {
+            throw new CommonException("合规硬删 DAG 必须携带 reqNo");
+        }
+        if (StrUtil.isBlank(param.getIdColumn()) || StrUtil.isBlank(param.getSubjectIdHash())) {
+            throw new CommonException("合规硬删 DAG 需要 idColumn 与 subjectIdHash");
+        }
+        // 强制定向过期参数；assert 校验工单状态
+        param.setRetainLast(1);
+        assertComplianceOverride(param, "compliance_delete");
+
+        String workspace = wsOrDefault(param.getWs());
+        String fqn = param.getTableFqn().trim();
+        GovLcPolicy policy = findOrDefaultPolicy(workspace, fqn);
+        String operator = currentOperator();
+        Date now = new Date();
+        String runId = IdUtil.getSnowflakeNextIdStr();
+
+        GovLcDsLauncher.LaunchResult launch = dsLauncher.launchComplianceDelete(
+                fqn,
+                param.getIdColumn().trim(),
+                param.getSubjectIdHash().trim(),
+                param.getReqNo().trim(),
+                policy,
+                runId);
+
+        GovLcRun run = new GovLcRun();
+        run.setId(runId);
+        run.setRevision(1);
+        run.setWs(workspace);
+        run.setKind("compliance_delete");
+        run.setTableFqn(fqn);
+        run.setDsTaskId(launch.dsTaskId);
+        run.setDryRun(false);
+        run.setOperator(operator);
+        run.setRemark(StrUtil.blankToDefault(param.getRemark(),
+                "job.compliance.delete.iceberg " + param.getReqNo().trim()));
+        run.setReqNo(param.getReqNo().trim());
+        run.setRetainLast(1);
+        run.setStartedAt(now);
+        run.setMetricsJson(JSONUtil.toJsonStr(launch.toMetricsJson()));
+        run.setDeleteFlag(NOT_DELETE);
+        run.setCreateTime(now);
+        run.setUpdateTime(now);
+        if (StrUtil.isNotBlank(launch.processInstanceId)) {
+            run.setStatus("running");
+        } else if (launch.degraded) {
+            run.setStatus("failed");
+            run.setErrorMsg(launch.message);
+            run.setFinishedAt(now);
+        } else {
+            run.setStatus("queued");
+        }
+        runMapper.insert(run);
+        return toRunVo(run);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> orphanScan(GovLcOrphanScanParam param) {
         boolean dryRun = param.getDryRun() == null || Boolean.TRUE.equals(param.getDryRun());
         if (!dryRun) {
@@ -639,14 +701,15 @@ public class GovLcServiceImpl implements GovLcService {
     private void assertComplianceOverride(GovLcTableActionParam param, String kind) {
         boolean hasReq = StrUtil.isNotBlank(param.getReqNo());
         boolean hasRetain = param.getRetainLast() != null;
-        if (!hasReq && !hasRetain) {
+        boolean complianceDag = "compliance_delete".equals(kind);
+        if (!hasReq && !hasRetain && !complianceDag) {
             return;
         }
         if (!hasReq) {
             throw new CommonException("retainLast 覆盖必须携带合规请求号 reqNo");
         }
-        if (hasRetain && !"expire".equals(kind)) {
-            throw new CommonException("retainLast 只适用于快照过期");
+        if (hasRetain && !"expire".equals(kind) && !complianceDag) {
+            throw new CommonException("retainLast 只适用于快照过期或合规硬删 DAG");
         }
         if (hasRetain && param.getRetainLast() != 1) {
             throw new CommonException("合规定向过期仅允许 retainLast=1");

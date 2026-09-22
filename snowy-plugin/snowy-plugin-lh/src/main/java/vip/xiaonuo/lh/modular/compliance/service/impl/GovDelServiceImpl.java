@@ -67,8 +67,8 @@ import java.util.Set;
 
 /**
  * 合规删除 P0：请求/计划/执行流水/证据落库。
- * Iceberg 硬删与 dry-run COUNT 走 Trino；CK dry-run COUNT 走 HTTP；
- * 合并与定向快照过期通过 {@link GovLcService} 复用生命周期执行面。
+ * Iceberg 硬删走独立 DS DAG {@code job.compliance.delete.iceberg}
+ *（delete → compact → 定向 expire）；dry-run COUNT 仍走 Trino；CK dry-run COUNT 走 HTTP。
  */
 @Service
 public class GovDelServiceImpl implements GovDelService {
@@ -691,39 +691,41 @@ public class GovDelServiceImpl implements GovDelService {
     }
 
     /**
-     * Iceberg：DELETE WHERE → 提交合并。定向过期与 0 行反查在 verify 里做完才标完成。
+     * Iceberg：提交独立 DAG {@code job.compliance.delete.iceberg}
+     *（delete → compact → 定向 expire）。COUNT=0 反查在 verify 里做完才标完成。
      *
-     * @return true 表示 DELETE 已提交且进入 running；false 表示失败，不得标完成
+     * @return true 表示 DAG 已提交且进入 running；false 表示失败，不得标完成
      */
     private boolean executeIceberg(GovDelRequest req, GovDelTarget t, String execKey) {
         String column = subjectColumn(t);
-        GovLcMetadataSql.TableRef ref;
         try {
-            ref = GovLcMetadataSql.parse(t.getObjectFqn(), icebergCatalog());
             if (StrUtil.isBlank(column)) {
                 throw new IllegalArgumentException("主体索引缺少 idColumn，拒绝执行");
             }
-            String sql = GovDelIcebergSql.delete(ref.schema(), ref.table(), column, req.getSubjectIdHash());
-            Map<String, Object> exec = trinoJob(sql, ref);
-            if (Boolean.TRUE.equals(exec.get("degraded"))) {
-                throw new IllegalStateException(String.valueOf(exec.get("message")));
+            if (StrUtil.isBlank(req.getSubjectIdHash())) {
+                throw new IllegalArgumentException("主体摘要缺失，拒绝执行");
             }
-            String qid = str(exec.get("trinoQueryId"));
-            logExec(req, t, "iceberg.delete", "success", execKey, qid,
-                    "DELETE WHERE " + column + " = <hmac> · " + t.getObjectFqn()
-                            + (StrUtil.isNotBlank(qid) ? " · " + qid : ""));
+            // 校验 FQN / catalog 可解析
+            GovLcMetadataSql.parse(t.getObjectFqn(), icebergCatalog());
 
             GovLcTableActionParam lc = new GovLcTableActionParam();
             lc.setTableFqn(t.getObjectFqn());
             lc.setWs(req.getWs());
             lc.setReqNo(req.getReqNo());
-            lc.setRemark("合规删除 " + req.getReqNo());
-            GovLcRunVo compactRun = govLcService.compact(lc);
-            logExec(req, t, "iceberg.rewrite", "submitted", execKey, compactRun.getRunId(),
-                    "rewrite_data_files 已提交，待成功后再定向过期");
+            lc.setRetainLast(1);
+            lc.setIdColumn(column);
+            lc.setSubjectIdHash(req.getSubjectIdHash());
+            lc.setRemark("合规硬删 DAG " + req.getReqNo());
+            GovLcRunVo dagRun = govLcService.complianceDeleteIceberg(lc);
+            if ("failed".equals(dagRun.getStatus())) {
+                throw new IllegalStateException(StrUtil.blankToDefault(dagRun.getErrorMsg(),
+                        "合规硬删 DAG 提交失败"));
+            }
+            logExec(req, t, "iceberg.delete", "submitted", execKey, dagRun.getRunId(),
+                    "job.compliance.delete.iceberg 已提交（delete→compact→定向 expire retain_last=1）");
 
             t.setStatus("running");
-            t.setEngineRef("delete:" + StrUtil.blankToDefault(qid, "-") + ";compact:" + compactRun.getRunId());
+            t.setEngineRef("dag:" + dagRun.getRunId());
             t.setUpdateTime(new Date());
             targetMapper.updateById(t);
             return true;
@@ -732,30 +734,31 @@ public class GovDelServiceImpl implements GovDelService {
             t.setUpdateTime(new Date());
             targetMapper.updateById(t);
             logExec(req, t, "iceberg.delete", "failed", execKey, null,
-                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "Iceberg DELETE 失败"), 500));
+                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "Iceberg 硬删 DAG 提交失败"), 500));
             return false;
         }
     }
 
     /**
-     * 合并成功后才提交 retain_last=1；过期成功且 Trino COUNT=0 才标 done。
+     * 独立 DAG 成功后 Trino COUNT=0 才标 done（expire 已在 DAG 内完成）。
      */
     private String advanceIceberg(GovDelRequest req, GovDelTarget t) {
         EngineRef refs = EngineRef.parse(t.getEngineRef());
-        if (StrUtil.isBlank(refs.compactRunId)) {
+        String dagRunId = StrUtil.blankToDefault(refs.dagRunId, refs.compactRunId);
+        if (StrUtil.isBlank(dagRunId) || "-".equals(dagRunId)) {
             t.setStatus("failed");
             t.setUpdateTime(new Date());
             targetMapper.updateById(t);
             return "failed";
         }
-        GovLcRunVo compact = govLcService.syncRun(refs.compactRunId);
-        if (!"success".equals(compact.getStatus())) {
-            if ("failed".equals(compact.getStatus())) {
+        GovLcRunVo dag = govLcService.syncRun(dagRunId);
+        if (!"success".equals(dag.getStatus())) {
+            if ("failed".equals(dag.getStatus())) {
                 t.setStatus("failed");
                 t.setUpdateTime(new Date());
                 targetMapper.updateById(t);
-                logExec(req, t, "iceberg.rewrite", "failed", null, compact.getRunId(),
-                        StrUtil.blankToDefault(compact.getErrorMsg(), "合并失败"));
+                logExec(req, t, "iceberg.dag", "failed", null, dag.getRunId(),
+                        StrUtil.blankToDefault(dag.getErrorMsg(), "合规硬删 DAG 失败"));
                 return "failed";
             }
             t.setStatus("running");
@@ -763,7 +766,9 @@ public class GovDelServiceImpl implements GovDelService {
             targetMapper.updateById(t);
             return "running";
         }
-        if (StrUtil.isBlank(refs.expireRunId)) {
+        // 兼容旧路径：仅 compact 成功、尚未 expire 时补提交定向过期
+        if (StrUtil.isBlank(refs.dagRunId) && StrUtil.isNotBlank(refs.compactRunId)
+                && StrUtil.isBlank(refs.expireRunId)) {
             GovLcTableActionParam lc = new GovLcTableActionParam();
             lc.setTableFqn(t.getObjectFqn());
             lc.setWs(req.getWs());
@@ -777,23 +782,25 @@ public class GovDelServiceImpl implements GovDelService {
             t.setUpdateTime(new Date());
             targetMapper.updateById(t);
             logExec(req, t, "iceberg.expire", "submitted", null, expire.getRunId(),
-                    "定向 expire_snapshots(retain_last=1) 已提交");
+                    "定向 expire_snapshots(retain_last=1) 已提交（旧路径）");
             return "running";
         }
-        GovLcRunVo expire = govLcService.syncRun(refs.expireRunId);
-        if (!"success".equals(expire.getStatus())) {
-            if ("failed".equals(expire.getStatus())) {
-                t.setStatus("failed");
+        if (StrUtil.isBlank(refs.dagRunId) && StrUtil.isNotBlank(refs.expireRunId)) {
+            GovLcRunVo expire = govLcService.syncRun(refs.expireRunId);
+            if (!"success".equals(expire.getStatus())) {
+                if ("failed".equals(expire.getStatus())) {
+                    t.setStatus("failed");
+                    t.setUpdateTime(new Date());
+                    targetMapper.updateById(t);
+                    logExec(req, t, "iceberg.expire", "failed", null, expire.getRunId(),
+                            StrUtil.blankToDefault(expire.getErrorMsg(), "定向过期失败"));
+                    return "failed";
+                }
+                t.setStatus("running");
                 t.setUpdateTime(new Date());
                 targetMapper.updateById(t);
-                logExec(req, t, "iceberg.expire", "failed", null, expire.getRunId(),
-                        StrUtil.blankToDefault(expire.getErrorMsg(), "定向过期失败"));
-                return "failed";
+                return "running";
             }
-            t.setStatus("running");
-            t.setUpdateTime(new Date());
-            targetMapper.updateById(t);
-            return "running";
         }
         long remaining = countRemaining(req, t);
         if (remaining < 0) {
@@ -808,12 +815,13 @@ public class GovDelServiceImpl implements GovDelService {
         if (remaining == 0) {
             t.setStatus("done");
             targetMapper.updateById(t);
-            logExec(req, t, "iceberg.verify", "success", null, refs.expireRunId, "反查 0 行，旧快照已定向过期");
+            logExec(req, t, "iceberg.verify", "success", null, dagRunId,
+                    "反查 0 行，job.compliance.delete.iceberg 已完成");
             return "done";
         }
         t.setStatus("failed");
         targetMapper.updateById(t);
-        logExec(req, t, "iceberg.verify", "failed", null, refs.expireRunId,
+        logExec(req, t, "iceberg.verify", "failed", null, dagRunId,
                 "反查仍有 " + remaining + " 行，不标完成");
         return "failed";
     }
@@ -899,6 +907,7 @@ public class GovDelServiceImpl implements GovDelService {
         private String deleteRef;
         private String compactRunId;
         private String expireRunId;
+        private String dagRunId;
 
         static EngineRef parse(String raw) {
             EngineRef r = new EngineRef();
@@ -916,6 +925,7 @@ public class GovDelServiceImpl implements GovDelService {
                     case "delete" -> r.deleteRef = v;
                     case "compact" -> r.compactRunId = v;
                     case "expire" -> r.expireRunId = v;
+                    case "dag" -> r.dagRunId = v;
                     default -> {
                     }
                 }
@@ -924,6 +934,9 @@ public class GovDelServiceImpl implements GovDelService {
         }
 
         String format() {
+            if (StrUtil.isNotBlank(dagRunId)) {
+                return "dag:" + dagRunId;
+            }
             return "delete:" + StrUtil.blankToDefault(deleteRef, "-")
                     + ";compact:" + StrUtil.blankToDefault(compactRunId, "-")
                     + (StrUtil.isBlank(expireRunId) ? "" : ";expire:" + expireRunId);

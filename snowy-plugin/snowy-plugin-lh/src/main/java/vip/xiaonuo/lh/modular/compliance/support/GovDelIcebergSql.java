@@ -18,6 +18,18 @@ public final class GovDelIcebergSql {
                 + " WHERE " + GovLcMetadataSql.quote(column) + " = '" + subjectHash + "'";
     }
 
+    /**
+     * Spark SQL 硬删（合规独立 DAG 首步）。catalog.schema.table，标识符已校验。
+     */
+    public static String deleteSpark(String catalog, String schema, String table, String column, String subjectHash) {
+        check(schema, table, column, subjectHash);
+        if (!GovLcMetadataSql.isIdent(catalog)) {
+            throw new IllegalArgumentException("非法 catalog");
+        }
+        return "DELETE FROM " + catalog + "." + schema + "." + table
+                + " WHERE " + column + " = '" + subjectHash + "'";
+    }
+
     public static String count(String schema, String table, String column, String subjectHash) {
         check(schema, table, column, subjectHash);
         return "SELECT count(*) AS cnt FROM " + GovLcMetadataSql.quote(schema) + "." + GovLcMetadataSql.quote(table)

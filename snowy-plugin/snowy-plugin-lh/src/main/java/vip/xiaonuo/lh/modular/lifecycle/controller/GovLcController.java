@@ -112,6 +112,13 @@ public class GovLcController {
         return CommonResult.data(govLcService.expire(param));
     }
 
+    @Operation(summary = "合规 Iceberg 硬删独立 DAG（delete→compact→定向 expire）")
+    @CommonLog("合规硬删 Iceberg DAG")
+    @PostMapping({"/lh/lifecycle/compliance-delete", "/api/governance/lifecycle/compliance-delete"})
+    public CommonResult<GovLcRunVo> complianceDelete(@RequestBody @Valid GovLcTableActionParam param) {
+        return CommonResult.data(govLcService.complianceDeleteIceberg(param));
+    }
+
     @Operation(summary = "兼容路径：/{table}/compact（table 用 query 传，避免 FQN 点号截断）")
     @CommonLog("生命周期 compact")
     @PostMapping({"/lh/lifecycle/actions/compact", "/api/governance/lifecycle/actions/compact"})

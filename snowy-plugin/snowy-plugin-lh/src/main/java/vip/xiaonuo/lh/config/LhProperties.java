@@ -342,6 +342,11 @@ public class LhProperties {
         private boolean allowDegraded = true;
         /** 日作业 DS 流程名（默认空间不加后缀） */
         private String dailyWorkflowName = "job.iceberg.lifecycle";
+        /**
+         * 合规 Iceberg 硬删独立 DAG（delete → rewrite → 定向 expire）。
+         * 顺序与日作业不同，禁止复用 {@link #dailyWorkflowName}。
+         */
+        private String complianceDeleteWorkflowName = "job.compliance.delete.iceberg";
         /** 存储画像 DS 流程名 */
         private String profileWorkflowName = "job.storage.profile_daily";
         /** 作业身份标签。Trino 仍走服务账号的 JOB 身份，禁止代执行门户用户。 */

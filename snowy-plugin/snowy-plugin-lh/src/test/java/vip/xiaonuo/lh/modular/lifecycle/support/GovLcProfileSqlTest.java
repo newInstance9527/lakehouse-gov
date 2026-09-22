@@ -46,6 +46,21 @@ class GovLcProfileSqlTest {
     }
 
     @Test
+    void complianceHardDeleteSparkSqlAndOrder() {
+        String hash = "a1f3c8de42b7105f9c3b6a77d0e21c48f5b9042a6c1d8e37f4a05b6c7d8e9f01";
+        String delete = GovDelIcebergSql.deleteSpark("iceberg", "dwd_user", "dwd_user_info", "user_key", hash);
+        assertEquals("DELETE FROM iceberg.dwd_user.dwd_user_info WHERE user_key = '" + hash + "'", delete);
+        String expire = GovLcProcedureSql.expire("iceberg", "dwd_user.dwd_user_info", new GovLcPolicy(), 1);
+        String rewrite = GovLcProcedureSql.rewrite("iceberg", "dwd_user.dwd_user_info", new GovLcPolicy());
+        // 独立 DAG 顺序：delete → compact → 定向 expire（≠ 日作业 expire → rewrite → orphan）
+        assertTrue(delete.startsWith("DELETE FROM"));
+        assertTrue(rewrite.contains("rewrite_data_files"));
+        assertTrue(expire.contains("retain_last => 1"));
+        assertThrows(IllegalArgumentException.class,
+                () -> GovDelIcebergSql.deleteSpark("iceberg;drop", "dwd_user", "dwd_user_info", "user_key", hash));
+    }
+
+    @Test
     void ckCountUsesBackticksAndHashOnly() {
         String hash = "a1f3c8de42b7105f9c3b6a77d0e21c48f5b9042a6c1d8e37f4a05b6c7d8e9f01";
         GovLcMetadataSql.TableRef ref = GovDelCkSql.parse("ads.user_tags_local");

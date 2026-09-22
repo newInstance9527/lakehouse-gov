@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.DsClient;
 import vip.xiaonuo.lh.core.engine.SparkSubmitBuilder;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcPolicy;
 
 import java.util.ArrayList;
@@ -109,6 +110,59 @@ public class GovLcDsLauncher {
         int timeout = timeoutMinutes(false);
         return submit(wfName, List.of(sparkTask("orphan_dry_run", "孤儿 dry-run", sql, timeout, List.of())),
                 List.of(), runId, "orphan", null, sql, timeout, null);
+    }
+
+    /**
+     * 合规 Iceberg 硬删独立 DAG：delete → rewrite → 定向 expire(retain_last=1)。
+     * 与日作业 {@code expire → rewrite → orphan} 顺序相反，不可复用同一流程定义。
+     */
+    public LaunchResult launchComplianceDelete(
+            String tableFqn,
+            String idColumn,
+            String subjectIdHash,
+            String reqNo,
+            GovLcPolicy policy,
+            String runId) {
+        String catalog = sparkCatalog();
+        GovLcMetadataSql.TableRef ref = GovLcMetadataSql.parse(tableFqn, catalog);
+        String deleteSql = GovDelIcebergSql.deleteSpark(
+                catalog, ref.schema(), ref.table(), idColumn, subjectIdHash);
+        String rewriteSql = GovLcProcedureSql.rewrite(catalog, tableFqn, policy);
+        String expireSql = GovLcProcedureSql.expire(catalog, tableFqn, policy, 1);
+
+        int timeout = timeoutMinutes(false);
+        List<Map<String, Object>> tasks = new ArrayList<>();
+        tasks.add(sparkTask("iceberg_delete", "合规 DELETE",
+                GovLcProcedureSql.script(List.of(
+                        "-- job.compliance.delete.iceberg step=delete req=" + StrUtil.blankToDefault(reqNo, "-"),
+                        deleteSql)),
+                timeout, List.of()));
+        tasks.add(sparkTask("rewrite_data_files", "合并小文件",
+                GovLcProcedureSql.script(List.of(
+                        "-- job.compliance.delete.iceberg step=compact",
+                        rewriteSql)),
+                timeout, List.of("iceberg_delete")));
+        tasks.add(sparkTask("expire_snapshots", "定向过期 retain_last=1",
+                GovLcProcedureSql.script(List.of(
+                        "-- job.compliance.delete.iceberg step=expire retain_last=1",
+                        expireSql)),
+                timeout, List.of("rewrite_data_files")));
+
+        List<Map<String, Object>> relations = List.of(
+                Map.of("from", "iceberg_delete", "to", "rewrite_data_files"),
+                Map.of("from", "rewrite_data_files", "to", "expire_snapshots")
+        );
+
+        String base = complianceDeleteWorkflowName();
+        String wfName = base + "_" + GovLcProcedureSql.safeIdent(tableFqn)
+                + "_" + GovLcProcedureSql.safeIdent(StrUtil.blankToDefault(reqNo, runId));
+        String sqlPreview = "template=" + base
+                + " order=delete>compact>expire retain_last=1"
+                + " table=" + tableFqn
+                + " reqNo=" + StrUtil.blankToDefault(reqNo, "-")
+                + " job_principal=" + jobPrincipal();
+        return submit(wfName, tasks, relations, runId, "compliance_delete", tableFqn,
+                sqlPreview, timeout, null);
     }
 
     public LaunchResult launchDaily(String ws, List<GovLcPolicy> policies, String runId, String batchId) {
@@ -232,6 +286,11 @@ public class GovLcDsLauncher {
         if (StrUtil.isNotBlank(tableFqn)) {
             startParams.put("table_fqn", tableFqn);
         }
+        if ("compliance_delete".equals(kind)) {
+            startParams.put("template", complianceDeleteWorkflowName());
+            startParams.put("order", "delete,compact,expire");
+            startParams.put("retain_last", "1");
+        }
 
         Map<String, Object> start = Map.of();
         String instanceId = null;
@@ -308,6 +367,12 @@ public class GovLcDsLauncher {
         return StrUtil.blankToDefault(n, "job.iceberg.lifecycle");
     }
 
+    private String complianceDeleteWorkflowName() {
+        String n = lhProperties.getLifecycle() != null
+                ? lhProperties.getLifecycle().getComplianceDeleteWorkflowName() : null;
+        return StrUtil.blankToDefault(n, "job.compliance.delete.iceberg");
+    }
+
     private String profileWorkflowName() {
         String n = lhProperties.getLifecycle() != null ? lhProperties.getLifecycle().getProfileWorkflowName() : null;
         return StrUtil.blankToDefault(n, "job.storage.profile_daily");
@@ -381,6 +446,11 @@ public class GovLcDsLauncher {
             m.put("message", message);
             if (StrUtil.isNotBlank(sql) && sql.length() < 4000) {
                 m.put("sqlPreview", sql);
+            }
+            if (StrUtil.isNotBlank(sql) && sql.contains("order=delete>compact>expire")) {
+                m.put("template", "job.compliance.delete.iceberg");
+                m.put("order", List.of("delete", "compact", "expire"));
+                m.put("retainLast", 1);
             }
             if (createResp != null) {
                 m.put("createDegraded", createResp.get("degraded"));

@@ -6,7 +6,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * 单表 compact / expire
+ * 单表 compact / expire；合规定向过期与独立硬删 DAG 复用本入参。
  */
 @Getter
 @Setter
@@ -30,4 +30,10 @@ public class GovLcTableActionParam {
 
     @Schema(description = "定向过期保留快照数。仅合规工单 executing/verifying 且值为 1 时接受")
     private Integer retainLast;
+
+    @Schema(description = "主体索引列（仅 job.compliance.delete.iceberg）")
+    private String idColumn;
+
+    @Schema(description = "主体 HMAC hex（仅 job.compliance.delete.iceberg）")
+    private String subjectIdHash;
 }
