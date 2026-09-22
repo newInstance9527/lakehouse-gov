@@ -33,9 +33,9 @@ import vip.xiaonuo.lh.modular.knowledge.param.GovKbCiteAckParam;
 import vip.xiaonuo.lh.modular.knowledge.param.GovKbSearchParam;
 import vip.xiaonuo.lh.modular.knowledge.service.GovKbService;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
-import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
-import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMapper;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricCompileParam;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricPageParam;
+import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
 import vip.xiaonuo.lh.modular.quality.param.GovDqPageParam;
 import vip.xiaonuo.lh.modular.quality.result.GovDqRuleVo;
@@ -84,8 +84,6 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     @Resource
     private GovMetricService govMetricService;
     @Resource
-    private GovMetricMapper metricMapper;
-    @Resource
     private GovAssetMapper assetMapper;
     @Resource
     private GovAiModelMapper modelMapper;
@@ -106,11 +104,12 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         Long assets = assetMapper.selectCount(new QueryWrapper<GovAsset>().lambda()
                 .eq(GovAsset::getDeleteFlag, NOT_DELETE)
                 .eq(GovAsset::getWs, workspace));
-        Long metrics = 0L;
+        long metrics = 0L;
         try {
-            metrics = metricMapper.selectCount(new QueryWrapper<GovMetric>().lambda()
-                    .eq(GovMetric::getDeleteFlag, NOT_DELETE)
-                    .eq(GovMetric::getWs, workspace));
+            Object total = govMetricService.overview(workspace).get("total");
+            if (total instanceof Number n) {
+                metrics = n.longValue();
+            }
         } catch (Exception ignored) {
             metrics = 0L;
         }
@@ -121,7 +120,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ws", workspace);
         out.put("assetCount", assets == null ? 0 : assets);
-        out.put("metricCount", metrics == null ? 0 : metrics);
+        out.put("metricCount", metrics);
         out.put("modelCount", models == null ? 0 : models);
         out.put("kbCount", kb.getOrDefault("total", 0));
         out.put("kbCiteCnt", kb.getOrDefault("citeCnt", 0));
@@ -309,68 +308,95 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 appendDiagnoseCitations(emitter, citations, actions, workspace, diagnoseTable);
             }
 
-            // 工具：指标优先（GMV / 指标名）
-            String metricHint = null;
+            // 工具：resolve_metric / compile_metric → 指标中心 API（强制 metric_code）
+            String metricCode = null;
+            String metricName = null;
             String compiledSql = null;
-            if ("nl2sql".equals(intent) || containsMetricKeyword(param.getText())) {
-                GovMetric metric = resolveMetric(param.getText(), workspace);
-                if (metric != null) {
+            boolean metricTopic = "nl2sql".equals(intent) || containsMetricKeyword(param.getText());
+            if (metricTopic) {
+                GovMetricVo metric = resolveMetricTool(param.getText(), workspace);
+                if (metric != null && StrUtil.isNotBlank(metric.getMetricCode())) {
+                    metricCode = metric.getMetricCode();
+                    metricName = metric.getName();
                     Map<String, Object> c = new LinkedHashMap<>();
                     c.put("type", "metric");
-                    c.put("metricCode", metric.getMetricCode());
-                    c.put("title", metric.getName());
+                    c.put("metricCode", metricCode);
+                    c.put("title", metricName);
                     c.put("id", metric.getId());
+                    c.put("tool", "resolve_metric");
                     citations.add(c);
                     sendEvent(emitter, "citation", c);
-                    metricHint = metric.getMetricCode() + " · " + metric.getName();
-                    try {
-                        GovMetricCompileParam cp = new GovMetricCompileParam();
-                        cp.setMetricCode(metric.getMetricCode());
-                        cp.setWs(workspace);
-                        cp.setDialect("trino");
-                        Map<String, Object> compiled = govMetricService.compile(cp);
-                        if (compiled != null) {
-                            Object sqlObj = compiled.get("sqlText");
-                            if (sqlObj == null) {
-                                sqlObj = compiled.get("sql");
-                            }
-                            if (sqlObj == null) {
-                                sqlObj = compiled.get("compiledSql");
-                            }
-                            if (sqlObj != null) {
-                                compiledSql = String.valueOf(sqlObj);
-                            }
-                        }
-                    } catch (Exception ignored) {
-                        // 编译失败则启发式 SQL
+                    compiledSql = compileMetricTool(metricCode, workspace);
+                    if (StrUtil.isNotBlank(compiledSql)) {
+                        Map<String, Object> compileCite = new LinkedHashMap<>();
+                        compileCite.put("type", "metric");
+                        compileCite.put("metricCode", metricCode);
+                        compileCite.put("title", "compile_metric");
+                        compileCite.put("tool", "compile_metric");
+                        compileCite.put("text", StrUtil.maxLength(compiledSql, 240));
+                        citations.add(compileCite);
+                        sendEvent(emitter, "citation", compileCite);
                     }
                 }
             }
 
-            // 生成回答
-            answer = buildAnswer(intent, param.getText(), citations, metricHint, compiledSql, modelId, diagnoseTable);
+            // 生成回答（口径类无 metric_code 则拒编造）
+            if (metricTopic && StrUtil.isBlank(metricCode)) {
+                answer = missingMetricCodeAnswer(param.getText());
+            } else {
+                answer = buildAnswer(intent, param.getText(), citations, metricCode, metricName,
+                        compiledSql, modelId, diagnoseTable);
+                answer = ensureMetricCodeInAnswer(answer, metricCode);
+            }
 
             // 流式 token（按块推送）
             streamTokens(emitter, answer);
 
             // 建议动作
             if ("nl2sql".equals(intent) || "sql_opt".equals(intent)) {
-                String sql = StrUtil.blankToDefault(compiledSql, heuristicSql(param.getText(), metricHint));
-                Map<String, Object> open = new LinkedHashMap<>();
-                open.put("type", "deeplink");
-                open.put("label", "在即席查询打开");
-                open.put("href", "/query?sql=" + java.net.URLEncoder.encode(sql,
-                        java.nio.charset.StandardCharsets.UTF_8));
-                open.put("sql", sql);
-                actions.add(open);
-                sendEvent(emitter, "action", open);
+                if (StrUtil.isNotBlank(compiledSql)) {
+                    Map<String, Object> open = new LinkedHashMap<>();
+                    open.put("type", "deeplink");
+                    open.put("label", "在即席查询打开");
+                    open.put("href", "/query?sql=" + java.net.URLEncoder.encode(compiledSql,
+                            java.nio.charset.StandardCharsets.UTF_8));
+                    open.put("sql", compiledSql);
+                    open.put("metricCode", metricCode);
+                    actions.add(open);
+                    sendEvent(emitter, "action", open);
 
-                Map<String, Object> run = new LinkedHashMap<>();
-                run.put("type", "run_sql");
-                run.put("label", "试跑（需二次确认）");
-                run.put("sql", sql);
-                actions.add(run);
-                sendEvent(emitter, "action", run);
+                    Map<String, Object> run = new LinkedHashMap<>();
+                    run.put("type", "run_sql");
+                    run.put("label", "试跑（需二次确认）");
+                    run.put("sql", compiledSql);
+                    run.put("metricCode", metricCode);
+                    actions.add(run);
+                    sendEvent(emitter, "action", run);
+                } else if (metricTopic) {
+                    Map<String, Object> metricsLink = new LinkedHashMap<>();
+                    metricsLink.put("type", "deeplink");
+                    metricsLink.put("label", "打开指标中心");
+                    metricsLink.put("href", "/metrics");
+                    actions.add(metricsLink);
+                    sendEvent(emitter, "action", metricsLink);
+                } else {
+                    String sql = heuristicSql(param.getText());
+                    Map<String, Object> open = new LinkedHashMap<>();
+                    open.put("type", "deeplink");
+                    open.put("label", "在即席查询打开");
+                    open.put("href", "/query?sql=" + java.net.URLEncoder.encode(sql,
+                            java.nio.charset.StandardCharsets.UTF_8));
+                    open.put("sql", sql);
+                    actions.add(open);
+                    sendEvent(emitter, "action", open);
+
+                    Map<String, Object> run = new LinkedHashMap<>();
+                    run.put("type", "run_sql");
+                    run.put("label", "试跑（需二次确认）");
+                    run.put("sql", sql);
+                    actions.add(run);
+                    sendEvent(emitter, "action", run);
+                }
             }
             if (!citations.isEmpty()) {
                 Map<String, Object> kbLink = new LinkedHashMap<>();
@@ -444,14 +470,19 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     }
 
     private String buildAnswer(String intent, String text, List<Map<String, Object>> citations,
-                               String metricHint, String compiledSql, String modelId, String diagnoseTable) {
+                               String metricCode, String metricName, String compiledSql,
+                               String modelId, String diagnoseTable) {
         StringBuilder ctx = new StringBuilder();
         ctx.append("意图=").append(intent).append('\n');
         if (StrUtil.isNotBlank(diagnoseTable)) {
             ctx.append("诊断表=").append(diagnoseTable).append('\n');
         }
-        if (StrUtil.isNotBlank(metricHint)) {
-            ctx.append("指标=").append(metricHint).append('\n');
+        if (StrUtil.isNotBlank(metricCode)) {
+            ctx.append("metric_code=").append(metricCode);
+            if (StrUtil.isNotBlank(metricName)) {
+                ctx.append(" · ").append(metricName);
+            }
+            ctx.append('\n');
         }
         if (StrUtil.isNotBlank(compiledSql)) {
             ctx.append("编译SQL=\n").append(compiledSql).append('\n');
@@ -464,28 +495,43 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         }
         if (liteLlmClient.available()) {
             String llm = liteLlmClient.chatSimple(modelId,
-                    "你是湖仓治理助手 DataLake Copilot。基于给定上下文回答，禁止编造表名/口径；引用须带 metric_code 或知识条目。",
+                    "你是湖仓治理助手 DataLake Copilot。基于给定上下文回答；"
+                            + "引用业务口径必须给出 metric_code；禁止编造 GMV 等生产口径或直出生产 SQL；"
+                            + "有编译 SQL 时原样引用并标注 metric_code。",
                     "用户问题：\n" + text + "\n\n上下文：\n" + ctx);
             if (StrUtil.isNotBlank(llm)) {
                 return llm;
             }
         }
-        return heuristicAnswer(intent, text, citations, metricHint, compiledSql, diagnoseTable);
+        return heuristicAnswer(intent, text, citations, metricCode, metricName, compiledSql, diagnoseTable);
     }
 
     private String heuristicAnswer(String intent, String text, List<Map<String, Object>> citations,
-                                   String metricHint, String compiledSql, String diagnoseTable) {
+                                   String metricCode, String metricName, String compiledSql,
+                                   String diagnoseTable) {
         StringBuilder sb = new StringBuilder();
         sb.append("### ").append(intentLabel(intent)).append("\n\n");
         switch (intent) {
             case "nl2sql" -> {
-                sb.append("已按只读约束生成 SQL 草案");
-                if (StrUtil.isNotBlank(metricHint)) {
-                    sb.append("（优先指标 **").append(metricHint).append("**）");
+                if (StrUtil.isNotBlank(metricCode) && StrUtil.isNotBlank(compiledSql)) {
+                    sb.append("已按指标 `metric_code`=**").append(metricCode).append("**");
+                    if (StrUtil.isNotBlank(metricName)) {
+                        sb.append("（").append(metricName).append("）");
+                    }
+                    sb.append(" 经编译器生成 SQL：\n\n```sql\n");
+                    sb.append(compiledSql);
+                    sb.append("\n```\n\n请在即席查询打开后二次确认再执行。\n");
+                } else if (StrUtil.isNotBlank(metricCode)) {
+                    sb.append("已解析到 `metric_code`=**").append(metricCode).append("**");
+                    if (StrUtil.isNotBlank(metricName)) {
+                        sb.append("（").append(metricName).append("）");
+                    }
+                    sb.append("，但编译失败。请到指标中心检查定义后重试，禁止手写生产口径。\n");
+                } else {
+                    sb.append("已按只读约束生成 schema 草案 SQL（非指标口径）：\n\n```sql\n");
+                    sb.append(heuristicSql(text));
+                    sb.append("\n```\n\n请在即席查询打开后二次确认再执行。\n");
                 }
-                sb.append("：\n\n```sql\n");
-                sb.append(StrUtil.blankToDefault(compiledSql, heuristicSql(text, metricHint)));
-                sb.append("\n```\n\n请在即席查询打开后二次确认再执行。\n");
             }
             case "gen_script" -> sb.append("Flink 脚本建议：从数据源登记表选择输入/输出，使用门户 ETL 模板生成 FlinkSQL；"
                     + "本 P0 返回示意：\n\n```sql\n-- FlinkSQL draft\n"
@@ -494,10 +540,21 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             case "diagnose" -> appendDiagnoseAnswer(sb, citations, diagnoseTable);
             case "sql_opt" -> sb.append("优化建议：补充分区谓词（如 `dt`）、避免 SELECT *、加 LIMIT；"
                     + "可用 EXPLAIN 评估扫描量。\n");
-            case "explain" -> sb.append("解释：基于知识库与资产元数据给出说明。");
+            case "explain" -> {
+                sb.append("解释：基于知识库与资产元数据给出说明。");
+                if (StrUtil.isNotBlank(metricCode)) {
+                    sb.append(" 口径绑定 `metric_code`=**").append(metricCode).append("**。");
+                }
+            }
             default -> {
                 if (citations.stream().anyMatch(c -> "rule".equals(c.get("type")) || "lineage".equals(c.get("type")))) {
                     appendDiagnoseAnswer(sb, citations, diagnoseTable);
+                } else if (StrUtil.isNotBlank(metricCode)) {
+                    sb.append("口径说明见指标 `metric_code`=**").append(metricCode).append("**");
+                    if (StrUtil.isNotBlank(metricName)) {
+                        sb.append("（").append(metricName).append("）");
+                    }
+                    sb.append("；请以指标中心定义为准，勿手写聚合口径。");
                 } else {
                     sb.append("根据知识库检索结果整理如下。");
                 }
@@ -728,62 +785,148 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         return null;
     }
 
-    private String heuristicSql(String text, String metricHint) {
-        if (StrUtil.isNotBlank(metricHint) && metricHint.toLowerCase(Locale.ROOT).contains("gmv")) {
-            return "SELECT dt, channel, SUM(gmv) AS gmv\n"
-                    + "FROM iceberg.default.ads_trade_gmv_d\n"
-                    + "WHERE dt >= date_format(date_add('day', -7, current_date), '%Y-%m-%d')\n"
-                    + "GROUP BY 1, 2\nORDER BY 1, 2\nLIMIT 1000";
+    private String heuristicSql(String text) {
+        String table = extractTableName(text);
+        if (StrUtil.isNotBlank(table)) {
+            return "SELECT *\nFROM iceberg.default." + table + "\n"
+                    + "WHERE dt = date_format(date_add('day', -1, current_date), '%Y-%m-%d')\n"
+                    + "LIMIT 100";
         }
         return "SELECT *\nFROM iceberg.default.dwd_order_detail\n"
                 + "WHERE dt = date_format(date_add('day', -1, current_date), '%Y-%m-%d')\n"
                 + "LIMIT 100";
     }
 
-    private GovMetric resolveMetric(String text, String ws) {
-        String q = StrUtil.nullToEmpty(text);
-        List<GovMetric> list = metricMapper.selectList(new QueryWrapper<GovMetric>().lambda()
-                .eq(GovMetric::getDeleteFlag, NOT_DELETE)
-                .eq(GovMetric::getWs, ws)
-                .and(w -> w.like(GovMetric::getName, "GMV")
-                        .or().like(GovMetric::getMetricCode, "GMV")
-                        .or().like(GovMetric::getName, extractKeyword(q)))
-                .last("LIMIT 5"));
-        if (list.isEmpty()) {
-            list = metricMapper.selectList(new QueryWrapper<GovMetric>().lambda()
-                    .eq(GovMetric::getDeleteFlag, NOT_DELETE)
-                    .eq(GovMetric::getWs, ws)
-                    .eq(GovMetric::getStatus, "active")
-                    .last("LIMIT 1"));
+    /**
+     * resolve_metric：经指标中心 list/detail（等价 /lh/metric/list、/lh/metric/{code}），不旁路 mapper。
+     */
+    private GovMetricVo resolveMetricTool(String text, String ws) {
+        String code = extractMetricCode(text);
+        if (StrUtil.isNotBlank(code)) {
+            try {
+                return govMetricService.detail(code, ws);
+            } catch (Exception ignored) {
+                // 编码未命中则关键词检索
+            }
         }
-        if (list.isEmpty()) {
+        String kw = extractMetricKeyword(text);
+        List<GovMetricVo> hits = searchMetricsViaApi(ws, kw);
+        if (hits.isEmpty() && !"GMV".equalsIgnoreCase(kw)) {
+            // 常见口径别名再试一次
+            if (containsMetricKeyword(text) && StrUtil.containsIgnoreCase(text, "GMV")) {
+                hits = searchMetricsViaApi(ws, "GMV");
+            }
+        }
+        if (hits.isEmpty()) {
             return null;
         }
-        // 优先名称命中
-        for (GovMetric m : list) {
-            if (StrUtil.containsIgnoreCase(q, m.getName())
-                    || StrUtil.containsIgnoreCase(q, m.getMetricCode())
-                    || (StrUtil.containsIgnoreCase(q, "GMV") && StrUtil.containsIgnoreCase(m.getName(), "GMV"))) {
+        String q = StrUtil.nullToEmpty(text);
+        for (GovMetricVo m : hits) {
+            if (StrUtil.containsIgnoreCase(q, m.getMetricCode())
+                    || StrUtil.containsIgnoreCase(q, StrUtil.nullToEmpty(m.getName()))) {
                 return m;
             }
         }
-        return list.get(0);
+        for (GovMetricVo m : hits) {
+            if ("active".equalsIgnoreCase(m.getStatus())) {
+                return m;
+            }
+        }
+        return hits.get(0);
     }
 
-    private static String extractKeyword(String text) {
+    /** compile_metric：POST /lh/metric/compile */
+    private String compileMetricTool(String metricCode, String ws) {
+        if (StrUtil.isBlank(metricCode)) {
+            return null;
+        }
+        try {
+            GovMetricCompileParam cp = new GovMetricCompileParam();
+            cp.setMetricCode(metricCode);
+            cp.setWs(ws);
+            cp.setDialect("trino");
+            Map<String, Object> compiled = govMetricService.compile(cp);
+            if (compiled == null) {
+                return null;
+            }
+            Object sqlObj = compiled.get("sqlText");
+            if (sqlObj == null) {
+                sqlObj = compiled.get("sql");
+            }
+            if (sqlObj == null) {
+                sqlObj = compiled.get("compiledSql");
+            }
+            return sqlObj == null ? null : String.valueOf(sqlObj);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private List<GovMetricVo> searchMetricsViaApi(String ws, String q) {
+        if (StrUtil.isBlank(q)) {
+            return List.of();
+        }
+        try {
+            GovMetricPageParam param = new GovMetricPageParam();
+            param.setWs(ws);
+            param.setQ(q.trim());
+            Page<GovMetricVo> page = govMetricService.page(param);
+            if (page == null || page.getRecords() == null) {
+                return List.of();
+            }
+            return page.getRecords();
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    private static String missingMetricCodeAnswer(String text) {
+        return "### 口径 / SQL\n\n"
+                + "未能解析到 `metric_code`。问 GMV 等业务口径时必须绑定指标中心编码"
+                + "（如 `M-0001`），禁止模型直出生产聚合 SQL。\n\n"
+                + "请补充指标编码，或先在指标中心登记后再提问"
+                + (StrUtil.isNotBlank(text) ? "：「" + StrUtil.maxLength(text.trim(), 40) + "」" : "")
+                + "。\n";
+    }
+
+    private static String ensureMetricCodeInAnswer(String answer, String metricCode) {
+        if (StrUtil.isBlank(metricCode) || StrUtil.isBlank(answer)) {
+            return answer;
+        }
+        if (StrUtil.containsIgnoreCase(answer, metricCode)) {
+            return answer;
+        }
+        return answer + "\n\n`metric_code`: **" + metricCode + "**\n";
+    }
+
+    /** 抽取 A-/M-/C- 形态编码 */
+    private static String extractMetricCode(String text) {
+        if (StrUtil.isBlank(text)) {
+            return null;
+        }
+        Matcher m = Pattern.compile("(?i)\\b([AMC]-\\d{4,})\\b").matcher(text);
+        return m.find() ? m.group(1).toUpperCase(Locale.ROOT) : null;
+    }
+
+    private static String extractMetricKeyword(String text) {
         if (StrUtil.containsIgnoreCase(text, "GMV")) {
             return "GMV";
         }
-        String t = text.replaceAll("[\\p{Punct}\\s]+", " ").trim();
-        if (t.length() > 20) {
-            t = t.substring(0, 20);
+        String code = extractMetricCode(text);
+        if (StrUtil.isNotBlank(code)) {
+            return code;
+        }
+        String t = StrUtil.nullToEmpty(text).replaceAll("[\\p{Punct}\\s]+", " ").trim();
+        if (t.length() > 24) {
+            t = t.substring(0, 24);
         }
         return StrUtil.blankToDefault(t, "指标");
     }
 
     private static boolean containsMetricKeyword(String text) {
         String t = StrUtil.nullToEmpty(text).toLowerCase(Locale.ROOT);
-        return t.contains("gmv") || t.contains("指标") || t.contains("口径") || t.contains("metric");
+        return t.contains("gmv") || t.contains("指标") || t.contains("口径")
+                || t.contains("metric") || Pattern.compile("(?i)\\b[amc]-\\d{4,}\\b").matcher(t).find();
     }
 
     private GovAiSession ensureSession(String sessionId, String ws, String modelOverride) {
