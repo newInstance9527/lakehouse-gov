@@ -14,7 +14,8 @@ public final class MetricExecGuard {
 
     private static final Pattern WRITE = Pattern.compile(
             "\\b(insert|update|delete|merge|drop|truncate|alter|create)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern DATE_LIT = Pattern.compile("DATE\\s+'", Pattern.CASE_INSENSITIVE);
+    private static final Pattern DATE_LIT = Pattern.compile(
+            "DATE\\s+'|toDate\\s*\\(", Pattern.CASE_INSENSITIVE);
     private static final Pattern LIMIT = Pattern.compile("\\blimit\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern WHERE = Pattern.compile("\\bwhere\\b", Pattern.CASE_INSENSITIVE);
 

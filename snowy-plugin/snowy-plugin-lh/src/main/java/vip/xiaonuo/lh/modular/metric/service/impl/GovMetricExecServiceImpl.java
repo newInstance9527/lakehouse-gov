@@ -10,16 +10,21 @@ import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.auth.core.util.StpLoginUserUtil;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
+import vip.xiaonuo.lh.core.engine.ClickHouseClient;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
+import vip.xiaonuo.lh.modular.metric.entity.GovMetricMaterialize;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricVer;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMapper;
+import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMaterializeMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricVerMapper;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTrialParam;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricExecService;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricSqlCompiler;
 import vip.xiaonuo.lh.modular.metric.support.MetricExecGuard;
+import vip.xiaonuo.lh.modular.metric.support.MetricExecRouter;
+import vip.xiaonuo.lh.modular.metric.support.MetricMaterializeRewrite;
 import vip.xiaonuo.lh.modular.metric.support.MetricParamBinder;
 import vip.xiaonuo.lh.modular.metric.support.MetricQueryCache;
 import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
@@ -37,7 +42,8 @@ import java.util.Set;
 
 /**
  * M1：编译 → 参数绑定 → TrinoClient → cp_query_exec；
- * M2：query Redis 短缓存；采样 JOB 身份。
+ * M2：query Redis 短缓存；采样 JOB 身份；
+ * M3：prefer=hot → 物化对账门禁 + CK 物化改写；未就绪 soft-fail 回退 Trino。
  */
 @Service
 public class GovMetricExecServiceImpl implements GovMetricExecService {
@@ -52,7 +58,11 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
     @Resource
     private GovMetricVerMapper verMapper;
     @Resource
+    private GovMetricMaterializeMapper materializeMapper;
+    @Resource
     private TrinoClient trinoClient;
+    @Resource
+    private ClickHouseClient clickHouseClient;
     @Resource
     private CpQueryExecMapper execMapper;
     @Resource
@@ -71,8 +81,10 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         }
         GovMetricVer ver = resolveVer(head, param.getVer());
         int maxRows = param.getMaxRows() == null ? 1000 : param.getMaxRows();
+        String prefer = StrUtil.blankToDefault(param.getPrefer(), "trino");
         String cacheKey = metricQueryCache.cacheKey(
-                head.getMetricCode(), ver == null ? null : ver.getVer(), param.getParams(), maxRows);
+                head.getMetricCode(), ver == null ? null : ver.getVer(),
+                param.getParams(), maxRows, prefer);
         Map<String, Object> hit = metricQueryCache.get(cacheKey);
         if (hit != null) {
             Map<String, Object> cached = new LinkedHashMap<>(hit);
@@ -80,7 +92,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             return cached;
         }
         Map<String, Object> out = execute(head, ver, param.getParams(), maxRows,
-                "metric", param.getPrefer(), false, false);
+                "metric", prefer, false, false);
         if (Boolean.TRUE.equals(out.get("executed")) && !Boolean.TRUE.equals(out.get("degraded"))
                 && !"blocked".equals(String.valueOf(out.get("status")))
                 && !"failed".equals(String.valueOf(out.get("status")))) {
@@ -120,11 +132,9 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         if (ver == null) {
             throw new CommonException("指标版本不存在");
         }
-        String preferNorm = StrUtil.blankToDefault(prefer, "trino");
-        boolean hotRequested = "hot".equalsIgnoreCase(preferNorm);
-        // M1/M2：hot 回退 Trino（M3 再接 CK）
-        String engine = "trino";
-        String fallback = hotRequested ? "trino" : null;
+        GovMetricMaterialize ckMat = findMaterialize(head.getMetricCode(), ver.getVer(), "clickhouse");
+        MetricExecRouter.Decision route = MetricExecRouter.decide(
+                prefer, clickHouseClient.configured(), ckMat);
 
         GovMetricSqlCompiler.CompileOut compiled;
         try {
@@ -143,7 +153,52 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             throw new CommonException(e.getMessage());
         }
 
-        String sql = MetricExecGuard.ensureLimit(bound.sql(), maxRows);
+        String compiledLimited = MetricExecGuard.ensureLimit(bound.sql(), maxRows);
+        String trinoSql = compiledLimited;
+        boolean iceMaterialized = false;
+        GovMetricMaterialize iceMat = findMaterialize(head.getMetricCode(), ver.getVer(), "iceberg");
+        if (iceMat != null && iceMat.getReconOk() != null && iceMat.getReconOk() == 1
+                && StrUtil.isNotBlank(iceMat.getTargetTable())
+                && "active".equalsIgnoreCase(StrUtil.blankToDefault(iceMat.getStatus(), "active"))) {
+            try {
+                trinoSql = MetricMaterializeRewrite.rewriteTrino(
+                        iceMat.getTargetTable(),
+                        compiled.timeWindow(),
+                        compiled.grainKeys(),
+                        iceMat.getGrainJson(),
+                        bound.dt(), bound.from(), bound.to(),
+                        maxRows);
+                iceMaterialized = true;
+            } catch (IllegalArgumentException ignored) {
+                // 保持编译 SQL
+            }
+        }
+
+        boolean materialized = false;
+        String sql = trinoSql;
+        String dialect = route.dialect();
+        String engine = route.engine();
+        if (route.useHot()) {
+            try {
+                sql = MetricMaterializeRewrite.rewriteClickHouse(
+                        route.materialize().getTargetTable(),
+                        compiled.timeWindow(),
+                        compiled.grainKeys(),
+                        route.materialize().getGrainJson(),
+                        bound.dt(), bound.from(), bound.to(),
+                        maxRows);
+                materialized = true;
+            } catch (IllegalArgumentException e) {
+                route = MetricExecRouter.Decision.fallback("物化改写失败: " + e.getMessage());
+                dialect = route.dialect();
+                engine = route.engine();
+                sql = trinoSql;
+                materialized = iceMaterialized;
+            }
+        } else {
+            materialized = iceMaterialized;
+        }
+
         String block = MetricExecGuard.blockReason(sql);
         UserSnap user = jobIdentity ? jobUser() : currentUser();
         String queryId = "mq_" + IdUtil.getSnowflakeNextIdStr();
@@ -164,12 +219,75 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             blocked.put("metricCode", head.getMetricCode());
             blocked.put("ver", ver.getVer());
             blocked.put("sqlText", sql);
-            blocked.put("dialect", "trino");
+            blocked.put("dialect", dialect);
             blocked.put("engine", engine);
+            blocked.put("materialized", materialized);
             blocked.put("cached", false);
+            if (route.fallback() != null) {
+                blocked.put("fallback", route.fallback());
+                blocked.put("message", hotFallbackMessage(prefer, route));
+            }
             return blocked;
         }
 
+        if (route.useHot()) {
+            return executeClickHouse(row, head, ver, sql, trinoSql, dialect, engine, bound, queryId,
+                    source, trial, jobIdentity, materialized, prefer, maxRows);
+        }
+        return executeTrino(row, head, ver, sql, dialect, engine, bound, queryId,
+                source, trial, jobIdentity, materialized, prefer, route, maxRows);
+    }
+
+    private Map<String, Object> executeClickHouse(CpQueryExec row, GovMetric head, GovMetricVer ver,
+                                                   String sql, String trinoSql, String dialect, String engine,
+                                                   MetricParamBinder.BindOut bound, String queryId,
+                                                   String source, boolean trial, boolean jobIdentity,
+                                                   boolean materialized, String prefer, int maxRows) {
+        long t0 = System.currentTimeMillis();
+        Map<String, Object> exec = clickHouseClient.query(sql);
+        boolean degraded = Boolean.TRUE.equals(exec.get("degraded"));
+        if (degraded) {
+            MetricExecRouter.Decision fb = MetricExecRouter.Decision.fallback(
+                    StrUtil.blankToDefault(str(exec.get("message")), "ClickHouse 不可达"));
+            row.setSqlText(trinoSql);
+            row.setSqlHash(DigestUtil.sha256Hex(trinoSql).substring(0, 32));
+            row.setEngine("trino");
+            row.setCatalogName("iceberg");
+            row.setUpdateTime(new Date());
+            execMapper.updateById(row);
+            return executeTrino(row, head, ver, trinoSql, "trino", "trino", bound, queryId,
+                    source, trial, jobIdentity, false, prefer, fb, maxRows);
+        }
+
+        long dur = System.currentTimeMillis() - t0;
+        @SuppressWarnings("unchecked")
+        List<String> columns = (List<String>) exec.getOrDefault("columns", List.of());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) exec.getOrDefault("rows", List.of());
+
+        row.setStatus("ok");
+        row.setStatusLabel(trial ? "✓ 试跑" : (jobIdentity ? "✓ 采样" : "✓ hot"));
+        row.setCatalogName("clickhouse");
+        row.setSchemaName("default");
+        row.setRowCount(rows == null ? 0 : rows.size());
+        row.setDurMs(dur);
+        row.setUpdateTime(new Date());
+        execMapper.updateById(row);
+
+        Map<String, Object> out = baseSuccess(head, ver, sql, dialect, engine, queryId,
+                columns, rows, null, dur, bound, source, materialized);
+        out.put("status", row.getStatus());
+        out.put("statusLabel", row.getStatusLabel());
+        out.put("prefer", StrUtil.blankToDefault(prefer, "trino"));
+        return out;
+    }
+
+    private Map<String, Object> executeTrino(CpQueryExec row, GovMetric head, GovMetricVer ver,
+                                             String sql, String dialect, String engine,
+                                             MetricParamBinder.BindOut bound, String queryId,
+                                             String source, boolean trial, boolean jobIdentity,
+                                             boolean materialized, String prefer,
+                                             MetricExecRouter.Decision route, int maxRows) {
         long t0 = System.currentTimeMillis();
         TrinoClient.ExecuteOptions opts;
         if (jobIdentity) {
@@ -187,29 +305,8 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         try {
             exec = trinoClient.execute(sql, opts);
         } catch (CommonException e) {
-            long dur = System.currentTimeMillis() - t0;
-            row.setStatus("failed");
-            row.setStatusLabel("失败");
-            row.setErrorMsg(StrUtil.maxLength(e.getMessage(), 1000));
-            row.setDurMs(dur);
-            row.setUpdateTime(new Date());
-            execMapper.updateById(row);
-            Map<String, Object> fail = new LinkedHashMap<>();
-            fail.put("metricCode", head.getMetricCode());
-            fail.put("ver", ver.getVer());
-            fail.put("executed", false);
-            fail.put("status", "failed");
-            fail.put("message", e.getMessage());
-            fail.put("queryId", queryId);
-            fail.put("sqlText", sql);
-            fail.put("engine", engine);
-            fail.put("dialect", "trino");
-            fail.put("rows", List.of());
-            fail.put("columns", List.of());
-            fail.put("rowCount", 0);
-            fail.put("durMs", dur);
-            fail.put("cached", false);
-            return fail;
+            return failPayload(row, head, ver, sql, engine, dialect, queryId, t0, e.getMessage(),
+                    route.fallback() != null);
         }
 
         long dur = System.currentTimeMillis() - t0;
@@ -240,35 +337,105 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         row.setUpdateTime(new Date());
         execMapper.updateById(row);
 
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("metricCode", head.getMetricCode());
-        out.put("ver", ver.getVer());
-        out.put("dialect", "trino");
-        out.put("engine", engine);
+        Map<String, Object> out = baseSuccess(head, ver, sql, dialect, engine, queryId,
+                columns, rows, scanBytes, dur, bound, source, materialized);
+        out.put("trinoQueryId", trinoQid);
         out.put("executed", !degraded);
         out.put("degraded", degraded);
-        out.put("queryId", queryId);
-        out.put("trinoQueryId", trinoQid);
-        out.put("sqlText", sql);
-        out.put("columns", columns);
-        out.put("rows", rows == null ? List.of() : rows);
-        out.put("rowCount", rows == null ? 0 : rows.size());
-        out.put("scanBytes", scanBytes);
-        out.put("durMs", dur);
-        out.put("cached", false);
-        out.put("materialized", false);
         out.put("status", row.getStatus());
         out.put("statusLabel", row.getStatusLabel());
-        out.put("source", source);
-        out.put("bound", Map.of("dt", bound.dt(), "from", bound.from(), "to", bound.to()));
-        if (fallback != null) {
-            out.put("fallback", fallback);
-            out.put("message", hotRequested ? "prefer=hot 暂回退 Trino（M3 接 CK）" : null);
+        out.put("prefer", StrUtil.blankToDefault(prefer, "trino"));
+        if (route.fallback() != null) {
+            out.put("fallback", route.fallback());
+            out.put("message", hotFallbackMessage(prefer, route));
         }
         if (degraded) {
             out.put("message", exec.get("message"));
         }
         return out;
+    }
+
+    private Map<String, Object> failPayload(CpQueryExec row, GovMetric head, GovMetricVer ver,
+                                            String sql, String engine, String dialect,
+                                            String queryId, long t0, String message,
+                                            boolean withFallback) {
+        long dur = System.currentTimeMillis() - t0;
+        row.setStatus("failed");
+        row.setStatusLabel("失败");
+        row.setErrorMsg(StrUtil.maxLength(message, 1000));
+        row.setDurMs(dur);
+        row.setUpdateTime(new Date());
+        execMapper.updateById(row);
+        Map<String, Object> fail = new LinkedHashMap<>();
+        fail.put("metricCode", head.getMetricCode());
+        fail.put("ver", ver.getVer());
+        fail.put("executed", false);
+        fail.put("status", "failed");
+        fail.put("message", message);
+        fail.put("queryId", queryId);
+        fail.put("sqlText", sql);
+        fail.put("engine", engine);
+        fail.put("dialect", dialect);
+        fail.put("rows", List.of());
+        fail.put("columns", List.of());
+        fail.put("rowCount", 0);
+        fail.put("durMs", dur);
+        fail.put("cached", false);
+        fail.put("materialized", false);
+        if (withFallback) {
+            fail.put("fallback", "trino");
+        }
+        return fail;
+    }
+
+    private Map<String, Object> baseSuccess(GovMetric head, GovMetricVer ver, String sql,
+                                            String dialect, String engine, String queryId,
+                                            List<String> columns, List<Map<String, Object>> rows,
+                                            Long scanBytes, long dur,
+                                            MetricParamBinder.BindOut bound, String source,
+                                            boolean materialized) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("metricCode", head.getMetricCode());
+        out.put("ver", ver.getVer());
+        out.put("dialect", dialect);
+        out.put("engine", engine);
+        out.put("executed", true);
+        out.put("degraded", false);
+        out.put("queryId", queryId);
+        out.put("sqlText", sql);
+        out.put("columns", columns == null ? List.of() : columns);
+        out.put("rows", rows == null ? List.of() : rows);
+        out.put("rowCount", rows == null ? 0 : rows.size());
+        out.put("scanBytes", scanBytes);
+        out.put("durMs", dur);
+        out.put("cached", false);
+        out.put("materialized", materialized);
+        out.put("source", source);
+        out.put("bound", Map.of("dt", bound.dt(), "from", bound.from(), "to", bound.to()));
+        return out;
+    }
+
+    private static String hotFallbackMessage(String prefer, MetricExecRouter.Decision route) {
+        if (!"hot".equalsIgnoreCase(StrUtil.blankToDefault(prefer, ""))) {
+            return null;
+        }
+        String reason = StrUtil.blankToDefault(route.fallbackReason(), "热路径未就绪");
+        return "prefer=hot 已回退 Trino：" + reason;
+    }
+
+    private GovMetricMaterialize findMaterialize(String metricCode, String ver, String engine) {
+        if (StrUtil.isBlank(metricCode) || StrUtil.isBlank(ver)) {
+            return null;
+        }
+        String eng = MetricMaterializeRewrite.normalizeEngine(engine);
+        return materializeMapper.selectOne(new QueryWrapper<GovMetricMaterialize>().lambda()
+                .eq(GovMetricMaterialize::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetricMaterialize::getMetricCode, metricCode.trim().toUpperCase(Locale.ROOT))
+                .eq(GovMetricMaterialize::getVer, ver.trim())
+                .eq(GovMetricMaterialize::getEngine, eng)
+                .eq(GovMetricMaterialize::getStatus, "active")
+                .orderByDesc(GovMetricMaterialize::getUpdateTime)
+                .last("LIMIT 1"));
     }
 
     private UserSnap jobUser() {
@@ -297,7 +464,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         row.setSource(source);
         row.setMetricCode(head.getMetricCode());
         row.setMetricVer(ver.getVer());
-        row.setCatalogName("iceberg");
+        row.setCatalogName("clickhouse".equals(engine) ? "clickhouse" : "iceberg");
         row.setSchemaName("default");
         row.setDeleteFlag(NOT_DELETE);
         row.setCreateTime(new Date());

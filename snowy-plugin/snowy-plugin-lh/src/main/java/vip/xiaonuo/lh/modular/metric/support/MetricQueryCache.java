@@ -39,14 +39,26 @@ public class MetricQueryCache {
         return Math.max(5, Math.min(ttl, 600));
     }
 
-    public String cacheKey(String metricCode, String ver, Map<String, Object> params, int maxRows) {
+    public String cacheKey(String metricCode, String ver, Map<String, Object> params,
+                           int maxRows, String prefer) {
         String code = StrUtil.blankToDefault(metricCode, "").trim().toUpperCase();
         String v = StrUtil.blankToDefault(ver, "").trim();
-        String paramHash = paramHash(params, maxRows);
+        String pref = StrUtil.blankToDefault(prefer, "trino").trim().toLowerCase();
+        String paramHash = paramHash(params, maxRows, pref);
         return KEY_PREFIX + code + ":" + v + ":" + paramHash;
     }
 
+    /** @deprecated 兼容旧测试；prefer 固定 trino */
+    @Deprecated
+    public String cacheKey(String metricCode, String ver, Map<String, Object> params, int maxRows) {
+        return cacheKey(metricCode, ver, params, maxRows, "trino");
+    }
+
     public static String paramHash(Map<String, Object> params, int maxRows) {
+        return paramHash(params, maxRows, "trino");
+    }
+
+    public static String paramHash(Map<String, Object> params, int maxRows, String prefer) {
         Map<String, Object> norm = new LinkedHashMap<>();
         if (params != null) {
             params.entrySet().stream()
@@ -54,6 +66,7 @@ public class MetricQueryCache {
                     .forEach(e -> norm.put(e.getKey(), e.getValue()));
         }
         norm.put("_maxRows", maxRows);
+        norm.put("_prefer", StrUtil.blankToDefault(prefer, "trino").trim().toLowerCase());
         return DigestUtil.sha256Hex(JSONUtil.toJsonStr(norm)).substring(0, 16);
     }
 
