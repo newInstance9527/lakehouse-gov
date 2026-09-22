@@ -48,6 +48,7 @@ import vip.xiaonuo.lh.modular.lifecycle.param.GovLcTableActionParam;
 import vip.xiaonuo.lh.modular.lifecycle.result.GovLcRunVo;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcService;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcMetadataSql;
+import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -159,6 +160,8 @@ public class GovDelServiceImpl implements GovDelService {
     private ApplyTicketService applyTicketService;
     @Resource
     private GovLcService govLcService;
+    @Resource
+    private GovLineageService govLineageService;
     @Resource
     private TrinoClient trinoClient;
     @Resource
@@ -339,8 +342,25 @@ public class GovDelServiceImpl implements GovDelService {
             }
         }
 
+        int confirmed = 0;
+        if (param.getConfirmIds() != null && !param.getConfirmIds().isEmpty()) {
+            for (String id : param.getConfirmIds()) {
+                GovDelTarget t = targetMapper.selectById(id);
+                if (t == null || !req.getId().equals(t.getReqId())) {
+                    continue;
+                }
+                if (!"inferred".equalsIgnoreCase(StrUtil.blankToDefault(t.getLineageConfidence(), ""))) {
+                    continue;
+                }
+                t.setLineageConfirmed(true);
+                t.setUpdateTime(now);
+                targetMapper.updateById(t);
+                confirmed++;
+            }
+        }
+
         logExec(req, null, "plan.edit", "success", null, null,
-                "补充 " + added + " 项，排除 " + excluded + " 项");
+                "补充 " + added + " 项，排除 " + excluded + " 项，确认推断血缘 " + confirmed + " 项");
         return detail(req.getId());
     }
 
@@ -399,6 +419,16 @@ public class GovDelServiceImpl implements GovDelService {
                 .toList();
         if (included.isEmpty()) {
             throw new CommonException("计划为空或全部被排除，不能提交审批");
+        }
+        List<String> needConfirm = included.stream()
+                .filter(t -> "inferred".equalsIgnoreCase(StrUtil.blankToDefault(t.getLineageConfidence(), "")))
+                .filter(t -> !Boolean.TRUE.equals(t.getLineageConfirmed()))
+                .map(GovDelTarget::getObjectFqn)
+                .toList();
+        if (!needConfirm.isEmpty()) {
+            throw new CommonException("推断血缘载体须人工确认后再提交：" + String.join("、",
+                    needConfirm.stream().limit(5).toList())
+                    + (needConfirm.size() > 5 ? " 等 " + needConfirm.size() + " 项" : ""));
         }
         ApplyTicketCreateParam ticketParam = new ApplyTicketCreateParam();
         ticketParam.setTicketType("compliance_delete");
@@ -1127,11 +1157,15 @@ public class GovDelServiceImpl implements GovDelService {
 
     // ───────────────────────────── 内部 ─────────────────────────────
 
-    /** 按主体索引展开计划：已执行/限制处理/人工补充的项保留，其余重建。 */
+    /** 按主体索引展开计划，再经 lineage.expand（impact 下游）补表；已执行/限制处理/人工补充的项保留。 */
     private void buildPlan(GovDelRequest req) {
         List<GovDelTarget> existing = listTargets(req.getId());
         Set<String> keepKeys = new LinkedHashSet<>();
+        Set<String> confirmedFqns = new LinkedHashSet<>();
         for (GovDelTarget t : existing) {
+            if (Boolean.TRUE.equals(t.getLineageConfirmed()) && StrUtil.isNotBlank(t.getObjectFqn())) {
+                confirmedFqns.add(t.getObjectFqn().toLowerCase(Locale.ROOT));
+            }
             if (Boolean.TRUE.equals(t.getManualAdded())
                     || Set.of("done", "restricted", "registered", "pending_receipt", "excluded").contains(t.getStatus())) {
                 keepKeys.add(t.getCarrier() + "|" + t.getObjectFqn());
@@ -1145,27 +1179,202 @@ public class GovDelServiceImpl implements GovDelService {
                 .eq(GovDelSubjectMap::getSubjectType, req.getSubjectType())
                 .eq(GovDelSubjectMap::getStatus, "active")
                 .eq(GovDelSubjectMap::getDeleteFlag, NOT_DELETE));
+        Map<String, GovDelSubjectMap> mapByFqn = new LinkedHashMap<>();
+        for (GovDelSubjectMap m : maps) {
+            mapByFqn.put(m.getObjectFqn().toLowerCase(Locale.ROOT), m);
+            mapByFqn.putIfAbsent(shortName(m.getObjectFqn()).toLowerCase(Locale.ROOT), m);
+        }
+
         int created = 0;
+        List<String> seedTables = new ArrayList<>();
         for (GovDelSubjectMap m : maps) {
             String key = m.getCarrier() + "|" + m.getObjectFqn();
             if (keepKeys.contains(key)) {
+                seedTables.add(m.getObjectFqn());
                 continue;
             }
             GovDelTarget t = newTarget(req, m.getCarrier(), m.getObjectFqn(), m.getScopeTpl(),
                     m.getDeleteMode(), m.getId());
+            t.setOwner(m.getOwner());
+            t.setSensitivity(m.getSensitivity());
+            t.setHasSubjectCol(StrUtil.isNotBlank(m.getIdColumn()) || StrUtil.isNotBlank(m.getJoinPath()));
+            t.setLineageLayer(guessLayer(m.getObjectFqn()));
             targetMapper.insert(t);
+            keepKeys.add(key);
+            seedTables.add(m.getObjectFqn());
             created++;
         }
 
+        int lineageAdded = expandLineageDownstream(req, seedTables, mapByFqn, keepKeys, confirmedFqns);
+
         Map<String, Object> cov = coverage(req.getWs());
-        logExec(req, null, "plan.assess", created > 0 ? "success" : "warn", null, null,
-                "命中主体索引 " + created + " 项；高敏资产覆盖率 " + cov.get("coveragePct") + "%"
-                        + gapNote(cov));
+        logExec(req, null, "plan.assess", created + lineageAdded > 0 ? "success" : "warn", null, null,
+                "命中主体索引 " + created + " 项；lineage.expand 下游 +" + lineageAdded
+                        + "；高敏资产覆盖率 " + cov.get("coveragePct") + "%" + gapNote(cov));
     }
 
     private String gapNote(Map<String, Object> cov) {
         Object gap = cov.get("gapCount");
         return gap == null || "0".equals(String.valueOf(gap)) ? "" : "；缺口 " + gap + " 张表待登记";
+    }
+
+    /**
+     * 对主体索引中的湖/CK/源表调用 impact 下游展开（lineage.expand）；soft-fail。
+     * inferred 命中须人工确认；已确认的 fqn 在重建时保留确认态。
+     */
+    @SuppressWarnings("unchecked")
+    private int expandLineageDownstream(GovDelRequest req, List<String> seedTables,
+                                        Map<String, GovDelSubjectMap> mapByFqn,
+                                        Set<String> keepKeys, Set<String> confirmedFqns) {
+        Set<String> foci = new LinkedHashSet<>();
+        for (String fqn : seedTables) {
+            if (StrUtil.isBlank(fqn)) {
+                continue;
+            }
+            String low = fqn.toLowerCase(Locale.ROOT);
+            GovDelSubjectMap m = mapByFqn.get(low);
+            String carrier = m != null ? m.getCarrier() : guessCarrier(fqn);
+            if (Set.of("iceberg", "ck", "source").contains(carrier)) {
+                foci.add(fqn);
+            }
+        }
+        if (foci.isEmpty()) {
+            return 0;
+        }
+
+        int added = 0;
+        int inferred = 0;
+        Set<String> seenDown = new LinkedHashSet<>();
+        for (String focus : foci) {
+            Map<String, Object> impact;
+            try {
+                impact = govLineageService.impact(null, focus, null, 0, 3, req.getWs());
+            } catch (Exception ex) {
+                logExec(req, null, "lineage.expand", "warn", null, null,
+                        "焦点 " + focus + " 展开失败（软降级）：" + StrUtil.maxLength(ex.getMessage(), 200));
+                continue;
+            }
+            if (impact == null) {
+                continue;
+            }
+            Object downObj = impact.get("down");
+            if (!(downObj instanceof List<?> downList)) {
+                continue;
+            }
+            for (Object o : downList) {
+                if (!(o instanceof Map<?, ?> raw)) {
+                    continue;
+                }
+                Map<String, Object> item = (Map<String, Object>) raw;
+                String table = StrUtil.blankToDefault(stringVal(item.get("key")), stringVal(item.get("assetCode")));
+                if (StrUtil.isBlank(table)) {
+                    continue;
+                }
+                String nk = table.toLowerCase(Locale.ROOT);
+                if (!seenDown.add(nk)) {
+                    continue;
+                }
+                // 已是主体索引项则跳过（避免重复）
+                if (mapByFqn.containsKey(nk) || mapByFqn.containsKey(shortName(table).toLowerCase(Locale.ROOT))) {
+                    continue;
+                }
+                String carrier = guessCarrier(table);
+                String key = carrier + "|" + table;
+                if (keepKeys.contains(key)) {
+                    continue;
+                }
+                String confidence = StrUtil.blankToDefault(stringVal(item.get("confidence")), "explicit")
+                        .trim().toLowerCase(Locale.ROOT);
+                if (!"inferred".equals(confidence)) {
+                    confidence = "explicit";
+                }
+                GovDelSubjectMap hit = mapByFqn.get(nk);
+                GovDelTarget t = newTarget(req, carrier, table,
+                        "lineage.expand ← " + focus,
+                        hit != null ? hit.getDeleteMode() : defaultMode(carrier),
+                        hit != null ? hit.getId() : null);
+                t.setLineageConfidence(confidence);
+                Object hopObj = item.get("hop");
+                if (hopObj instanceof Number n) {
+                    t.setLineageHop(n.intValue());
+                }
+                t.setLineageLayer(StrUtil.blankToDefault(stringVal(item.get("layer")), guessLayer(table)));
+                t.setOwner(firstNonBlank(stringVal(item.get("owner")), stringVal(item.get("techOwner")),
+                        hit != null ? hit.getOwner() : null));
+                t.setSensitivity(firstNonBlank(stringVal(item.get("sensitivity")),
+                        hit != null ? hit.getSensitivity() : null));
+                boolean hasCol = hit != null && (StrUtil.isNotBlank(hit.getIdColumn())
+                        || StrUtil.isNotBlank(hit.getJoinPath()));
+                t.setHasSubjectCol(hasCol);
+                if ("inferred".equals(confidence) && confirmedFqns.contains(nk)) {
+                    t.setLineageConfirmed(true);
+                } else {
+                    t.setLineageConfirmed(false);
+                }
+                if ("inferred".equals(confidence) && !Boolean.TRUE.equals(t.getLineageConfirmed())) {
+                    inferred++;
+                }
+                targetMapper.insert(t);
+                keepKeys.add(key);
+                added++;
+            }
+            logExec(req, null, "lineage.expand", "success", null, null,
+                    "焦点 " + focus + " 下游 " + (impact.get("downCount") != null ? impact.get("downCount") : downList.size())
+                            + " · source=" + impact.getOrDefault("source", "portal_edges"));
+        }
+        if (inferred > 0) {
+            logExec(req, null, "lineage.expand", "warn", null, null,
+                    "推断血缘 " + inferred + " 项待人工确认后方可提交审批");
+        }
+        return added;
+    }
+
+    private static String stringVal(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
+
+    private static String firstNonBlank(String... vals) {
+        if (vals == null) {
+            return null;
+        }
+        for (String v : vals) {
+            if (StrUtil.isNotBlank(v)) {
+                return v;
+            }
+        }
+        return null;
+    }
+
+    private static String guessCarrier(String fqn) {
+        String t = StrUtil.blankToDefault(fqn, "").toLowerCase(Locale.ROOT);
+        if (t.contains("_local") || t.contains("clickhouse") || t.startsWith("ck.")) {
+            return "ck";
+        }
+        if (t.startsWith("mysql.") || t.startsWith("postgres.") || t.startsWith("pg.")
+                || t.contains(".crm.") || t.contains(".oltp.")) {
+            return "sink";
+        }
+        return "iceberg";
+    }
+
+    private static String guessLayer(String table) {
+        String t = StrUtil.blankToDefault(table, "").toLowerCase(Locale.ROOT);
+        if (t.contains("ods")) {
+            return "ODS";
+        }
+        if (t.contains("dwd")) {
+            return "DWD";
+        }
+        if (t.contains("dws")) {
+            return "DWS";
+        }
+        if (t.contains("ads")) {
+            return "ADS";
+        }
+        if (t.contains("dim")) {
+            return "DIM";
+        }
+        return "表";
     }
 
     private GovDelTarget newTarget(GovDelRequest req, String carrier, String objectFqn, String scope,
@@ -1185,6 +1394,7 @@ public class GovDelServiceImpl implements GovDelService {
         t.setRowsEst(0L);
         t.setSourceMapId(sourceMapId);
         t.setManualAdded(false);
+        t.setLineageConfirmed(false);
         t.setDeleteFlag(NOT_DELETE);
         t.setCreateTime(now);
         t.setUpdateTime(now);
@@ -1354,6 +1564,15 @@ public class GovDelServiceImpl implements GovDelService {
                 .count());
         plan.put("failed", targets.stream().filter(t -> "failed".equals(t.getStatus())).count());
         plan.put("rowsEst", targets.stream().mapToLong(t -> t.getRowsEst() == null ? 0 : t.getRowsEst()).sum());
+        long pendingConfirm = targets.stream()
+                .filter(t -> !"excluded".equals(t.getStatus()))
+                .filter(t -> "inferred".equalsIgnoreCase(StrUtil.blankToDefault(t.getLineageConfidence(), "")))
+                .filter(t -> !Boolean.TRUE.equals(t.getLineageConfirmed()))
+                .count();
+        plan.put("pendingConfirm", pendingConfirm);
+        plan.put("lineageInferred", targets.stream()
+                .filter(t -> "inferred".equalsIgnoreCase(StrUtil.blankToDefault(t.getLineageConfidence(), "")))
+                .count());
         vo.setPlanSummary(plan);
         if (withTargets) {
             vo.setTargets(targets.stream().map(this::toTargetVo).toList());
@@ -1380,6 +1599,17 @@ public class GovDelServiceImpl implements GovDelService {
         vo.setExcludeReason(t.getExcludeReason());
         vo.setReviewAt(t.getReviewAt());
         vo.setManualAdded(t.getManualAdded());
+        vo.setLineageConfidence(t.getLineageConfidence());
+        vo.setLineageHop(t.getLineageHop());
+        vo.setLineageLayer(t.getLineageLayer());
+        vo.setOwner(t.getOwner());
+        vo.setSensitivity(t.getSensitivity());
+        vo.setHasSubjectCol(t.getHasSubjectCol());
+        vo.setLineageConfirmed(Boolean.TRUE.equals(t.getLineageConfirmed()));
+        boolean needs = "inferred".equalsIgnoreCase(StrUtil.blankToDefault(t.getLineageConfidence(), ""))
+                && !Boolean.TRUE.equals(t.getLineageConfirmed())
+                && !"excluded".equals(t.getStatus());
+        vo.setNeedsConfirm(needs);
         return vo;
     }
 

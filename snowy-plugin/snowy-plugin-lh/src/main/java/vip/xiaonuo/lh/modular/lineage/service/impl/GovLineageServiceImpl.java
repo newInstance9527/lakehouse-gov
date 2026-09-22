@@ -135,10 +135,10 @@ public class GovLineageServiceImpl implements GovLineageService {
         }
         List<GovLineageFieldEdge> all = listActiveEdges(workspace);
 
-        Set<String> upTables = expandTables(focusKey, all, true, up);
-        Set<String> downTables = expandTables(focusKey, all, false, down);
-        upTables.remove(normalizeTable(focusKey));
-        downTables.remove(normalizeTable(focusKey));
+        Map<String, ExpandMeta> upMeta = expandTablesMeta(focusKey, all, true, up);
+        Map<String, ExpandMeta> downMeta = expandTablesMeta(focusKey, all, false, down);
+        upMeta.remove(normalizeTable(focusKey).toLowerCase(Locale.ROOT));
+        downMeta.remove(normalizeTable(focusKey).toLowerCase(Locale.ROOT));
 
         Map<String, String> tableJob = new HashMap<>();
         for (GovLineageFieldEdge e : all) {
@@ -150,22 +150,21 @@ public class GovLineageServiceImpl implements GovLineageService {
             }
         }
 
-        // OM 下游实体补充（有则并入 downTables）
+        // OM 下游实体补充（有则并入；无门户路径时置信度按 explicit 登记）
         String impactSource = "portal_edges";
         Map<String, Object> om = openMetadataClient.getTableLineage(focusKey, up, down);
         if (Boolean.TRUE.equals(om.get("ok"))) {
             Set<String> omDown = extractOmEntityNames(om.get("data"), false);
             if (!omDown.isEmpty()) {
-                downTables.addAll(omDown);
+                mergeOmExpand(downMeta, omDown);
                 impactSource = "openmetadata+portal_edges";
             }
             Set<String> omUp = extractOmEntityNames(om.get("data"), true);
             if (!omUp.isEmpty()) {
-                upTables.addAll(omUp);
+                mergeOmExpand(upMeta, omUp);
                 impactSource = "openmetadata+portal_edges";
             }
             if (!omDown.isEmpty() || !omUp.isEmpty()) {
-                // 若 OM 有实体且门户边为空，标为以 OM 为主
                 if (all.isEmpty()) {
                     impactSource = "openmetadata";
                 }
@@ -175,12 +174,14 @@ public class GovLineageServiceImpl implements GovLineageService {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("focus", focusKey);
         r.put("source", impactSource);
-        r.put("up", upTables.stream().map(t -> impactItem(t, "上游", tableJob.get(normalizeTable(t)), workspace))
+        r.put("up", upMeta.values().stream()
+                .map(m -> impactItem(m, "上游", tableJob.get(normalizeTable(m.table)), workspace))
                 .collect(Collectors.toList()));
-        r.put("down", downTables.stream().map(t -> impactItem(t, "下游", tableJob.get(normalizeTable(t)), workspace))
+        r.put("down", downMeta.values().stream()
+                .map(m -> impactItem(m, "下游", tableJob.get(normalizeTable(m.table)), workspace))
                 .collect(Collectors.toList()));
-        r.put("upCount", upTables.size());
-        r.put("downCount", downTables.size());
+        r.put("upCount", upMeta.size());
+        r.put("downCount", downMeta.size());
         return r;
     }
 
@@ -517,15 +518,29 @@ public class GovLineageServiceImpl implements GovLineageService {
     }
 
     private Set<String> expandTables(String focus, List<GovLineageFieldEdge> all, boolean upstream, int depth) {
+        Set<String> out = new LinkedHashSet<>();
+        for (ExpandMeta m : expandTablesMeta(focus, all, upstream, depth).values()) {
+            out.add(m.table);
+        }
+        return out;
+    }
+
+    /**
+     * BFS 展开：按最短路径记录 hop；路径上任一边为 inferred 则整表 confidence=inferred。
+     * key = 表名小写；含焦点自身（hop=0）。
+     */
+    private Map<String, ExpandMeta> expandTablesMeta(String focus, List<GovLineageFieldEdge> all,
+                                                     boolean upstream, int depth) {
         String start = normalizeTable(focus);
-        Set<String> visited = new LinkedHashSet<>();
+        Map<String, ExpandMeta> byNorm = new LinkedHashMap<>();
         Queue<String> q = new ArrayDeque<>();
-        Map<String, Integer> hops = new HashMap<>();
+        ExpandMeta startMeta = new ExpandMeta(start, 0, "explicit");
+        byNorm.put(start.toLowerCase(Locale.ROOT), startMeta);
         q.add(start);
-        hops.put(start, 0);
         while (!q.isEmpty()) {
             String cur = q.poll();
-            int h = hops.getOrDefault(cur, 0);
+            ExpandMeta curMeta = byNorm.get(cur.toLowerCase(Locale.ROOT));
+            int h = curMeta == null ? 0 : curMeta.hop;
             if (h >= depth) {
                 continue;
             }
@@ -534,23 +549,51 @@ public class GovLineageServiceImpl implements GovLineageService {
                 String to = normalizeTable(e.getToTable());
                 String next = upstream ? (to.equalsIgnoreCase(cur) ? from : null)
                         : (from.equalsIgnoreCase(cur) ? to : null);
-                if (next == null || visited.contains(next.toLowerCase(Locale.ROOT))) {
+                if (next == null) {
                     continue;
                 }
-                visited.add(next.toLowerCase(Locale.ROOT));
-                hops.put(next, h + 1);
+                String nk = next.toLowerCase(Locale.ROOT);
+                if (byNorm.containsKey(nk)) {
+                    continue;
+                }
+                String conf = worseConfidence(curMeta == null ? "explicit" : curMeta.confidence, e.getConfidence());
+                ExpandMeta nextMeta = new ExpandMeta(next, h + 1, conf);
+                byNorm.put(nk, nextMeta);
                 q.add(next);
             }
         }
-        Set<String> out = new LinkedHashSet<>();
-        for (String k : hops.keySet()) {
-            if (!k.equalsIgnoreCase(start)) {
-                out.add(k);
+        return byNorm;
+    }
+
+    private static void mergeOmExpand(Map<String, ExpandMeta> meta, Set<String> names) {
+        for (String t : names) {
+            if (StrUtil.isBlank(t)) {
+                continue;
             }
+            String nk = normalizeTable(t).toLowerCase(Locale.ROOT);
+            meta.putIfAbsent(nk, new ExpandMeta(t, 1, "explicit"));
         }
-        // also include start for graph builder
-        out.add(start);
-        return out;
+    }
+
+    private static String worseConfidence(String a, String b) {
+        String x = StrUtil.blankToDefault(a, "explicit").trim().toLowerCase(Locale.ROOT);
+        String y = StrUtil.blankToDefault(b, "explicit").trim().toLowerCase(Locale.ROOT);
+        if ("inferred".equals(x) || "inferred".equals(y)) {
+            return "inferred";
+        }
+        return "explicit";
+    }
+
+    private static final class ExpandMeta {
+        final String table;
+        final int hop;
+        final String confidence;
+
+        ExpandMeta(String table, int hop, String confidence) {
+            this.table = table;
+            this.hop = hop;
+            this.confidence = confidence;
+        }
     }
 
     private List<Map<String, Object>> propagateFields(String table, String field,
@@ -632,6 +675,13 @@ public class GovLineageServiceImpl implements GovLineageService {
         return v;
     }
 
+    private Map<String, Object> impactItem(ExpandMeta meta, String dir, String etlJobId, String ws) {
+        Map<String, Object> m = impactItem(meta.table, dir, etlJobId, ws);
+        m.put("confidence", StrUtil.blankToDefault(meta.confidence, "explicit"));
+        m.put("hop", meta.hop);
+        return m;
+    }
+
     private Map<String, Object> impactItem(String table, String dir, String etlJobId, String ws) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("key", table);
@@ -639,6 +689,8 @@ public class GovLineageServiceImpl implements GovLineageService {
         m.put("type", kind);
         m.put("layer", guessLayer(table));
         m.put("note", dir + "依赖");
+        m.put("confidence", "explicit");
+        m.put("hop", null);
 
         vip.xiaonuo.lh.modular.catalog.entity.GovAsset asset = findAssetByTable(table, ws);
         if (asset != null) {
@@ -648,6 +700,7 @@ public class GovLineageServiceImpl implements GovLineageService {
             m.put("owner", owner);
             m.put("techOwner", asset.getTechOwner());
             m.put("bizOwner", asset.getBizOwner());
+            m.put("sensitivity", asset.getSensitivity());
         }
         if (StrUtil.isNotBlank(etlJobId)) {
             m.put("etlJobId", etlJobId);

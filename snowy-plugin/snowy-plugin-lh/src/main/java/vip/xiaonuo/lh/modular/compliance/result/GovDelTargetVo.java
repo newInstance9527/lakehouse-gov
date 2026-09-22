@@ -28,4 +28,13 @@ public class GovDelTargetVo {
     private String excludeReason;
     private Date reviewAt;
     private Boolean manualAdded;
+    private String lineageConfidence;
+    private Integer lineageHop;
+    private String lineageLayer;
+    private String owner;
+    private String sensitivity;
+    private Boolean hasSubjectCol;
+    private Boolean lineageConfirmed;
+    /** inferred 且未确认 → 提交前须确认 */
+    private Boolean needsConfirm;
 }

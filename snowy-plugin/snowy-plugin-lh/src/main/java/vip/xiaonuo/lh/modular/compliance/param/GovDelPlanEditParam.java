@@ -27,6 +27,9 @@ public class GovDelPlanEditParam {
     @Schema(description = "排除理由（excludeIds 非空时必填）")
     private String excludeReason;
 
+    @Schema(description = "人工确认的推断血缘计划项 id（lineage_confidence=inferred）")
+    private List<String> confirmIds;
+
     @Getter
     @Setter
     public static class TargetItem {

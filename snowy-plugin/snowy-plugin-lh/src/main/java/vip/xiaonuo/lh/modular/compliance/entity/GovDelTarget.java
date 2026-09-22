@@ -37,4 +37,13 @@ public class GovDelTarget extends CommonEntity {
     private Date reviewAt;
     private String sourceMapId;
     private Boolean manualAdded;
+    /** explicit / inferred；空表示主体索引直出 */
+    private String lineageConfidence;
+    private Integer lineageHop;
+    private String lineageLayer;
+    private String owner;
+    private String sensitivity;
+    private Boolean hasSubjectCol;
+    /** inferred 边须人工确认后才可提交审批 */
+    private Boolean lineageConfirmed;
 }
