@@ -14,4 +14,10 @@ public class GovAiChatParam {
     /** 前端芯片 scene / chipId */
     private String scene;
     private String modelOverride;
+    /**
+     * 数据服务工作台 schema linking（可选）：左树已选表/列。
+     * 每项建议字段：schema、table（或 name）、columns[{name,type}]。
+     * 仅作生成上下文；不旁路 ACL、不自动执行。
+     */
+    private java.util.List<java.util.Map<String, Object>> schemaContext;
 }

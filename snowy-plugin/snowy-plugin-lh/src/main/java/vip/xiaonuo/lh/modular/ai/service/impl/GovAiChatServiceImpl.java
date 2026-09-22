@@ -338,12 +338,15 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 appendDiagnoseCitations(emitter, citations, actions, workspace, diagnoseTable);
             }
 
-            // 工具：resolve_metric / compile_metric → 指标中心 API（强制 metric_code）
+            // 工具：resolve_metric / compile_metric → 指标中心 API（口径类强制 metric_code）
+            // D6：工作台 schemaContext 走表/列草案，不按指标拒答
             String metricCode = null;
             String metricName = null;
             String compiledSql = null;
-            boolean metricTopic = "nl2sql".equals(intent) || containsMetricKeyword(safeText);
-            if (metricTopic) {
+            List<Map<String, Object>> schemaContext = normalizeSchemaContext(param.getSchemaContext());
+            boolean hasSchemaLink = !schemaContext.isEmpty();
+            boolean metricTopic = containsMetricKeyword(safeText);
+            if (metricTopic || ("nl2sql".equals(intent) && !hasSchemaLink)) {
                 GovMetricVo metric = resolveMetricTool(safeText, workspace);
                 if (metric != null && StrUtil.isNotBlank(metric.getMetricCode())) {
                     metricCode = metric.getMetricCode();
@@ -369,40 +372,33 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     }
                 }
             }
+            if (hasSchemaLink) {
+                Map<String, Object> schemaCite = new LinkedHashMap<>();
+                schemaCite.put("type", "schema");
+                schemaCite.put("title", "schema_link");
+                schemaCite.put("tool", "schema_link");
+                schemaCite.put("text", formatSchemaContextBrief(schemaContext));
+                citations.add(schemaCite);
+                sendEvent(emitter, "citation", schemaCite);
+            }
 
-            // 生成回答（口径类无 metric_code 则拒编造）
+            // 生成回答：口径关键词无 metric_code 则拒编造；schema linking / 普通草案放行
             if (metricTopic && StrUtil.isBlank(metricCode)) {
                 answer = missingMetricCodeAnswer(safeText);
             } else {
                 answer = buildAnswer(intent, safeText, citations, metricCode, metricName,
-                        compiledSql, modelId, diagnoseTable);
+                        compiledSql, modelId, diagnoseTable, schemaContext);
                 answer = ensureMetricCodeInAnswer(answer, metricCode);
             }
 
             // 流式 token（按块推送）
             streamTokens(emitter, answer);
 
-            // 建议动作
+            // 建议动作（不自动执行；工作台可取 action.sql 写入当前窗口）
             if ("nl2sql".equals(intent) || "sql_opt".equals(intent)) {
                 if (StrUtil.isNotBlank(compiledSql)) {
-                    Map<String, Object> open = new LinkedHashMap<>();
-                    open.put("type", "deeplink");
-                    open.put("label", "在即席查询打开");
-                    open.put("href", "/query?sql=" + java.net.URLEncoder.encode(compiledSql,
-                            java.nio.charset.StandardCharsets.UTF_8));
-                    open.put("sql", compiledSql);
-                    open.put("metricCode", metricCode);
-                    actions.add(open);
-                    sendEvent(emitter, "action", open);
-
-                    Map<String, Object> run = new LinkedHashMap<>();
-                    run.put("type", "run_sql");
-                    run.put("label", "试跑（需二次确认）");
-                    run.put("sql", compiledSql);
-                    run.put("metricCode", metricCode);
-                    actions.add(run);
-                    sendEvent(emitter, "action", run);
-                } else if (metricTopic) {
+                    emitSqlActions(emitter, actions, compiledSql, metricCode);
+                } else if (metricTopic && StrUtil.isBlank(metricCode)) {
                     Map<String, Object> metricsLink = new LinkedHashMap<>();
                     metricsLink.put("type", "deeplink");
                     metricsLink.put("label", "打开指标中心");
@@ -410,22 +406,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     actions.add(metricsLink);
                     sendEvent(emitter, "action", metricsLink);
                 } else {
-                    String sql = heuristicSql(safeText);
-                    Map<String, Object> open = new LinkedHashMap<>();
-                    open.put("type", "deeplink");
-                    open.put("label", "在即席查询打开");
-                    open.put("href", "/query?sql=" + java.net.URLEncoder.encode(sql,
-                            java.nio.charset.StandardCharsets.UTF_8));
-                    open.put("sql", sql);
-                    actions.add(open);
-                    sendEvent(emitter, "action", open);
-
-                    Map<String, Object> run = new LinkedHashMap<>();
-                    run.put("type", "run_sql");
-                    run.put("label", "试跑（需二次确认）");
-                    run.put("sql", sql);
-                    actions.add(run);
-                    sendEvent(emitter, "action", run);
+                    String sql = heuristicSql(safeText, schemaContext);
+                    emitSqlActions(emitter, actions, sql, null);
                 }
             }
             if (!citations.isEmpty()) {
@@ -513,7 +495,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
 
     private String buildAnswer(String intent, String text, List<Map<String, Object>> citations,
                                String metricCode, String metricName, String compiledSql,
-                               String modelId, String diagnoseTable) {
+                               String modelId, String diagnoseTable,
+                               List<Map<String, Object>> schemaContext) {
         StringBuilder ctx = new StringBuilder();
         ctx.append("意图=").append(intent).append('\n');
         if (StrUtil.isNotBlank(diagnoseTable)) {
@@ -528,6 +511,9 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         }
         if (StrUtil.isNotBlank(compiledSql)) {
             ctx.append("编译SQL=\n").append(compiledSql).append('\n');
+        }
+        if (schemaContext != null && !schemaContext.isEmpty()) {
+            ctx.append("schema_link=\n").append(formatSchemaContextBrief(schemaContext)).append('\n');
         }
         for (Map<String, Object> c : citations) {
             String citeText = String.valueOf(c.getOrDefault("text", ""));
@@ -546,18 +532,21 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             String llm = liteLlmClient.chatSimple(modelId,
                     "你是湖仓治理助手 DataLake Copilot。基于给定上下文回答；"
                             + "引用业务口径必须给出 metric_code；禁止编造 GMV 等生产口径或直出生产 SQL；"
-                            + "有编译 SQL 时原样引用并标注 metric_code；禁止复述用户明文手机号/证件/密钥。",
+                            + "有编译 SQL 时原样引用并标注 metric_code；"
+                            + "有 schema_link 时可生成只读 SELECT 草案（LIMIT≤100），禁止 DDL/DML；"
+                            + "禁止复述用户明文手机号/证件/密钥。",
                     "用户问题：\n" + text + "\n\n上下文：\n" + ctx);
             if (StrUtil.isNotBlank(llm)) {
                 return llm;
             }
         }
-        return heuristicAnswer(intent, text, citations, metricCode, metricName, compiledSql, diagnoseTable);
+        return heuristicAnswer(intent, text, citations, metricCode, metricName, compiledSql,
+                diagnoseTable, schemaContext);
     }
 
     private String heuristicAnswer(String intent, String text, List<Map<String, Object>> citations,
                                    String metricCode, String metricName, String compiledSql,
-                                   String diagnoseTable) {
+                                   String diagnoseTable, List<Map<String, Object>> schemaContext) {
         StringBuilder sb = new StringBuilder();
         sb.append("### ").append(intentLabel(intent)).append("\n\n");
         switch (intent) {
@@ -569,7 +558,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     }
                     sb.append(" 经编译器生成 SQL：\n\n```sql\n");
                     sb.append(compiledSql);
-                    sb.append("\n```\n\n请在即席查询打开后二次确认再执行。\n");
+                    sb.append("\n```\n\n请写入工作台或在即席查询打开后二次确认再执行。\n");
                 } else if (StrUtil.isNotBlank(metricCode)) {
                     sb.append("已解析到 `metric_code`=**").append(metricCode).append("**");
                     if (StrUtil.isNotBlank(metricName)) {
@@ -577,9 +566,15 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     }
                     sb.append("，但编译失败。请到指标中心检查定义后重试，禁止手写生产口径。\n");
                 } else {
-                    sb.append("已按只读约束生成 schema 草案 SQL（非指标口径）：\n\n```sql\n");
-                    sb.append(heuristicSql(text));
-                    sb.append("\n```\n\n请在即席查询打开后二次确认再执行。\n");
+                    sb.append("已按只读约束生成 schema 草案 SQL");
+                    if (schemaContext != null && !schemaContext.isEmpty()) {
+                        sb.append("（左树 schema linking）");
+                    } else {
+                        sb.append("（非指标口径）");
+                    }
+                    sb.append("：\n\n```sql\n");
+                    sb.append(heuristicSql(text, schemaContext));
+                    sb.append("\n```\n\n不会自动执行；请确认后写入数据服务当前 SQL 窗口或在即席二次确认。\n");
                 }
             }
             case "gen_script" -> sb.append("Flink 脚本建议：从数据源登记表选择输入/输出，使用门户 ETL 模板生成 FlinkSQL；"
@@ -617,6 +612,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 String type = String.valueOf(c.getOrDefault("type", ""));
                 switch (type) {
                     case "metric" -> sb.append("[指标 ").append(c.get("metricCode")).append("] ").append(c.get("title"));
+                    case "schema" -> sb.append("[Schema] ").append(c.get("title"));
                     case "rule" -> sb.append("[质量] ").append(c.get("title"));
                     case "lineage" -> sb.append("[血缘] ").append(c.get("title"));
                     default -> sb.append("[知识] ").append(c.get("title"));
@@ -834,7 +830,35 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         return null;
     }
 
-    private String heuristicSql(String text) {
+    private String heuristicSql(String text, List<Map<String, Object>> schemaContext) {
+        if (schemaContext != null && !schemaContext.isEmpty()) {
+            Map<String, Object> first = schemaContext.get(0);
+            String schema = String.valueOf(first.getOrDefault("schema", "")).trim();
+            String table = String.valueOf(first.getOrDefault("table",
+                    first.getOrDefault("name", ""))).trim();
+            if (StrUtil.isNotBlank(table)) {
+                String selectList = "*";
+                Object colsObj = first.get("columns");
+                if (colsObj instanceof List<?> cols && !cols.isEmpty()) {
+                    List<String> names = new ArrayList<>();
+                    for (Object c : cols) {
+                        if (c instanceof Map<?, ?> m) {
+                            Object n = m.get("name");
+                            if (n != null && StrUtil.isNotBlank(String.valueOf(n))) {
+                                names.add(String.valueOf(n).trim());
+                            }
+                        } else if (c != null && StrUtil.isNotBlank(String.valueOf(c))) {
+                            names.add(String.valueOf(c).trim());
+                        }
+                    }
+                    if (!names.isEmpty()) {
+                        selectList = String.join(", ", names);
+                    }
+                }
+                String fqn = StrUtil.isNotBlank(schema) ? schema + "." + table : table;
+                return "SELECT " + selectList + "\nFROM " + fqn + "\nWHERE 1 = 1\nLIMIT 100";
+            }
+        }
         String table = extractTableName(text);
         if (StrUtil.isNotBlank(table)) {
             return "SELECT *\nFROM iceberg.default." + table + "\n"
@@ -844,6 +868,119 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         return "SELECT *\nFROM iceberg.default.dwd_order_detail\n"
                 + "WHERE dt = date_format(date_add('day', -1, current_date), '%Y-%m-%d')\n"
                 + "LIMIT 100";
+    }
+
+    private void emitSqlActions(SseEmitter emitter, List<Map<String, Object>> actions,
+                                String sql, String metricCode) throws IOException {
+        if (StrUtil.isBlank(sql)) {
+            return;
+        }
+        Map<String, Object> apply = new LinkedHashMap<>();
+        apply.put("type", "apply_sql");
+        apply.put("label", "写入数据服务 SQL 窗口");
+        apply.put("sql", sql);
+        apply.put("autoExecute", false);
+        if (StrUtil.isNotBlank(metricCode)) {
+            apply.put("metricCode", metricCode);
+        }
+        actions.add(apply);
+        sendEvent(emitter, "action", apply);
+
+        Map<String, Object> open = new LinkedHashMap<>();
+        open.put("type", "deeplink");
+        open.put("label", "在即席查询打开");
+        open.put("href", "/query?sql=" + java.net.URLEncoder.encode(sql,
+                java.nio.charset.StandardCharsets.UTF_8));
+        open.put("sql", sql);
+        if (StrUtil.isNotBlank(metricCode)) {
+            open.put("metricCode", metricCode);
+        }
+        actions.add(open);
+        sendEvent(emitter, "action", open);
+
+        Map<String, Object> run = new LinkedHashMap<>();
+        run.put("type", "run_sql");
+        run.put("label", "试跑（需二次确认）");
+        run.put("sql", sql);
+        if (StrUtil.isNotBlank(metricCode)) {
+            run.put("metricCode", metricCode);
+        }
+        actions.add(run);
+        sendEvent(emitter, "action", run);
+    }
+
+    private static List<Map<String, Object>> normalizeSchemaContext(List<Map<String, Object>> raw) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (raw == null) {
+            return out;
+        }
+        for (Map<String, Object> item : raw) {
+            if (item == null || item.isEmpty()) {
+                continue;
+            }
+            String schema = String.valueOf(item.getOrDefault("schema", "")).trim();
+            String table = String.valueOf(item.getOrDefault("table",
+                    item.getOrDefault("name", ""))).trim();
+            if (StrUtil.isBlank(table) || "null".equalsIgnoreCase(table)) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("schema", schema);
+            row.put("table", table);
+            List<Map<String, Object>> cols = new ArrayList<>();
+            Object colsObj = item.get("columns");
+            if (colsObj instanceof List<?> list) {
+                for (Object c : list) {
+                    if (c instanceof Map<?, ?> m) {
+                        Object n = m.get("name");
+                        if (n == null || StrUtil.isBlank(String.valueOf(n))) {
+                            continue;
+                        }
+                        Map<String, Object> col = new LinkedHashMap<>();
+                        col.put("name", String.valueOf(n).trim());
+                        if (m.get("type") != null) {
+                            col.put("type", String.valueOf(m.get("type")));
+                        }
+                        cols.add(col);
+                    } else if (c != null && StrUtil.isNotBlank(String.valueOf(c))) {
+                        cols.add(Map.of("name", String.valueOf(c).trim()));
+                    }
+                }
+            }
+            row.put("columns", cols);
+            out.add(row);
+            if (out.size() >= 8) {
+                break;
+            }
+        }
+        return out;
+    }
+
+    private static String formatSchemaContextBrief(List<Map<String, Object>> schemaContext) {
+        if (schemaContext == null || schemaContext.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map<String, Object> t : schemaContext) {
+            String schema = String.valueOf(t.getOrDefault("schema", "")).trim();
+            String table = String.valueOf(t.getOrDefault("table", "")).trim();
+            String fqn = StrUtil.isNotBlank(schema) ? schema + "." + table : table;
+            sb.append(fqn);
+            Object colsObj = t.get("columns");
+            if (colsObj instanceof List<?> cols && !cols.isEmpty()) {
+                List<String> names = new ArrayList<>();
+                for (Object c : cols) {
+                    if (c instanceof Map<?, ?> m && m.get("name") != null) {
+                        names.add(String.valueOf(m.get("name")));
+                    }
+                }
+                if (!names.isEmpty()) {
+                    sb.append("(").append(String.join(",", names)).append(")");
+                }
+            }
+            sb.append("; ");
+        }
+        return sb.toString().trim();
     }
 
     /**
