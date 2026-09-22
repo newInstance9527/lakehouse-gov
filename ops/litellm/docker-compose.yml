@@ -1,0 +1,30 @@
+# LiteLLM Proxy · 生产最小 compose（D1）
+# 用法：cp .env.example .env && docker compose up -d
+# 门户：lh.ai.litellm-url=http://<host>:4000
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: lh-litellm
+    restart: unless-stopped
+    ports:
+      # 生产建议只暴露内网 / 不映射公网
+      - "4000:4000"
+    env_file:
+      - .env
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lh-litellm-change-me}
+      # 与 config.yaml 中 os.environ/* 对应
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

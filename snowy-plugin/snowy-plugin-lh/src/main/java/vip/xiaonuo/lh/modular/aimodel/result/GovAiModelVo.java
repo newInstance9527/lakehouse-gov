@@ -19,9 +19,13 @@ public class GovAiModelVo {
     private String modelName;
     private String baseUrl;
     private String endpoint;
-    /** 脱敏 Key */
+    /** 脱敏 Key（禁止明文） */
     private String key;
     private String keyMask;
+    /** Key 过期时间 */
+    private Date keyExpiresAt;
+    /** Vault 路径指针（无密文） */
+    private String vaultPath;
     /** 与库一致，如 128K */
     private String contextTokens;
     private String context;

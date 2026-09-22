@@ -5,6 +5,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.math.BigDecimal;
+import java.util.Date;
 
 @Getter
 @Setter
@@ -25,8 +26,11 @@ public class GovAiModelUpsertParam {
     @Schema(description = "OpenAI 兼容 base URL")
     private String baseUrl;
 
-    @Schema(description = "API Key（仅创建/轮换提交）")
+    @Schema(description = "API Key（仅创建/轮换提交；写入 Vault 后丢弃）")
     private String key;
+
+    @Schema(description = "Key 过期时间（可选；巡检预警）")
+    private Date keyExpiresAt;
 
     @Schema(description = "上下文窗展示（如 128K）")
     private String context;

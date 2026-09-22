@@ -17,6 +17,7 @@ import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelEnableParam;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelPageParam;
+import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelRotateParam;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelUpsertParam;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiRouteUpsertParam;
 import vip.xiaonuo.lh.modular.aimodel.result.GovAiModelVo;
@@ -65,11 +66,27 @@ public class GovAiModelController {
         return CommonResult.data(govAiModelService.update(id, param));
     }
 
-    @Operation(summary = "测试连通性")
+    @Operation(summary = "轮换 API Key（写入 Vault，响应仅脱敏）")
+    @CommonLog("轮换AI模型Key")
+    @PostMapping("/lh/ai/models/{id}/rotate")
+    public CommonResult<GovAiModelVo> rotate(
+            @PathVariable("id") String id,
+            @RequestBody @Valid GovAiModelRotateParam param) {
+        return CommonResult.data(govAiModelService.rotate(id, param));
+    }
+
+    @Operation(summary = "测试连通性（LiteLLM + Vault Key）")
     @CommonLog("测试AI模型")
     @PostMapping("/lh/ai/models/{id}/test")
     public CommonResult<Map<String, Object>> test(@PathVariable("id") String id) {
         return CommonResult.data(govAiModelService.test(id));
+    }
+
+    @Operation(summary = "批量巡检（LiteLLM 健康 + 启用模型连通 + Key 过期预警）")
+    @CommonLog("巡检AI模型")
+    @PostMapping("/lh/ai/models/patrol")
+    public CommonResult<Map<String, Object>> patrol(@RequestParam(required = false) String ws) {
+        return CommonResult.data(govAiModelService.patrol(ws));
     }
 
     @Operation(summary = "启停模型")

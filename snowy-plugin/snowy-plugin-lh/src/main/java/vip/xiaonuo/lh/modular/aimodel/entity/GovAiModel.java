@@ -8,6 +8,7 @@ import lombok.Setter;
 import vip.xiaonuo.common.pojo.CommonEntity;
 
 import java.math.BigDecimal;
+import java.util.Date;
 
 /**
  * AI 模型登记（gov_ai_model）
@@ -40,6 +41,8 @@ public class GovAiModel extends CommonEntity {
     private Integer latencyMs;
     private String roleLabel;
     private String keyMask;
+    /** Key 过期时间（人工维护；巡检预警） */
+    private Date keyExpiresAt;
     /** 累计调用次数 */
     private Long callsTotal;
     /** 累计成本 */

@@ -418,5 +418,14 @@ public class LhProperties {
         private int embedDim = 1536;
         /** 混合检索：向量权重 0~1，其余为关键词 */
         private double vectorWeight = 0.7;
+        /**
+         * 定时连通巡检（对启用中的模型调 LiteLLM；Vault 缺 Key / 临近过期标 warn）。
+         * 现网未配 litellm-url 时巡检会跳过连通探测，仅做 Key 过期预警。
+         */
+        private boolean patrolEnabled = false;
+        /** Spring cron；默认每小时整点 */
+        private String patrolCron = "0 0 * * * ?";
+        /** Key 将在 N 天内过期 → status=warn */
+        private int patrolWarnDays = 14;
     }
 }

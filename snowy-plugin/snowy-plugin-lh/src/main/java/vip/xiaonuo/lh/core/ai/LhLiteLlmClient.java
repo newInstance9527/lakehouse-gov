@@ -129,6 +129,52 @@ public class LhLiteLlmClient {
         return chat(model, msgs);
     }
 
+    /**
+     * 网关存活探测（D1 巡检）。
+     * 优先 {@code GET /health/liveliness}，失败再试 {@code /health} / {@code /v1/models}。
+     *
+     * @return ok=true 时表示可达；不可用时 ok=false 且带 message
+     */
+    public Map<String, Object> health() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (!available()) {
+            out.put("ok", false);
+            out.put("available", false);
+            out.put("message", "LiteLLM 未启用或 litellm-url 为空");
+            return out;
+        }
+        LhProperties.Ai ai = lhProperties.getAi();
+        String base = StrUtil.removeSuffix(ai.getLitellmUrl().trim(), "/");
+        String[] paths = {"/health/liveliness", "/health", "/v1/models"};
+        Exception last = null;
+        for (String path : paths) {
+            try {
+                HttpRequest req = HttpRequest.get(base + path).timeout(8_000);
+                if (StrUtil.isNotBlank(ai.getLitellmMasterKey())) {
+                    req.header("Authorization", "Bearer " + ai.getLitellmMasterKey());
+                }
+                int code = req.execute().getStatus();
+                if (code >= 200 && code < 300) {
+                    out.put("ok", true);
+                    out.put("available", true);
+                    out.put("path", path);
+                    out.put("httpStatus", code);
+                    out.put("baseUrl", base);
+                    out.put("message", "LiteLLM 可达");
+                    return out;
+                }
+                last = new IllegalStateException("HTTP " + code + " on " + path);
+            } catch (Exception e) {
+                last = e;
+            }
+        }
+        out.put("ok", false);
+        out.put("available", true);
+        out.put("baseUrl", base);
+        out.put("message", last == null ? "LiteLLM 健康检查失败" : last.getMessage());
+        return out;
+    }
+
     private String postJson(String path, String jsonBody) {
         LhProperties.Ai ai = lhProperties.getAi();
         String base = StrUtil.removeSuffix(ai.getLitellmUrl().trim(), "/");

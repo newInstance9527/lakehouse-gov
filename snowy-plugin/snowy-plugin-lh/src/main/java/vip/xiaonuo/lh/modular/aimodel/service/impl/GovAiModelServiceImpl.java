@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.ai.LhLiteLlmClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
@@ -21,6 +22,7 @@ import vip.xiaonuo.lh.modular.aimodel.mapper.GovAiRouteMapper;
 import vip.xiaonuo.lh.modular.aimodel.mapper.GovAiUsageDailyMapper;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelEnableParam;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelPageParam;
+import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelRotateParam;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelUpsertParam;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiRouteUpsertParam;
 import vip.xiaonuo.lh.modular.aimodel.result.GovAiModelVo;
@@ -57,6 +59,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
     private LhVaultClient vaultClient;
     @Resource
     private LhLiteLlmClient liteLlmClient;
+    @Resource
+    private LhProperties lhProperties;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -162,6 +166,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         row.setLatencyMs(0);
         row.setRoleLabel(firstNonBlank(param.getRoleLabel(), param.getRole(), param.getUse(), ""));
         row.setKeyMask(maskKey(param.getKey()));
+        row.setKeyExpiresAt(param.getKeyExpiresAt());
         row.setDeleteFlag(NOT_DELETE);
         modelMapper.insert(row);
         return toVo(row);
@@ -207,6 +212,9 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         if (param.getRemark() != null) {
             row.setRemark(param.getRemark());
         }
+        if (param.getKeyExpiresAt() != null) {
+            row.setKeyExpiresAt(param.getKeyExpiresAt());
+        }
         if (StrUtil.isNotBlank(param.getKey())) {
             String vaultPath = StrUtil.blankToDefault(row.getVaultPath(), LhVaultPaths.aiModel(id));
             Map<String, Object> secret = new LinkedHashMap<>();
@@ -222,32 +230,144 @@ public class GovAiModelServiceImpl implements GovAiModelService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public GovAiModelVo rotate(String id, GovAiModelRotateParam param) {
+        if (param == null || StrUtil.isBlank(param.getKey())) {
+            throw new CommonException("key 不能为空");
+        }
+        GovAiModel row = requireModel(id);
+        String vaultPath = StrUtil.blankToDefault(row.getVaultPath(), LhVaultPaths.aiModel(id));
+        Map<String, Object> secret = new LinkedHashMap<>();
+        secret.put("apiKey", param.getKey().trim());
+        secret.put("rotatedAt", new Date().toString());
+        vaultClient.write(vaultPath, secret);
+        row.setVaultPath(vaultPath);
+        row.setKeyMask(maskKey(param.getKey()));
+        if (param.getKeyExpiresAt() != null) {
+            row.setKeyExpiresAt(param.getKeyExpiresAt());
+        }
+        if ("warn".equalsIgnoreCase(row.getStatus()) || "off".equalsIgnoreCase(row.getStatus())) {
+            // 轮换后恢复可探测态；启停 off 仍保持 enabled 语义由 enable 控制
+            if (Boolean.TRUE.equals(row.getEnabled())) {
+                row.setStatus("ok");
+            }
+        }
+        row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
+        modelMapper.updateById(row);
+        return toVo(row);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> test(String id) {
         GovAiModel row = requireModel(id);
         Map<String, Object> out = new LinkedHashMap<>();
         long start = System.currentTimeMillis();
+
+        String vaultPath = row.getVaultPath();
+        boolean vaultOk = StrUtil.isNotBlank(vaultPath) && vaultClient.exists(vaultPath)
+                && StrUtil.isNotBlank(vaultClient.getString(vaultPath, "apiKey"));
+        out.put("vaultPath", vaultPath);
+        out.put("vaultOk", vaultOk);
+
         if (!liteLlmClient.available()) {
-            row.setLatencyMs(50);
-            row.setStatus("ok");
+            // 未配网关：仅验收 Vault；不伪造成功连通
+            String status = vaultOk ? "ok" : "warn";
+            row.setLatencyMs((int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start));
+            row.setStatus(Boolean.TRUE.equals(row.getEnabled()) ? status : "off");
             modelMapper.updateById(row);
-            out.put("ok", true);
+            out.put("ok", vaultOk);
             out.put("mock", true);
-            out.put("status", "ok");
-            out.put("latencyMs", 50);
-            out.put("message", "LiteLLM 未启用，返回 mock 连通");
+            out.put("status", row.getStatus());
+            out.put("latencyMs", row.getLatencyMs());
+            out.put("message", vaultOk
+                    ? "LiteLLM 未启用；Vault Key 已存在"
+                    : "LiteLLM 未启用且 Vault 无可用 Key");
             return out;
         }
-        String reply = liteLlmClient.chatSimple(row.getModelName(), "ping", "reply ok");
+
+        boolean ok;
+        String message;
+        if ("embed".equalsIgnoreCase(row.getKind())) {
+            List<float[]> vecs = liteLlmClient.embed(row.getModelName(), List.of("ping"));
+            ok = vecs != null && !vecs.isEmpty();
+            message = ok ? "Embedding 连通成功" : "Embedding 调用失败或空响应";
+        } else {
+            String reply = liteLlmClient.chatSimple(row.getModelName(), "ping", "reply ok");
+            ok = StrUtil.isNotBlank(reply);
+            message = ok ? "连通成功" : "调用失败或空响应";
+        }
+        if (!vaultOk) {
+            ok = false;
+            message = (message == null ? "" : message + "；") + "Vault 无可用 Key";
+        }
         int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
-        boolean ok = StrUtil.isNotBlank(reply);
         row.setLatencyMs(latency);
-        row.setStatus(ok ? "ok" : "warn");
+        String status = !Boolean.TRUE.equals(row.getEnabled()) ? "off" : (ok ? "ok" : "warn");
+        if (ok && isKeyExpiringSoon(row)) {
+            status = "warn";
+            message = message + "；Key 即将过期";
+        }
+        row.setStatus(status);
         modelMapper.updateById(row);
         out.put("ok", ok);
         out.put("mock", false);
         out.put("status", row.getStatus());
         out.put("latencyMs", latency);
-        out.put("message", ok ? "连通成功" : "调用失败或空响应");
+        out.put("message", message);
+        return out;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> patrol(String ws) {
+        Map<String, Object> litellm = liteLlmClient.health();
+        var qw = new QueryWrapper<GovAiModel>().lambda()
+                .eq(GovAiModel::getDeleteFlag, NOT_DELETE)
+                .eq(GovAiModel::getEnabled, true);
+        if (StrUtil.isNotBlank(ws)) {
+            String workspace = ws.trim();
+            qw.and(w -> w.eq(GovAiModel::getWs, workspace).or().eq(GovAiModel::getWs, "*"));
+        }
+        List<GovAiModel> models = modelMapper.selectList(qw);
+        List<Map<String, Object>> items = new ArrayList<>();
+        int warn = 0;
+        int fail = 0;
+        for (GovAiModel m : models) {
+            Map<String, Object> one = test(m.getId());
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", m.getId());
+            item.put("name", m.getName());
+            item.put("kind", m.getKind());
+            item.put("ok", one.get("ok"));
+            item.put("status", one.get("status"));
+            item.put("vaultOk", one.get("vaultOk"));
+            item.put("latencyMs", one.get("latencyMs"));
+            item.put("message", one.get("message"));
+            items.add(item);
+            if (!Boolean.TRUE.equals(one.get("ok"))) {
+                fail++;
+            } else if ("warn".equalsIgnoreCase(String.valueOf(one.get("status")))) {
+                warn++;
+            }
+        }
+        // 网关不可达：已启用模型统一标 warn（test 可能因 mock 路径不同）
+        if (!Boolean.TRUE.equals(litellm.get("ok")) && Boolean.TRUE.equals(litellm.get("available"))) {
+            for (GovAiModel m : models) {
+                if ("ok".equalsIgnoreCase(m.getStatus())) {
+                    m.setStatus("warn");
+                    modelMapper.updateById(m);
+                    warn++;
+                }
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("litellm", litellm);
+        out.put("litellmOk", Boolean.TRUE.equals(litellm.get("ok")));
+        out.put("checked", models.size());
+        out.put("warnCount", warn);
+        out.put("failCount", fail);
+        out.put("items", items);
+        out.put("ws", StrUtil.blankToDefault(ws, "*"));
         return out;
     }
 
@@ -484,6 +604,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         vo.setEndpoint(row.getBaseUrl());
         vo.setKeyMask(row.getKeyMask());
         vo.setKey(StrUtil.blankToDefault(row.getKeyMask(), "sk-****（Vault）"));
+        vo.setKeyExpiresAt(row.getKeyExpiresAt());
+        vo.setVaultPath(row.getVaultPath());
         String ctxLabel = normalizeContextLabel(row.getContextTokens());
         vo.setContextTokens(ctxLabel);
         vo.setContext(ctxLabel);
@@ -528,6 +650,24 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         String last4 = k.length() <= 4 ? k : k.substring(k.length() - 4);
         String prefix = k.startsWith("sk-") ? "sk-" : "";
         return prefix + "****..." + last4 + "（Vault）";
+    }
+
+    /** Key 已过期或在 warnDays 内 → 预警 */
+    private boolean isKeyExpiringSoon(GovAiModel row) {
+        if (row == null || row.getKeyExpiresAt() == null) {
+            return false;
+        }
+        int warnDays = 14;
+        try {
+            if (lhProperties.getAi() != null && lhProperties.getAi().getPatrolWarnDays() > 0) {
+                warnDays = lhProperties.getAi().getPatrolWarnDays();
+            }
+        } catch (Exception ignored) {
+            // 配置缺失用默认
+        }
+        Calendar cal = Calendar.getInstance();
+        cal.add(Calendar.DAY_OF_MONTH, warnDays);
+        return !row.getKeyExpiresAt().after(cal.getTime());
     }
 
     private static String normalizeKind(String kind) {

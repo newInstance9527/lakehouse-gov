@@ -1,0 +1,97 @@
+# AI 平台 · LiteLLM 生产包 + Vault Key + 巡检（D1）
+
+> 配套：`doc/AI模型管理.md` · `doc/AI平台能力-部署说明.md` · `doc/AI平台能力-跨模块待办.md`  
+> 门户配置：`lh.ai.*`（`application.properties`）  
+> Vault 路径约定：`secret/lakehouse/ai/{modelId}`（`LhVaultPaths.aiModel`）
+
+## 验收清单
+
+| # | 条件 | 现网有 LiteLLM 时 | 本交付（现网未部署） |
+|---|------|-------------------|----------------------|
+| 1 | LiteLLM Proxy 可达 | `/health*` 或 `/v1/models` 200 | compose + config 可起 |
+| 2 | 门户 `lh.ai.enabled=true` + `litellm-url` | Copilot / test 走真网关 | 配置项与接线说明已写 |
+| 3 | 创建/轮换 Key → Vault；列表仅脱敏 | `POST .../models` / `.../rotate` | API + `ig_secret_store` 已落地 |
+| 4 | 巡检：连通 + Vault 缺 Key + 过期预警 | `POST /lh/ai/models/patrol` 或定时任务 | 代码 + `patrol-models.sh` |
+| 5 | 厂商 Key **不进 Git** | 仅 env / Vault Agent | `.env.example` 占位 |
+
+## 拓扑
+
+```
+门户 /lh/ai/*  ──内网──►  LiteLLM :4000  ──► 厂商 / 内网 vLLM
+       │                      ▲
+       │                      │ env 注入（Vault Agent 或手工）
+       └─ Key SoT: ig_secret_store(vault_path)
+```
+
+门户**不**把 Vault 明文塞进 LiteLLM 请求头做厂商鉴权；网关侧 Key 由运维按 `config.yaml` 的 `api_key: os.environ/...` 注入。门户 Vault 保证：登记/轮换有据、列表脱敏、巡检可验「平台侧是否有 Key」。
+
+## 文件
+
+| 文件 | 用途 |
+|------|------|
+| `docker-compose.yml` | 单节点 LiteLLM Proxy |
+| `config.yaml` | 模型清单模板（别名建议 `lh/{modelId}` 或上游名） |
+| `.env.example` | `LITELLM_MASTER_KEY` / 厂商 Key 占位 |
+| `verify-litellm.sh` | 网关健康探测 |
+| `patrol-models.sh` | 调门户 `POST /lh/ai/models/patrol`（需登录 Token） |
+
+旁路镜像：仓库根 `deploy/litellm/`（与 `ops/litellm` 同内容，便于现网拷贝）。
+
+## 启动（示例）
+
+```bash
+cd ops/litellm   # 或 deploy/litellm
+cp .env.example .env
+# 编辑 .env：填 LITELLM_MASTER_KEY 与至少一个厂商 Key
+docker compose up -d
+./verify-litellm.sh
+```
+
+门户：
+
+```properties
+lh.ai.enabled=true
+lh.ai.litellm-url=http://litellm:4000
+lh.ai.litellm-master-key=${与 .env LITELLM_MASTER_KEY 一致}
+lh.ai.default-chat-model=gpt-4o-mini
+lh.ai.default-embed-model=text-embedding-3-small
+lh.ai.patrol-enabled=true
+lh.ai.patrol-cron=0 0 * * * ?
+lh.ai.patrol-warn-days=14
+```
+
+手动巡检：
+
+```bash
+# 需门户 Bearer；也可用前端「测试」对单模型
+./patrol-models.sh https://portal.example.com '<token>'
+```
+
+## API（D1 增量）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/lh/ai/models/{id}/rotate` | Key → Vault；响应仅 `keyMask` |
+| POST | `/lh/ai/models/patrol` | LiteLLM health + 启用模型连通 + Key 过期 |
+| POST | `/lh/ai/models/{id}/test` | 单模型；校验 Vault `apiKey` 存在 |
+
+列表/详情 **禁止**回明文 Key（仅 `keyMask` / `vaultPath`）。
+
+## 现网状态（2026-09-23）
+
+**未探测到生产 LiteLLM 进程；门户 `lh.ai.enabled` 默认 false。**  
+本目录为可部署配置 + 巡检脚本 + 门户接线代码交付；起栈并打开 `patrol-enabled` 后即可验收，无需再改契约。
+
+## 残留（诚实）
+
+1. **现网未部署 LiteLLM**：无法在生产验证 chat/embed 真连通。
+2. **LiteLLM `model_list` 与门户 `gov_ai_model` 自动同步 / 启停联动** → 波次 **D3**。
+3. **Milvus 联调** → 波次 **D2**。
+4. **巡检失败 / Key 过期 → 夜莺**（§2.12）未接；本波次只写 `gov_ai_model.status`。
+5. **厂商 Key 从门户 Vault 自动投影到 LiteLLM env** 未做（需 Vault Agent / 旁路；禁止脚本把明文写进 Git）。
+
+## 明确不做
+
+- 浏览器直连厂商 LLM
+- 第二套 OneAPI 控制台替代门户模型页
+- 把 API Key 明文写入 compose / config 并提交仓库
