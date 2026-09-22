@@ -21,6 +21,7 @@ import vip.xiaonuo.lh.modular.metric.service.GovMetricExecService;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricSqlCompiler;
 import vip.xiaonuo.lh.modular.metric.support.MetricExecGuard;
 import vip.xiaonuo.lh.modular.metric.support.MetricParamBinder;
+import vip.xiaonuo.lh.modular.metric.support.MetricQueryCache;
 import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
 import vip.xiaonuo.lh.modular.query.mapper.CpQueryExecMapper;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
@@ -35,7 +36,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * M1：编译 → 参数绑定 → TrinoClient → cp_query_exec
+ * M1：编译 → 参数绑定 → TrinoClient → cp_query_exec；
+ * M2：query Redis 短缓存；采样 JOB 身份。
  */
 @Service
 public class GovMetricExecServiceImpl implements GovMetricExecService {
@@ -57,6 +59,8 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
     private LhTrinoPrincipalService principalService;
     @Resource
     private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private MetricQueryCache metricQueryCache;
 
     @Override
     public Map<String, Object> query(GovMetricQueryParam param) {
@@ -65,9 +69,24 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         if (!"active".equals(head.getStatus())) {
             throw new CommonException("仅已启用指标可查询");
         }
-        return execute(head, resolveVer(head, param.getVer()), param.getParams(),
-                param.getMaxRows() == null ? 1000 : param.getMaxRows(),
-                "metric", param.getPrefer(), false);
+        GovMetricVer ver = resolveVer(head, param.getVer());
+        int maxRows = param.getMaxRows() == null ? 1000 : param.getMaxRows();
+        String cacheKey = metricQueryCache.cacheKey(
+                head.getMetricCode(), ver == null ? null : ver.getVer(), param.getParams(), maxRows);
+        Map<String, Object> hit = metricQueryCache.get(cacheKey);
+        if (hit != null) {
+            Map<String, Object> cached = new LinkedHashMap<>(hit);
+            cached.put("cached", true);
+            return cached;
+        }
+        Map<String, Object> out = execute(head, ver, param.getParams(), maxRows,
+                "metric", param.getPrefer(), false, false);
+        if (Boolean.TRUE.equals(out.get("executed")) && !Boolean.TRUE.equals(out.get("degraded"))
+                && !"blocked".equals(String.valueOf(out.get("status")))
+                && !"failed".equals(String.valueOf(out.get("status")))) {
+            metricQueryCache.put(cacheKey, out);
+        }
+        return out;
     }
 
     @Override
@@ -80,17 +99,30 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         }
         int maxRows = p.getMaxRows() == null ? 200 : Math.min(p.getMaxRows(), 1000);
         return execute(head, resolveVer(head, null), p.getParams(), maxRows,
-                "metric_trial", "trino", true);
+                "metric_trial", "trino", true, false);
+    }
+
+    @Override
+    public Map<String, Object> sampleQuery(String metricCode, String ws,
+                                           Map<String, Object> params, int maxRows) {
+        GovMetric head = requireMetric(metricCode, ws);
+        if (!"active".equals(head.getStatus())) {
+            throw new CommonException("仅已启用指标可采样: " + metricCode);
+        }
+        int n = Math.max(1, Math.min(maxRows, 200));
+        return execute(head, resolveVer(head, null), params, n,
+                "metric_sample", "trino", false, true);
     }
 
     private Map<String, Object> execute(GovMetric head, GovMetricVer ver, Map<String, Object> params,
-                                        int maxRows, String source, String prefer, boolean trial) {
+                                        int maxRows, String source, String prefer,
+                                        boolean trial, boolean jobIdentity) {
         if (ver == null) {
             throw new CommonException("指标版本不存在");
         }
         String preferNorm = StrUtil.blankToDefault(prefer, "trino");
         boolean hotRequested = "hot".equalsIgnoreCase(preferNorm);
-        // M1：hot 回退 Trino
+        // M1/M2：hot 回退 Trino（M3 再接 CK）
         String engine = "trino";
         String fallback = hotRequested ? "trino" : null;
 
@@ -113,7 +145,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
 
         String sql = MetricExecGuard.ensureLimit(bound.sql(), maxRows);
         String block = MetricExecGuard.blockReason(sql);
-        UserSnap user = currentUser();
+        UserSnap user = jobIdentity ? jobUser() : currentUser();
         String queryId = "mq_" + IdUtil.getSnowflakeNextIdStr();
 
         CpQueryExec row = newAuditRow(queryId, user, head, ver, sql, source, engine);
@@ -134,15 +166,22 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             blocked.put("sqlText", sql);
             blocked.put("dialect", "trino");
             blocked.put("engine", engine);
+            blocked.put("cached", false);
             return blocked;
         }
 
         long t0 = System.currentTimeMillis();
-        LhTrinoPrincipal principal = principalService.requireCurrent();
-        TrinoClient.ExecuteOptions opts = TrinoClient.ExecuteOptions.human(principal.getTrinoUser(), maxRows);
+        TrinoClient.ExecuteOptions opts;
+        if (jobIdentity) {
+            opts = TrinoClient.ExecuteOptions.job(maxRows);
+            opts.source = "lakehouse-metric-sample";
+        } else {
+            LhTrinoPrincipal principal = principalService.requireCurrent();
+            opts = TrinoClient.ExecuteOptions.human(principal.getTrinoUser(), maxRows);
+            opts.source = trial ? "lakehouse-metric-trial" : "lakehouse-metric";
+        }
         opts.catalog = "iceberg";
         opts.schema = "default";
-        opts.source = trial ? "lakehouse-metric-trial" : "lakehouse-metric";
 
         Map<String, Object> exec;
         try {
@@ -169,6 +208,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             fail.put("columns", List.of());
             fail.put("rowCount", 0);
             fail.put("durMs", dur);
+            fail.put("cached", false);
             return fail;
         }
 
@@ -191,7 +231,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             row.setErrorMsg(StrUtil.maxLength(str(exec.get("message")), 1000));
         } else {
             row.setStatus("ok");
-            row.setStatusLabel(trial ? "✓ 试跑" : "✓");
+            row.setStatusLabel(trial ? "✓ 试跑" : (jobIdentity ? "✓ 采样" : "✓"));
         }
         row.setTrinoQueryId(trinoQid);
         row.setRowCount(rows == null ? 0 : rows.size());
@@ -223,12 +263,20 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         out.put("bound", Map.of("dt", bound.dt(), "from", bound.from(), "to", bound.to()));
         if (fallback != null) {
             out.put("fallback", fallback);
-            out.put("message", hotRequested ? "M1：prefer=hot 暂回退 Trino" : null);
+            out.put("message", hotRequested ? "prefer=hot 暂回退 Trino（M3 接 CK）" : null);
         }
         if (degraded) {
             out.put("message", exec.get("message"));
         }
         return out;
+    }
+
+    private UserSnap jobUser() {
+        UserSnap u = new UserSnap();
+        u.id = "job.metric.sample";
+        u.name = "metric-sample";
+        u.account = "job.metric.sample";
+        return u;
     }
 
     private CpQueryExec newAuditRow(String queryId, UserSnap user, GovMetric head, GovMetricVer ver,

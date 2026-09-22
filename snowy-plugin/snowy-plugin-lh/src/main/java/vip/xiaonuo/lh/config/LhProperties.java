@@ -54,6 +54,7 @@ public class LhProperties {
     private Lifecycle lifecycle = new Lifecycle();
     private Compute compute = new Compute();
     private Compliance compliance = new Compliance();
+    private Metric metric = new Metric();
 
     @Getter
     @Setter
@@ -446,6 +447,27 @@ public class LhProperties {
         private String patrolCron = "0 0 * * * ?";
         /** Key 将在 N 天内过期 → status=warn */
         private int patrolWarnDays = 14;
+    }
+
+    /**
+     * 指标中心 M2：query Redis 短缓存 + 日波动采样。
+     * @see doc/指标中心-引擎执行.md Phase M2
+     */
+    @Getter
+    @Setter
+    public static class Metric {
+        /** query 结果 Redis 短缓存；试跑不写 */
+        private boolean queryCacheEnabled = true;
+        /** TTL 秒；文档建议 30～120，默认 60 */
+        private int queryCacheTtlSeconds = 60;
+        /** 为 true 时每天跑波动采样；默认关，避免无 Trino 环境空跑 */
+        private boolean sampleDailyEnabled = false;
+        /** Spring cron；默认每天 04:15 */
+        private String sampleDailyCron = "0 15 4 * * ?";
+        /** 单次最多采样指标数 */
+        private int sampleMaxMetrics = 50;
+        /** 日波动绝对值 ≥ 该百分比标 anomaly（默认 20） */
+        private double anomalyThresholdPct = 20d;
     }
 
     /**

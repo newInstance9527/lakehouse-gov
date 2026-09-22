@@ -14,11 +14,13 @@ import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricDep;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricHistory;
+import vip.xiaonuo.lh.modular.metric.entity.GovMetricSample;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricSql;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricVer;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricDepMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricHistoryMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMapper;
+import vip.xiaonuo.lh.modular.metric.mapper.GovMetricSampleMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricSqlMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricVerMapper;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricCompileParam;
@@ -31,7 +33,9 @@ import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricExecService;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricFormulaParser;
+import vip.xiaonuo.lh.modular.metric.support.GovMetricSampleCollector;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricSqlCompiler;
+import vip.xiaonuo.lh.modular.metric.support.MetricAnomalyCalc;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAssetSourceLink;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
@@ -84,6 +88,10 @@ public class GovMetricServiceImpl implements GovMetricService {
     private GovMetricHistoryMapper historyMapper;
     @Resource
     private GovMetricExecService govMetricExecService;
+    @Resource
+    private GovMetricSampleMapper sampleMapper;
+    @Resource
+    private GovMetricSampleCollector sampleCollector;
     @Resource
     private GovAssetMapper govAssetMapper;
     @Resource
@@ -388,6 +396,50 @@ public class GovMetricServiceImpl implements GovMetricService {
         out.put("downstream", downstream);
         out.put("physical", physical);
         return out;
+    }
+
+    @Override
+    public Map<String, Object> anomaly(String metricCode, String ws, Integer days) {
+        GovMetric head = requireMetric(metricCode, ws);
+        secAuthGrantService.assertCanReadMetric(head);
+        int n = days == null ? 14 : Math.max(1, Math.min(days, 90));
+        List<GovMetricSample> samples = sampleMapper.selectList(new QueryWrapper<GovMetricSample>().lambda()
+                .eq(GovMetricSample::getWs, StrUtil.blankToDefault(head.getWs(), WS_DEFAULT))
+                .eq(GovMetricSample::getMetricCode, head.getMetricCode())
+                .orderByDesc(GovMetricSample::getSampleDt)
+                .last("LIMIT " + n));
+        List<Map<String, Object>> series = new ArrayList<>();
+        for (GovMetricSample s : samples) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("sampleDt", formatSampleDay(s.getSampleDt()));
+            row.put("ver", s.getVer());
+            row.put("metricValue", s.getMetricValue());
+            row.put("prevValue", s.getPrevValue());
+            row.put("changePct", s.getChangePct());
+            row.put("anomaly", s.getAnomaly() != null && s.getAnomaly() == 1);
+            row.put("thresholdPct", s.getThresholdPct());
+            row.put("status", s.getStatus());
+            row.put("message", s.getMessage());
+            row.put("severity", MetricAnomalyCalc.severity(s.getChangePct(), s.getThresholdPct()));
+            series.add(row);
+        }
+        GovMetricSample latest = samples.isEmpty() ? null : samples.get(0);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("metricCode", head.getMetricCode());
+        out.put("name", head.getName());
+        out.put("ws", head.getWs());
+        out.put("days", n);
+        out.put("latest", latest == null ? null : series.get(0));
+        out.put("anomaly", latest != null && latest.getAnomaly() != null && latest.getAnomaly() == 1);
+        out.put("summary", latest == null ? "尚无采样点；请开启 lh.metric.sample-daily-enabled 或 POST .../anomaly/rerun"
+                : latest.getMessage());
+        out.put("series", series);
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> sampleRerun(String ws) {
+        return sampleCollector.runDaily(ws);
     }
 
     // —— helpers ——
@@ -865,6 +917,16 @@ public class GovMetricServiceImpl implements GovMetricService {
             return DOMAIN_MAP.get(d);
         }
         return d.toLowerCase(Locale.ROOT);
+    }
+
+    private static String formatSampleDay(Date d) {
+        if (d == null) {
+            return null;
+        }
+        if (d instanceof java.sql.Date sql) {
+            return sql.toLocalDate().toString();
+        }
+        return d.toInstant().atZone(java.time.ZoneOffset.UTC).toLocalDate().toString();
     }
 
     private static String bumpVer(String ver) {

@@ -111,4 +111,20 @@ public class GovMetricController {
             @RequestParam(required = false) String ws) {
         return CommonResult.data(govMetricService.lineage(code, ws));
     }
+
+    @Operation(summary = "指标日波动摘要")
+    @GetMapping("/lh/metric/{code}/anomaly")
+    public CommonResult<Map<String, Object>> anomaly(
+            @PathVariable("code") String code,
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) Integer days) {
+        return CommonResult.data(govMetricService.anomaly(code, ws, days));
+    }
+
+    @Operation(summary = "手动触发指标日波动采样")
+    @CommonLog("指标波动采样")
+    @PostMapping("/lh/metric/anomaly/rerun")
+    public CommonResult<Map<String, Object>> sampleRerun(@RequestParam(required = false) String ws) {
+        return CommonResult.data(govMetricService.sampleRerun(ws));
+    }
 }

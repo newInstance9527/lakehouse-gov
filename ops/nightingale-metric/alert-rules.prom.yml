@@ -1,0 +1,42 @@
+# 湖仓指标日波动 · 夜莺可导入的 Prometheus 告警规则（F1 / M2）
+# 指标契约：lh_metric_value / lh_metric_change_pct / lh_metric_anomaly（门户日采样写 VM）
+# 导入：夜莺 ≥8.2「告警规则 → 导入 Prometheus 规则」粘贴本文件；再批量挂通知规则。
+#
+# 分级（labels.severity）：critical≈P0/P1 · warning≈P1（全栈 §10.3 / §30.3）
+
+groups:
+  - name: lh-metric-f1
+    interval: 60s
+    rules:
+      - alert: LhMetricDailyAnomaly
+        expr: lh_metric_anomaly == 1
+        for: 10m
+        labels:
+          severity: warning
+          domain: metric
+          route: platform
+        annotations:
+          summary: "指标 {{ $labels.metric_code }} 日波动超阈值"
+          description: "门户采样写点；阈值默认 lh.metric.anomaly-threshold-pct=20。深链 /metrics?q={{ $labels.metric_code }}"
+
+      - alert: LhMetricChangePctAbsOver40
+        expr: abs(lh_metric_change_pct) >= 40
+        for: 10m
+        labels:
+          severity: critical
+          domain: metric
+          route: platform
+        annotations:
+          summary: "指标 {{ $labels.metric_code }} 日波动 |Δ|≥40%（{{ $value }}）"
+          description: "相对前日采样；ver={{ $labels.ver }} ws={{ $labels.ws }}"
+
+      - alert: LhMetricSampleStale
+        expr: absent_over_time(lh_metric_value[36h])
+        for: 1h
+        labels:
+          severity: info
+          domain: metric
+          route: platform
+        annotations:
+          summary: "指标采样时序断流（36h 无 lh_metric_value）"
+          description: "检查 lh.metric.sample-daily-enabled、Trino、lh.lifecycle.vm-import-url"

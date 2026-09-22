@@ -35,4 +35,10 @@ public interface GovMetricService {
     Map<String, Object> trial(String metricCode, GovMetricTrialParam param);
 
     Map<String, Object> lineage(String metricCode, String ws);
+
+    /** 日波动摘要（读 gov_metric_sample） */
+    Map<String, Object> anomaly(String metricCode, String ws, Integer days);
+
+    /** 手动触发日波动采样（运维） */
+    Map<String, Object> sampleRerun(String ws);
 }
