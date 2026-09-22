@@ -89,4 +89,14 @@ public interface GovAssetService extends IService<GovAsset> {
      * 分层 / 域字典（前端筛选用）
      */
     Map<String, Object> metaOptions();
+
+    /**
+     * 元数据漂移对账（门户 ↔ Grav/OM 指针）；error 摘金 + degraded
+     */
+    Map<String, Object> reconcileMetaDrift(String ws, String assetId);
+
+    /**
+     * 打开中的漂移单列表
+     */
+    List<Map<String, Object>> listMetaDrifts(String ws, Integer limit);
 }

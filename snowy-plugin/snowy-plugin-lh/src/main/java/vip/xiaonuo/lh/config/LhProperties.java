@@ -414,6 +414,10 @@ public class LhProperties {
          * false=注册时必须先同步表清单。
          */
         private boolean allowManualObjectName = false;
+        /** 是否启用元数据漂移日批（{@code GovAssetMetaDriftScheduler}） */
+        private boolean metaDriftEnabled = false;
+        /** 漂移日批 cron；默认每天 04:15 */
+        private String metaDriftCron = "0 15 4 * * ?";
     }
 
     /**

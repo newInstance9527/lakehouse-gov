@@ -81,6 +81,14 @@ public final class LhModuleDeepLinks {
         return "/standard" + query(m);
     }
 
+    /** 生命周期主台；可选 table 预填 */
+    public static String lifecycle(String tableFqn) {
+        if (StrUtil.isBlank(tableFqn)) {
+            return "/lifecycle";
+        }
+        return "/lifecycle?table=" + enc(tableFqn.trim());
+    }
+
     private static String query(Map<String, String> params) {
         if (params == null || params.isEmpty()) {
             return "";

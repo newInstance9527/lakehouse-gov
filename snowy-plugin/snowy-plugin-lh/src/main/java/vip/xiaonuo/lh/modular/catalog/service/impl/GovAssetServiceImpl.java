@@ -49,6 +49,7 @@ import vip.xiaonuo.lh.modular.catalog.result.GovAssetVo;
 import vip.xiaonuo.lh.modular.catalog.service.GovAssetService;
 import vip.xiaonuo.lh.modular.catalog.support.GovAssetCrossModuleExtras;
 import vip.xiaonuo.lh.modular.catalog.support.GovAssetGoldTagSupport;
+import vip.xiaonuo.lh.modular.catalog.support.GovAssetMetaDriftReconcile;
 import vip.xiaonuo.lh.modular.catalog.support.GovAssetSourceReconcile;
 import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryObjectKinds;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
@@ -115,6 +116,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     private PlatOutboxService platOutboxService;
     @Resource
     private GovAssetSourceReconcile govAssetSourceReconcile;
+    @Resource
+    private GovAssetMetaDriftReconcile govAssetMetaDriftReconcile;
     @Resource
     private GovAssetPreviewRouter previewRouter;
     @Resource
@@ -216,7 +219,9 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         extras.put("quality", crossModuleExtras.buildQuality(asset, objectName));
         extras.put("lineage", crossModuleExtras.buildLineage(asset, objectName));
         extras.put("standard", crossModuleExtras.buildStandard(asset, objectName, schema));
+        extras.put("lifecycle", crossModuleExtras.buildLifecycle(asset, objectName));
         extras.put("gold", buildGoldExtra(asset, extras.get("omMeta")));
+        extras.put("drift", buildDriftExtra(asset));
         extras.put("omMetaWrite", Map.of(
                 "available", true,
                 "api", "POST /lh/catalog/assets/meta"));
@@ -598,6 +603,14 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         }
         Map<String, Object> gold = reconcileGoldOnRefresh(asset);
         Map<String, Object> bridge = softBridgeOnRefresh(asset, links);
+        Map<String, Object> metaDrift = Map.of();
+        try {
+            asset = this.getById(asset.getId());
+            metaDrift = govAssetMetaDriftReconcile.reconcileAsset(asset);
+            asset = this.getById(asset.getId());
+        } catch (Exception e) {
+            metaDrift = Map.of("ok", false, "error", StrUtil.blankToDefault(e.getMessage(), "error"));
+        }
         asset = this.getById(asset.getId());
         asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
         this.updateById(asset);
@@ -607,6 +620,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         r.put("gold", gold);
         r.put("bridge", bridge);
         r.put("sourceReconcile", sourceReconcile);
+        r.put("metaDrift", metaDrift);
         r.put("lineage", Map.of("available", true, "api", "/lh/lineage/graph"));
         r.put("quality", Map.of("available", true, "api", "/lh/quality/overview"));
         r.put("status", asset.getStatus());
@@ -713,6 +727,50 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
                 LhInventoryObjectKinds.QUEUE, LhInventoryObjectKinds.PATH,
                 LhInventoryObjectKinds.COLLECTION, LhInventoryObjectKinds.ENDPOINT));
         return m;
+    }
+
+    @Override
+    public Map<String, Object> reconcileMetaDrift(String ws, String assetId) {
+        if (StrUtil.isNotBlank(assetId)) {
+            GovAsset asset = requireAsset(assetId.trim());
+            Map<String, Object> one = govAssetMetaDriftReconcile.reconcileAsset(asset);
+            Map<String, Object> out = new LinkedHashMap<>(one);
+            out.put("mode", "asset");
+            return out;
+        }
+        Map<String, Object> batch = govAssetMetaDriftReconcile.reconcileWorkspace(ws);
+        batch.put("mode", "workspace");
+        return batch;
+    }
+
+    @Override
+    public List<Map<String, Object>> listMetaDrifts(String ws, Integer limit) {
+        return govAssetMetaDriftReconcile.listOpen(ws, limit);
+    }
+
+    private Map<String, Object> buildDriftExtra(GovAsset asset) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("path", "/catalog");
+        out.put("api", "GET /lh/catalog/assets/drift");
+        if (asset == null) {
+            out.put("available", false);
+            return out;
+        }
+        try {
+            List<Map<String, Object>> opens = govAssetMetaDriftReconcile.listOpen(asset.getWs(), 200).stream()
+                    .filter(m -> Objects.equals(String.valueOf(m.get("assetId")), asset.getId()))
+                    .limit(8)
+                    .toList();
+            out.put("available", true);
+            out.put("openCount", opens.size());
+            out.put("items", opens);
+            return out;
+        } catch (Exception e) {
+            out.put("available", false);
+            out.put("degraded", true);
+            out.put("message", e.getMessage());
+            return out;
+        }
     }
 
     // ---------- helpers ----------

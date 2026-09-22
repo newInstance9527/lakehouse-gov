@@ -118,4 +118,21 @@ public class GovAssetController {
     public CommonResult<Map<String, Object>> metaOptions() {
         return CommonResult.data(govAssetService.metaOptions());
     }
+
+    @Operation(summary = "元数据漂移对账（门户↔Grav/OM；error 摘金+degraded）")
+    @CommonLog("资产元数据漂移对账")
+    @PostMapping("/lh/catalog/assets/drift/reconcile")
+    public CommonResult<Map<String, Object>> reconcileMetaDrift(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String assetId) {
+        return CommonResult.data(govAssetService.reconcileMetaDrift(ws, assetId));
+    }
+
+    @Operation(summary = "打开中的元数据漂移单")
+    @GetMapping("/lh/catalog/assets/drift")
+    public CommonResult<List<Map<String, Object>>> listMetaDrifts(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(govAssetService.listMetaDrifts(ws, limit));
+    }
 }

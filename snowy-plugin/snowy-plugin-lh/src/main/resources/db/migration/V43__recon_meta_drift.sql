@@ -1,0 +1,31 @@
+-- H4：元数据漂移对账单（门户 ↔ Grav/OM 指针）；摘牌写 gov_asset + outbox
+
+CREATE TABLE IF NOT EXISTS `recon_meta_drift` (
+  `id`             varchar(20)  NOT NULL COMMENT '主键',
+  `revision`       int          NOT NULL DEFAULT 1 COMMENT '乐观锁版本',
+  `status`         varchar(32)  DEFAULT 'open' COMMENT 'open/auto_fixed/ticketed/ignored/closed',
+  `ws`             varchar(64)  DEFAULT 'default' COMMENT '工作空间',
+  `remark`         varchar(512) DEFAULT NULL COMMENT '备注',
+  `drift_type`     varchar(64)  NOT NULL COMMENT '漂移类型',
+  `severity`       varchar(16)  DEFAULT 'warn' COMMENT 'info/warn/error/critical',
+  `asset_id`       varchar(20)  DEFAULT NULL COMMENT 'gov_asset.id',
+  `asset_code`     varchar(128) DEFAULT NULL COMMENT '资产编码',
+  `grav_asset_id`  varchar(20)  DEFAULT NULL COMMENT 'cb_grav_asset_ref.id',
+  `om_fqn`         varchar(512) DEFAULT NULL COMMENT 'OM FQN',
+  `left_system`    varchar(32)  NOT NULL COMMENT '左侧系统',
+  `right_system`   varchar(32)  NOT NULL COMMENT '右侧系统',
+  `left_snapshot`  json         DEFAULT NULL COMMENT '左侧快照',
+  `right_snapshot` json         DEFAULT NULL COMMENT '右侧快照',
+  `ticket_id`      varchar(20)  DEFAULT NULL COMMENT '关联工单',
+  `detected_at`    datetime     DEFAULT NULL COMMENT '发现时间',
+  `resolved_at`    datetime     DEFAULT NULL COMMENT '关闭时间',
+  `delete_flag`    varchar(32)  DEFAULT 'NOT_DELETE' COMMENT '删除标志',
+  `create_time`    datetime     DEFAULT NULL COMMENT '创建时间',
+  `create_user`    varchar(20)  DEFAULT NULL COMMENT '创建用户',
+  `update_time`    datetime     DEFAULT NULL COMMENT '修改时间',
+  `update_user`    varchar(20)  DEFAULT NULL COMMENT '修改用户',
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `idx_recon_drift_status` (`status`,`detected_at`) USING BTREE,
+  KEY `idx_recon_drift_asset` (`asset_id`,`drift_type`,`status`) USING BTREE,
+  KEY `idx_recon_drift_ws` (`ws`,`status`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='SoT：元数据漂移单';

@@ -8,6 +8,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.core.link.LhModuleDeepLinks;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
+import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcPolicy;
+import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcTableStat;
+import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcPolicyMapper;
+import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRule;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRuleRun;
@@ -53,6 +57,10 @@ public class GovAssetCrossModuleExtras {
     private GovStdMappingMapper mappingMapper;
     @Resource
     private GovStdDetectResultMapper detectMapper;
+    @Resource
+    private GovLcPolicyMapper lcPolicyMapper;
+    @Resource
+    private GovLcTableStatMapper lcTableStatMapper;
 
     public Map<String, Object> buildQuality(GovAsset asset, String objectName) {
         Map<String, Object> out = new LinkedHashMap<>();
@@ -272,6 +280,155 @@ public class GovAssetCrossModuleExtras {
             out.put("message", e.getMessage());
             return out;
         }
+    }
+
+    /**
+     * 生命周期策略摘要标签 + 存储画像（读 {@code gov_lc_policy}/{@code gov_lc_table_stat}）。
+     */
+    public Map<String, Object> buildLifecycle(GovAsset asset, String objectName) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        String assetId = asset == null ? null : asset.getId();
+        String ws = asset == null ? "default" : StrUtil.blankToDefault(asset.getWs(), "default");
+        String tableHint = StrUtil.blankToDefault(objectName, shortName(asset == null ? null : asset.getOmFqn()));
+        if (StrUtil.isBlank(tableHint) && asset != null) {
+            tableHint = StrUtil.blankToDefault(asset.getAssetCode(), asset.getName());
+        }
+        out.put("path", LhModuleDeepLinks.lifecycle(tableHint));
+        try {
+            GovLcPolicy policy = findLcPolicy(ws, tableHint, asset == null ? null : asset.getOmFqn(),
+                    asset == null ? null : asset.getAssetCode());
+            GovLcTableStat stat = findLcStat(ws, tableHint, asset == null ? null : asset.getOmFqn(),
+                    asset == null ? null : asset.getAssetCode());
+
+            List<String> tags = new ArrayList<>();
+            Map<String, Object> policyMap = null;
+            if (policy != null) {
+                policyMap = new LinkedHashMap<>();
+                policyMap.put("tableFqn", policy.getTableFqn());
+                policyMap.put("keepDays", policy.getKeepDays());
+                policyMap.put("keepCount", policy.getKeepCount());
+                policyMap.put("compactLevel", policy.getCompactLevel());
+                policyMap.put("orphanOlderDays", policy.getOrphanOlderDays());
+                policyMap.put("targetFileMb", policy.getTargetFileMb());
+                if (policy.getKeepDays() != null) {
+                    tags.add("快照" + policy.getKeepDays() + "d");
+                }
+                if (StrUtil.isNotBlank(policy.getCompactLevel())) {
+                    tags.add("compact:" + policy.getCompactLevel());
+                }
+                if (policy.getOrphanOlderDays() != null) {
+                    tags.add("orphan≥" + policy.getOrphanOlderDays() + "d");
+                }
+            }
+
+            Map<String, Object> profile = null;
+            if (stat != null) {
+                profile = new LinkedHashMap<>();
+                profile.put("tableFqn", stat.getTableFqn());
+                profile.put("sizeBytes", stat.getSizeBytes());
+                profile.put("activeBytes", stat.getActiveBytes());
+                profile.put("fileCount", stat.getFileCount());
+                profile.put("avgFileBytes", stat.getAvgFileBytes());
+                profile.put("smallFileCount", stat.getSmallFileCount());
+                profile.put("smallFileRatio", stat.getSmallFileRatio());
+                profile.put("policyLabel", stat.getPolicyLabel());
+                profile.put("collectStatus", stat.getCollectStatus());
+                profile.put("collectedAt", stat.getCollectedAt());
+                if (StrUtil.isNotBlank(stat.getPolicyLabel())) {
+                    tags.add(stat.getPolicyLabel());
+                }
+                if (stat.getSmallFileRatio() != null
+                        && stat.getSmallFileRatio().doubleValue() >= 0.3) {
+                    tags.add("小文件偏高");
+                }
+                if ("ok".equalsIgnoreCase(StrUtil.blankToDefault(stat.getCollectStatus(), ""))) {
+                    tags.add("画像已采");
+                } else if (StrUtil.isNotBlank(stat.getCollectStatus())) {
+                    tags.add("画像:" + stat.getCollectStatus());
+                }
+            }
+
+            out.put("available", true);
+            out.put("tableHint", tableHint);
+            out.put("policy", policyMap);
+            out.put("profile", profile);
+            out.put("tags", tags.size() > 8 ? tags.subList(0, 8) : tags);
+            if (policy == null && stat == null) {
+                out.put("hint", "无生命周期策略/存储画像");
+            }
+            return out;
+        } catch (Exception e) {
+            log.warn("catalog extras.lifecycle soft-fail asset={}: {}", assetId, e.getMessage());
+            out.put("available", false);
+            out.put("tags", List.of());
+            out.put("degraded", true);
+            out.put("message", e.getMessage());
+            return out;
+        }
+    }
+
+    private GovLcPolicy findLcPolicy(String ws, String objectName, String omFqn, String assetCode) {
+        List<String> keys = fqnCandidates(objectName, omFqn, assetCode);
+        if (keys.isEmpty()) {
+            return null;
+        }
+        List<GovLcPolicy> all = lcPolicyMapper.selectList(new QueryWrapper<GovLcPolicy>().lambda()
+                .eq(GovLcPolicy::getWs, StrUtil.blankToDefault(ws, "default"))
+                .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE));
+        for (String key : keys) {
+            for (GovLcPolicy p : all) {
+                if (fqnMatch(p.getTableFqn(), key)) {
+                    return p;
+                }
+            }
+        }
+        return null;
+    }
+
+    private GovLcTableStat findLcStat(String ws, String objectName, String omFqn, String assetCode) {
+        List<String> keys = fqnCandidates(objectName, omFqn, assetCode);
+        if (keys.isEmpty()) {
+            return null;
+        }
+        List<GovLcTableStat> all = lcTableStatMapper.selectList(new QueryWrapper<GovLcTableStat>().lambda()
+                .eq(GovLcTableStat::getWs, StrUtil.blankToDefault(ws, "default"))
+                .eq(GovLcTableStat::getDeleteFlag, NOT_DELETE));
+        for (String key : keys) {
+            for (GovLcTableStat s : all) {
+                if (fqnMatch(s.getTableFqn(), key)) {
+                    return s;
+                }
+            }
+        }
+        return null;
+    }
+
+    static List<String> fqnCandidates(String objectName, String omFqn, String assetCode) {
+        LinkedHashSet<String> keys = new LinkedHashSet<>();
+        if (StrUtil.isNotBlank(objectName)) {
+            keys.add(objectName.trim());
+            keys.add(shortName(objectName));
+        }
+        if (StrUtil.isNotBlank(omFqn)) {
+            keys.add(omFqn.trim());
+            keys.add(shortName(omFqn));
+        }
+        if (StrUtil.isNotBlank(assetCode)) {
+            keys.add(assetCode.trim());
+            keys.add(shortName(assetCode));
+        }
+        return List.copyOf(keys);
+    }
+
+    static boolean fqnMatch(String tableFqn, String key) {
+        if (StrUtil.isBlank(tableFqn) || StrUtil.isBlank(key)) {
+            return false;
+        }
+        if (tableFqn.equalsIgnoreCase(key)) {
+            return true;
+        }
+        return shortName(tableFqn).equalsIgnoreCase(shortName(key))
+                || tableFqn.toLowerCase(Locale.ROOT).endsWith("." + key.toLowerCase(Locale.ROOT));
     }
 
     @SuppressWarnings("unchecked")

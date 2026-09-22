@@ -1,0 +1,42 @@
+# 湖仓元数据漂移 · 夜莺可导入的 Prometheus 告警规则（H4）
+# 指标契约：lh_meta_drift_open（门户 POST /lh/catalog/assets/drift/reconcile 写 VM）
+# 导入：夜莺 ≥8.2「告警规则 → 导入 Prometheus 规则」粘贴本文件；再批量挂通知规则。
+#
+# 分级（labels.severity）：critical/error≈P0 · warning≈P1
+
+groups:
+  - name: lh-catalog-meta-drift-h4
+    interval: 60s
+    rules:
+      - alert: LhMetaDriftOpenError
+        expr: lh_meta_drift_open{severity=~"error|critical"} > 0
+        for: 5m
+        labels:
+          severity: critical
+          domain: catalog
+          route: platform
+        annotations:
+          summary: "元数据漂移开单 {{ $labels.drift_type }} severity={{ $labels.severity }}"
+          description: "ws={{ $labels.ws }}；门户已摘金/降级；深链 /catalog · POST /lh/catalog/assets/drift/reconcile"
+
+      - alert: LhMetaDriftOpenWarn
+        expr: lh_meta_drift_open{severity="warn"} > 0
+        for: 30m
+        labels:
+          severity: warning
+          domain: catalog
+          route: platform
+        annotations:
+          summary: "元数据漂移告警 {{ $labels.drift_type }}"
+          description: "ws={{ $labels.ws }}；缺 Grav/OM 桥接指针，可 refresh 挂接"
+
+      - alert: LhMetaDriftSampleStale
+        expr: absent_over_time(lh_meta_drift_open[48h])
+        for: 2h
+        labels:
+          severity: info
+          domain: catalog
+          route: platform
+        annotations:
+          summary: "元数据漂移时序断流（48h 无 lh_meta_drift_open）"
+          description: "检查 drift/reconcile 日批、lh.catalog.meta-drift-enabled、lh.lifecycle.vm-import-url"
