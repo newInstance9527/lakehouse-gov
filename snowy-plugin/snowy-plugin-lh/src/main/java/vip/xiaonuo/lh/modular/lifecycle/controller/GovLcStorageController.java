@@ -85,7 +85,7 @@ public class GovLcStorageController {
         return CommonResult.data(govLcStorageService.advice(ws));
     }
 
-    @Operation(summary = "按空间 showback（P0 stub）")
+    @Operation(summary = "按空间 showback（group=ws；配额读 gov_ws_quota）")
     @GetMapping({"/lh/lifecycle/storage/showback", "/api/governance/lifecycle/storage/showback"})
     public CommonResult<Map<String, Object>> showback(
             @RequestParam(required = false) String ws,

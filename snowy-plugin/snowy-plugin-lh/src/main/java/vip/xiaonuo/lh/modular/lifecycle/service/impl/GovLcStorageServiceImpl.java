@@ -17,6 +17,10 @@ import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcStorageChangePointMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcStorageService;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcBucketMetricsReader;
+import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
+import vip.xiaonuo.lh.modular.workspace.entity.GovWsQuota;
+import vip.xiaonuo.lh.modular.workspace.mapper.GovWsMapper;
+import vip.xiaonuo.lh.modular.workspace.mapper.GovWsQuotaMapper;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -27,10 +31,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -57,6 +63,10 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     private GovLcStorageChangePointMapper changePointMapper;
     @Resource
     private GovLcBucketMetricsReader bucketMetricsReader;
+    @Resource
+    private GovWsMapper govWsMapper;
+    @Resource
+    private GovWsQuotaMapper govWsQuotaMapper;
 
     @Override
     public Map<String, Object> summary(String ws, String range) {
@@ -386,31 +396,73 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
     @Override
     public Map<String, Object> showback(String ws, String range, String group) {
-        String workspace = wsOrDefault(ws);
         int days = parseRangeDays(range);
-        List<TableCaliber> rows = buildCalibers(workspace, days);
-        long active = rows.stream().mapToLong(TableCaliber::activeBytes).sum();
-        long total = rows.stream().mapToLong(TableCaliber::totalBytes).sum();
-        long net = rows.stream().mapToLong(TableCaliber::netGrowthBytes).sum();
+        String g = StrUtil.blankToDefault(group, "ws").trim().toLowerCase(Locale.ROOT);
+        if ("workspace".equals(g) || "workspace_id".equals(g)) {
+            g = "ws";
+        }
+        String filterWs = StrUtil.trim(ws);
+        boolean allWs = "ws".equals(g) && StrUtil.isBlank(filterWs);
 
-        // P0：单空间 stub；正式接 workspace 配额 API
-        long quotaBytes = 20L * TB;
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("ws", workspace);
-        row.put("activeBytes", active);
-        row.put("totalBytes", total);
-        row.put("netGrowthBytes", net);
-        row.put("quotaBytes", quotaBytes);
-        row.put("quotaPct", pct(total, quotaBytes));
-        row.put("owner", "platform");
-        row.put("status", total * 100.0 / quotaBytes >= 80 ? "QUOTA_WARN" : "ok");
+        Map<String, String> ownerByWs = new LinkedHashMap<>();
+        Map<String, Long> quotaByWs = new LinkedHashMap<>();
+        List<GovWs> spaces = govWsMapper.selectList(new QueryWrapper<GovWs>().lambda()
+                .eq(GovWs::getDeleteFlag, NOT_DELETE)
+                .eq(GovWs::getStatus, "active"));
+        for (GovWs w : spaces) {
+            String code = StrUtil.blankToDefault(w.getWsCode(), WS_DEFAULT);
+            ownerByWs.put(code, StrUtil.blankToDefault(w.getOwners(), "—"));
+        }
+        List<GovWsQuota> quotas = govWsQuotaMapper.selectList(new QueryWrapper<GovWsQuota>().lambda()
+                .eq(GovWsQuota::getDeleteFlag, NOT_DELETE));
+        for (GovWsQuota q : quotas) {
+            String code = StrUtil.blankToDefault(q.getWsCode(), WS_DEFAULT);
+            if (q.getStorageQuotaTb() != null) {
+                quotaByWs.put(code, q.getStorageQuotaTb().multiply(BigDecimal.valueOf(TB)).longValue());
+            }
+        }
+
+        Set<String> codes = new LinkedHashSet<>();
+        if (allWs) {
+            codes.addAll(ownerByWs.keySet());
+            List<GovLcTableStat> allStats = tableStatMapper.selectList(new QueryWrapper<GovLcTableStat>().lambda()
+                    .eq(GovLcTableStat::getDeleteFlag, NOT_DELETE));
+            for (GovLcTableStat s : allStats) {
+                codes.add(StrUtil.blankToDefault(s.getWs(), WS_DEFAULT));
+            }
+            if (codes.isEmpty()) {
+                codes.add(WS_DEFAULT);
+            }
+        } else {
+            codes.add(wsOrDefault(filterWs));
+        }
+
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (String code : codes) {
+            List<TableCaliber> rows = buildCalibers(code, days);
+            long active = rows.stream().mapToLong(TableCaliber::activeBytes).sum();
+            long total = rows.stream().mapToLong(TableCaliber::totalBytes).sum();
+            long net = rows.stream().mapToLong(TableCaliber::netGrowthBytes).sum();
+            long quotaBytes = quotaByWs.getOrDefault(code, 20L * TB);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("ws", code);
+            row.put("activeBytes", active);
+            row.put("totalBytes", total);
+            row.put("netGrowthBytes", net);
+            row.put("quotaBytes", quotaBytes);
+            row.put("quotaPct", pct(total, quotaBytes));
+            row.put("owner", ownerByWs.getOrDefault(code, "platform"));
+            row.put("status", quotaBytes > 0 && total * 100.0 / quotaBytes >= 80 ? "QUOTA_WARN" : "ok");
+            list.add(row);
+        }
+        list.sort(Comparator.comparingLong((Map<String, Object> m) -> (Long) m.get("totalBytes")).reversed());
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ws", workspace);
+        out.put("ws", allWs ? null : wsOrDefault(filterWs));
         out.put("range", rangeLabel(days));
-        out.put("group", StrUtil.blankToDefault(group, "ws"));
-        out.put("list", List.of(row));
-        out.put("note", "P0 stub；配额正式读 /lh/workspace/spaces/{id}/quota");
+        out.put("group", g);
+        out.put("list", list);
+        out.put("note", "配额读 gov_ws_quota；与 /lh/workspace/spaces/{code}/quota 同源");
         return out;
     }
 
