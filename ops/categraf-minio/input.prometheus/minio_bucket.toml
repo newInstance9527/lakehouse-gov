@@ -1,0 +1,23 @@
+# Categraf prometheus 输入：MinIO 桶级指标（15min）
+# 拷贝到 categraf conf/input.prometheus/ 后 reload。
+# 凭证：优先环境变量 / Vault；勿把 SecretKey 写入本文件。
+
+[[instances]]
+urls = [
+  # metrics v2（现网常见）；v3 可改为 /minio/metrics/v3/cluster/usage/buckets
+  "http://minio.example:9000/minio/v2/metrics/bucket",
+]
+# Bearer / Basic：按现网 MinIO metrics 鉴权改（部分集群需 admin）
+# headers = { Authorization = "Bearer ..." }
+labels = { job = "minio-bucket", component = "minio" }
+interval = 900
+timeout = 15
+# 不反压：禁止改到 <60s 除非节点规格评估通过（全栈 §30.2）
+
+[[instances]]
+urls = [
+  "http://minio.example:9000/minio/v2/metrics/cluster",
+]
+labels = { job = "minio-cluster", component = "minio" }
+interval = 900
+timeout = 15

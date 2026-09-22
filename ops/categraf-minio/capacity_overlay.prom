@@ -1,0 +1,7 @@
+# 可选静态 capacity（Prometheus 文本），按现网桶改数值后 import 到 VM。
+# 与门户 lh.lifecycle.bucket-capacity-bytes 二选一即可；勿双写冲突值。
+lh_bucket_storage_capacity_bytes{bucket="iceberg-ods"} 8796093022208
+lh_bucket_storage_capacity_bytes{bucket="iceberg-dwd"} 8796093022208
+lh_bucket_storage_capacity_bytes{bucket="iceberg-dws"} 4398046511104
+lh_bucket_storage_capacity_bytes{bucket="archive"} 4398046511104
+lh_bucket_storage_capacity_bytes{bucket="clickhouse-hot"} 2199023255552

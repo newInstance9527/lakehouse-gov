@@ -16,6 +16,7 @@ import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcStorageAdviceMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcStorageChangePointMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcStorageService;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcBucketMetricsReader;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -54,6 +55,8 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     private GovLcStorageAdviceMapper adviceMapper;
     @Resource
     private GovLcStorageChangePointMapper changePointMapper;
+    @Resource
+    private GovLcBucketMetricsReader bucketMetricsReader;
 
     @Override
     public Map<String, Object> summary(String ws, String range) {
@@ -93,9 +96,10 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         long profiled = rows.stream().filter(TableCaliber::profiled).count();
         out.put("profiledTables", profiled);
         out.put("source", profiled > 0
-                ? "gov_lc_table_stat(trino $files/$snapshots); VM 未接"
-                : "gov_lc_table_stat(seed)+gov_lc_storage_*; VM P1");
+                ? "gov_lc_table_stat(trino $files/$snapshots); 桶级见 buckets.source"
+                : "gov_lc_table_stat(seed)+gov_lc_storage_*; 桶级见 buckets.source");
         out.put("caliberNote", "active+reclaimable=physical（P0 派生；正式由 lh_table_storage_* 承接）");
+        out.put("bucketSource", bucketMetricsReader.available() ? "vm-or-seed" : "seed");
         return out;
     }
 
@@ -194,7 +198,11 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         out.put("series", series);
         out.put("changePoints", changePoints);
         out.put("forecast", forecast);
-        out.put("source", "gov_lc_table_stat(seed); VM wiring P1");
+        out.put("source", "bucket".equals(grp)
+                ? (bucketMetricsReader.available()
+                ? "lh_bucket_storage_*|minio_* via VM; seed fallback"
+                : "seed buckets; configure lh.lifecycle.vm-import-url + Categraf")
+                : "gov_lc_table_stat(seed); table series VM P1");
         return out;
     }
 
@@ -310,13 +318,21 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     @Override
     public List<Map<String, Object>> buckets(String ws) {
         String workspace = wsOrDefault(ws);
-        // P0：对齐演示 + §11 热/温/冷；桶级正式读 Categraf/VM
         List<Map<String, Object>> list = new ArrayList<>();
-        list.add(bucket("iceberg-ods", 1.2 * TB, 8L * TB, 62, "warm"));
-        list.add(bucket("iceberg-dwd", 1.6 * TB, 8L * TB, 148, "warm"));
-        list.add(bucket("iceberg-dws", 0.3 * TB, 4L * TB, 365, "warm"));
-        list.add(bucket("archive", 0.3 * TB, 4L * TB, 999, "cold"));
-        list.add(bucket("clickhouse-hot", 1.1 * TB, 2L * TB, 88, "hot"));
+        List<GovLcBucketMetricsReader.BucketSnapshot> fromVm = bucketMetricsReader.listBuckets();
+        if (!fromVm.isEmpty()) {
+            long nowSec = System.currentTimeMillis() / 1000L;
+            for (GovLcBucketMetricsReader.BucketSnapshot snap : fromVm) {
+                list.add(bucketFromVm(snap, nowSec));
+            }
+        } else {
+            // 无 VM / 无点：对齐演示 + §11 热/温/冷；正式读 Categraf→VM
+            list.add(bucket("iceberg-ods", 1.2 * TB, 8L * TB, 62, "warm", "seed"));
+            list.add(bucket("iceberg-dwd", 1.6 * TB, 8L * TB, 148, "warm", "seed"));
+            list.add(bucket("iceberg-dws", 0.3 * TB, 4L * TB, 365, "warm", "seed"));
+            list.add(bucket("archive", 0.3 * TB, 4L * TB, 999, "cold", "seed"));
+            list.add(bucket("clickhouse-hot", 1.1 * TB, 2L * TB, 88, "hot", "seed"));
+        }
 
         List<GovLcOrphanScan> scans = orphanScanMapper.selectList(new QueryWrapper<GovLcOrphanScan>().lambda()
                 .eq(GovLcOrphanScan::getWs, workspace)
@@ -572,7 +588,57 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         return m;
     }
 
-    private Map<String, Object> bucket(String name, double used, long cap, int ttfP95, String tier) {
+    private Map<String, Object> bucketFromVm(GovLcBucketMetricsReader.BucketSnapshot snap, long nowSec) {
+        long usedBytes = Math.max(0L, snap.usedBytes());
+        long cap = snap.capacityBytes() != null && snap.capacityBytes() > 0
+                ? snap.capacityBytes()
+                : Math.max(usedBytes, 1L);
+        int lagMin = 0;
+        if (snap.scrapedAtSec() != null && snap.scrapedAtSec() > 0) {
+            lagMin = (int) Math.max(0, (nowSec - snap.scrapedAtSec()) / 60L);
+        }
+        // 无历史斜率时仅给水位；TTF 留给有日序列后的 C4/夜莺。粗估：剩余 / (used*0.5%/day)
+        Integer ttfP95 = null;
+        Integer ttfP50 = null;
+        if (cap > usedBytes && usedBytes > 0) {
+            double daily = usedBytes * 0.005;
+            if (daily > 0) {
+                ttfP95 = (int) Math.round((cap - usedBytes) / daily);
+                ttfP50 = (int) Math.round(ttfP95 * 1.25);
+            }
+        }
+        String tier = guessTier(snap.bucket());
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("bucket", snap.bucket());
+        m.put("tier", tier);
+        m.put("usedBytes", usedBytes);
+        m.put("capacityBytes", cap);
+        m.put("usagePct", pct(usedBytes, cap));
+        m.put("objectCount", snap.objectCount());
+        m.put("daysToFullP50", ttfP50);
+        m.put("daysToFullP95", ttfP95);
+        m.put("scrapeLagMinutes", lagMin);
+        m.put("alert", ttfP95 != null && ttfP95 < 45 ? "danger"
+                : (ttfP95 != null && ttfP95 < 90 ? "warn" : "ok"));
+        m.put("source", "vm:" + StrUtil.blankToDefault(snap.source(), "bucket"));
+        return m;
+    }
+
+    private static String guessTier(String bucket) {
+        if (bucket == null) {
+            return "warm";
+        }
+        String b = bucket.toLowerCase(Locale.ROOT);
+        if (b.contains("hot") || b.contains("clickhouse")) {
+            return "hot";
+        }
+        if (b.contains("archive") || b.contains("cold")) {
+            return "cold";
+        }
+        return "warm";
+    }
+
+    private Map<String, Object> bucket(String name, double used, long cap, int ttfP95, String tier, String source) {
         long usedBytes = Math.round(used);
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("bucket", name);
@@ -583,7 +649,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         m.put("daysToFullP50", Math.round(ttfP95 * 1.25));
         m.put("daysToFullP95", ttfP95);
         m.put("alert", ttfP95 < 45 ? "danger" : (ttfP95 < 90 ? "warn" : "ok"));
-        m.put("source", "seed; Categraf/VM P1");
+        m.put("source", source);
         return m;
     }
 

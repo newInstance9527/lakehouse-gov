@@ -1,0 +1,8 @@
+# 可选：将 MinIO 原生名映射为平台 lh_bucket_storage_*（processor 语法随 Categraf 版本微调）
+# 若不做 rename，门户仍可通过 MetricsQL `or` 读 minio_*（见 GovLcBucketMetricNames）。
+
+# [[instances]] 同 minio_bucket.toml，并增加类似：
+# [instances.mappings]
+#   minio_bucket_usage_total_bytes = "lh_bucket_storage_used_bytes"
+#   minio_bucket_usage_object_total = "lh_bucket_storage_object_count"
+#   minio_bucket_quota_total_bytes = "lh_bucket_storage_capacity_bytes"

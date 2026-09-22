@@ -34,6 +34,8 @@ public class GovLcStorageDaysToFullDeriver {
     private LhProperties lhProperties;
     @Resource
     private GovLcStorageChangePointMapper changePointMapper;
+    @Resource
+    private GovLcBucketMetricsReader bucketMetricsReader;
 
     /**
      * @param profileRows 画像行（需 collectStatus / tableFqn / totalBytes / reclaimableBytes）
@@ -47,22 +49,14 @@ public class GovLcStorageDaysToFullDeriver {
         int skipped = 0;
         Map<String, Integer> skipReasons = new LinkedHashMap<>();
 
-        long capacity = capacityBytes();
         double reclaimConf = reclaimConfidence();
-        if (capacity <= 0) {
-            out.put("lines", lines);
-            out.put("written", 0);
-            out.put("skipped", profileRows == null ? 0 : profileRows.size());
-            out.put("reason", "NO_CAPACITY");
-            return out;
-        }
-
         LocalDate day = Instant.ofEpochMilli(dayTsMs).atZone(ZoneOffset.UTC).toLocalDate();
         long todayEpochDay = day.toEpochDay();
         List<Long> wsChangeDays = loadChangePointEpochDays(ws, null);
         long lookbackSec = (GovLcStorageDaysToFull.MAX_WINDOW_DAYS + 5L) * 86_400L;
         long endSec = dayTsMs / 1000L + 86_400L - 1;
         long startSec = Math.max(0, endSec - lookbackSec);
+        long fallbackCapacity = capacityBytesFallback();
 
         if (profileRows != null) {
             for (Map<String, Object> row : profileRows) {
@@ -81,6 +75,15 @@ public class GovLcStorageDaysToFullDeriver {
                 long total = longVal(row.get("totalBytes"));
                 long reclaimable = longVal(row.get("reclaimableBytes"));
                 String layer = row.get("layer") == null ? null : String.valueOf(row.get("layer"));
+                long capacity = bucketMetricsReader.capacityForLayer(layer);
+                if (capacity <= 0) {
+                    capacity = fallbackCapacity;
+                }
+                if (capacity <= 0) {
+                    skipped++;
+                    bump(skipReasons, "NO_CAPACITY");
+                    continue;
+                }
 
                 List<GovLcStorageDaysToFull.Point> history = loadHistory(ws, fqn, startSec, endSec);
                 history = mergeToday(history, todayEpochDay, total);
@@ -102,6 +105,8 @@ public class GovLcStorageDaysToFullDeriver {
                 row.put("daysToFullR2", result.r2());
                 row.put("daysToFullUnstable", result.unstable());
                 row.put("daysToFullSamples", result.sampleCount());
+                row.put("capacityBytes", capacity);
+                row.put("capacityBucket", bucketMetricsReader.resolveBucketForLayer(layer));
             }
         }
 
@@ -109,7 +114,7 @@ public class GovLcStorageDaysToFullDeriver {
         out.put("written", written);
         out.put("skipped", skipped);
         out.put("skipReasons", skipReasons);
-        out.put("capacityBytes", capacity);
+        out.put("capacityBytesFallback", fallbackCapacity);
         out.put("vmConfigured", victoriaMetricsClient.configured());
         return out;
     }
@@ -174,7 +179,7 @@ public class GovLcStorageDaysToFullDeriver {
         return days;
     }
 
-    private long capacityBytes() {
+    private long capacityBytesFallback() {
         if (lhProperties.getLifecycle() == null) {
             return 20L * 1024 * 1024 * 1024 * 1024;
         }

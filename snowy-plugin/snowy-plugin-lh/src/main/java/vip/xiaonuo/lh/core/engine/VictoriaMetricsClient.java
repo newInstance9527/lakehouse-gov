@@ -18,8 +18,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * VictoriaMetrics 客户端：直写 {@code /api/v1/import/prometheus}，并可读 {@code /api/v1/query_range}；
- * 不经 Pushgateway。
+ * VictoriaMetrics 客户端：直写 {@code /api/v1/import/prometheus}，
+ * 可读 {@code /api/v1/query} / {@code /api/v1/query_range}；不经 Pushgateway。
  */
 @Component
 public class VictoriaMetricsClient {
@@ -28,6 +28,10 @@ public class VictoriaMetricsClient {
 
     /** query_range 日点：UTC epoch day + 数值。 */
     public record RangePoint(long epochDay, long value) {
+    }
+
+    /** instant 查询单点（可带标签）。 */
+    public record InstantSample(Map<String, String> labels, double value, long timestampSec) {
     }
 
     @Resource
@@ -86,6 +90,75 @@ public class VictoriaMetricsClient {
             out.put("endpoint", endpoint);
             out.put("message", StrUtil.maxLength(e.getMessage(), 300));
             log.warn("VictoriaMetrics import error: {}", e.getMessage());
+            return out;
+        }
+    }
+
+    /**
+     * Instant 查询（{@code /api/v1/query}）。未配置 URL 时返回空列表。
+     */
+    public List<InstantSample> queryInstant(String promQl) {
+        List<InstantSample> out = new ArrayList<>();
+        String url = importUrl();
+        if (StrUtil.isBlank(url) || StrUtil.isBlank(promQl)) {
+            return out;
+        }
+        String endpoint = trimSlash(url) + "/api/v1/query";
+        int timeout = timeoutMs();
+        try {
+            HttpResponse resp = HttpRequest.get(endpoint)
+                    .form("query", promQl)
+                    .timeout(timeout)
+                    .execute();
+            if (resp.getStatus() < 200 || resp.getStatus() >= 300) {
+                log.warn("VictoriaMetrics query HTTP {}: {}", resp.getStatus(),
+                        StrUtil.maxLength(resp.body(), 200));
+                return out;
+            }
+            JSONObject root = JSONUtil.parseObj(resp.body());
+            if (!"success".equalsIgnoreCase(root.getStr("status"))) {
+                return out;
+            }
+            JSONObject data = root.getJSONObject("data");
+            if (data == null) {
+                return out;
+            }
+            JSONArray result = data.getJSONArray("result");
+            if (result == null || result.isEmpty()) {
+                return out;
+            }
+            for (int i = 0; i < result.size(); i++) {
+                JSONObject series = result.getJSONObject(i);
+                if (series == null) {
+                    continue;
+                }
+                Map<String, String> labels = new LinkedHashMap<>();
+                JSONObject metric = series.getJSONObject("metric");
+                if (metric != null) {
+                    for (String key : metric.keySet()) {
+                        labels.put(key, metric.getStr(key));
+                    }
+                }
+                JSONArray value = series.getJSONArray("value");
+                if (value == null || value.size() < 2) {
+                    continue;
+                }
+                long tsSec = value.getLong(0);
+                String raw = value.getStr(1);
+                if (StrUtil.isBlank(raw) || "NaN".equalsIgnoreCase(raw)) {
+                    continue;
+                }
+                double num;
+                try {
+                    num = Double.parseDouble(raw.trim());
+                } catch (Exception e) {
+                    continue;
+                }
+                out.add(new InstantSample(labels, num, tsSec));
+            }
+            return out;
+        } catch (Exception e) {
+            log.warn("VictoriaMetrics query error: {}", e.getMessage());
             return out;
         }
     }

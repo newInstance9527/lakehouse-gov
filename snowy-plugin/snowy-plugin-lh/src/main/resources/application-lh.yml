@@ -121,9 +121,22 @@ lh:
     # 空=跳过 VM；配好后日批直写 /api/v1/import/prometheus（禁 Pushgateway）
     vm-import-url: ""
     vm-import-timeout-ms: 15000
-    # days-to-full 软容量（字节）；0=跳过派生。正式由桶 capacity 承接（C3）
+    # days-to-full 软容量（字节）；0=跳过派生。优先 VM/桶覆盖，本项兜底
     forecast-default-capacity-bytes: 21990232555520
     forecast-reclaim-confidence: 0.7
+    # 桶 capacity 覆盖（MinIO 无 quota 时）；与 ops/categraf-minio 对齐
+    bucket-capacity-bytes:
+      iceberg-ods: 8796093022208
+      iceberg-dwd: 8796093022208
+      iceberg-dws: 4398046511104
+      archive: 4398046511104
+      clickhouse-hot: 2199023255552
+    layer-bucket-map:
+      ODS: iceberg-ods
+      DWD: iceberg-dwd
+      DWS: iceberg-dws
+      ADS: iceberg-dws
+      DIM: iceberg-dws
     profile-daily-enabled: false
     profile-table-timeout-ms: 60000
     profile-max-tables: 200

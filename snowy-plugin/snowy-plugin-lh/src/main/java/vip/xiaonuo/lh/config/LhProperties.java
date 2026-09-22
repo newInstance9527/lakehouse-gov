@@ -358,12 +358,21 @@ public class LhProperties {
         private int vmImportTimeoutMs = 15_000;
         /**
          * days-to-full 默认容量（字节）。0=跳过派生写回。
-         * 正式应由桶 capacity（Categraf）承接；现网未配时可用软上限做闭环。
+         * 优先读 VM 桶 capacity / {@link #bucketCapacityBytes}；均无则用本软上限。
          * 默认 20 TiB，对齐演示桶容量量级。
          */
         private long forecastDefaultCapacityBytes = 20L * 1024 * 1024 * 1024 * 1024;
         /** 回收把握系数，对齐存储趋势 §4.4 */
         private double forecastReclaimConfidence = 0.7;
+        /**
+         * 桶 capacity 覆盖（字节）。MinIO 无 quota 指标时由运维填；
+         * Categraf 亦可投影为 {@code lh_bucket_storage_capacity_bytes}。
+         */
+        private java.util.Map<String, Long> bucketCapacityBytes = new java.util.LinkedHashMap<>();
+        /**
+         * 分层 → 桶名（days-to-full 取该桶 capacity）。空则用内置 ODS→iceberg-ods 等默认。
+         */
+        private java.util.Map<String, String> layerBucketMap = new java.util.LinkedHashMap<>();
     }
 
     /**
