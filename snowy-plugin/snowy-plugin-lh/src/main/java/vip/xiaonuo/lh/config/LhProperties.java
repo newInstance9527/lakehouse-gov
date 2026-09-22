@@ -93,6 +93,11 @@ public class LhProperties {
          * false（默认）：树里只留可跑表。
          */
         private boolean showUnrunnableInTree = false;
+        /**
+         * Trino file AC {@code rules.json} 绝对/相对路径；主体 bind / 手动 sync 时把 impersonation 段下发到此文件。
+         * 空=不下发（仅 GET impersonation-rule 导出）；与 Trino 同机或共享卷时填挂载路径。
+         */
+        private String impersonationRulesPath = "";
     }
 
     @Getter

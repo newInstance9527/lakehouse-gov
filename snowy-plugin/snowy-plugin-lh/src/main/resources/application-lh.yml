@@ -16,6 +16,8 @@ lh:
     lake-catalogs: iceberg
     catalog-cache-ttl-ms: 300000
     show-unrunnable-in-tree: false
+    # 主体 bind/sync 时下发 impersonation；空=仅 GET 导出。与 Trino 同机或共享卷时填 rules.json 路径
+    # impersonation-rules-path: /etc/trino/access-control/rules.json
   ds:
     url: http://127.0.0.1:12345/dolphinscheduler
     vault-path: platform/dolphinscheduler/api

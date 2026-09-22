@@ -4,6 +4,8 @@ import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.common.exception.CommonException;
@@ -13,6 +15,7 @@ import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
 import vip.xiaonuo.lh.modular.sec.mapper.LhTrinoPrincipalMapper;
 import vip.xiaonuo.lh.modular.sec.param.LhTrinoPrincipalBindParam;
+import vip.xiaonuo.lh.modular.sec.service.LhTrinoImpersonationRulesSync;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 
 import java.util.Date;
@@ -24,6 +27,7 @@ import java.util.regex.Pattern;
 @Service
 public class LhTrinoPrincipalServiceImpl implements LhTrinoPrincipalService {
 
+    private static final Logger log = LoggerFactory.getLogger(LhTrinoPrincipalServiceImpl.class);
     private static final String NOT_DELETE = "NOT_DELETE";
     private static final Pattern TRINO_USER = Pattern.compile("^[A-Za-z][A-Za-z0-9._\\-]{0,63}$");
 
@@ -33,6 +37,8 @@ public class LhTrinoPrincipalServiceImpl implements LhTrinoPrincipalService {
     private LhProperties lhProperties;
     @Resource
     private LhComponentCredentialResolver credentialResolver;
+    @Resource
+    private LhTrinoImpersonationRulesSync impersonationRulesSync;
 
     @Override
     public LhTrinoPrincipal requireCurrent() {
@@ -107,6 +113,15 @@ public class LhTrinoPrincipalServiceImpl implements LhTrinoPrincipalService {
             fill(existing, param, trinoUser, now);
             principalMapper.updateById(existing);
         }
+        try {
+            Map<String, Object> sync = impersonationRulesSync.sync();
+            Object st = sync == null ? null : sync.get("status");
+            if (st != null && !"synced".equals(String.valueOf(st)) && !"skipped".equals(String.valueOf(st))) {
+                log.warn("principal bind ok but impersonation rules sync status={}", st);
+            }
+        } catch (Exception e) {
+            log.warn("principal bind ok but impersonation rules sync failed: {}", e.toString());
+        }
         return existing;
     }
 
@@ -130,28 +145,24 @@ public class LhTrinoPrincipalServiceImpl implements LhTrinoPrincipalService {
                 .eq(LhTrinoPrincipal::getDeleteFlag, NOT_DELETE)
                 .eq(LhTrinoPrincipal::getStatus, "active")
                 .eq(LhTrinoPrincipal::getKind, "human"));
-        StringBuilder alt = new StringBuilder();
-        for (LhTrinoPrincipal row : rows) {
-            if (StrUtil.isBlank(row.getTrinoUser())) {
-                continue;
-            }
-            if (!alt.isEmpty()) {
-                alt.append('|');
-            }
-            alt.append(Pattern.quote(row.getTrinoUser()));
-        }
-        String newUser = alt.isEmpty() ? "(?!)" : "^(" + alt + ")$";
-        // Trino file-based access-control 要求 snake_case 字段名
-        Map<String, Object> rule = new LinkedHashMap<>();
-        rule.put("original_user", serviceUser());
-        rule.put("new_user", newUser);
-        rule.put("allow", true);
+        List<Map<String, Object>> rules = impersonationRulesSync.buildImpersonationRules(rows);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("duty", "trino-impersonation-only");
-        out.put("note", "合并进 Trino rules.json 的 impersonation；字段须 original_user/new_user（snake_case）；不要在此写表权限");
-        out.put("impersonation", List.of(rule));
-        out.put("configHint", "access-control.name=file + access-control.config-files=.../rules.json；见 deploy/trino/README-impersonation.md");
+        out.put("note", "合并进 Trino rules.json 的 impersonation；字段须 original_user/new_user（snake_case）；主体变更后 POST /lh/sec/principals/impersonation-sync 或配置 rules-path 自动下发");
+        out.put("impersonation", rules);
+        out.put("configHint", "lh.trino.impersonation-rules-path + access-control.name=file；见 deploy/trino/README-impersonation.md");
+        String path = StrUtil.trim(lhProperties.getTrino().getImpersonationRulesPath());
+        out.put("rulesPathConfigured", StrUtil.isNotBlank(path));
+        out.put("rulesPath", path);
         return out;
+    }
+
+    @Override
+    public Map<String, Object> syncImpersonationRules() {
+        if (!LhLoginUsers.isSuperAdmin()) {
+            throw new CommonException("仅超管可下发代执行规则");
+        }
+        return impersonationRulesSync.sync();
     }
 
     private void fill(LhTrinoPrincipal row, LhTrinoPrincipalBindParam param, String trinoUser, Date now) {

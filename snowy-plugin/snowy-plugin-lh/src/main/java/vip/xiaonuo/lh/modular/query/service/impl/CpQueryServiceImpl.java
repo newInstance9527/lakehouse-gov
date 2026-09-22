@@ -280,8 +280,8 @@ public class CpQueryServiceImpl implements CpQueryService {
             }
             if (impersonationDenied) {
                 Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(
-                        "Trino 服务账号无法代执行映射主体。请在 Trino rules.json 配置 impersonation（见 deploy/trino/README-impersonation.md），"
-                                + "或 GET /lh/sec/principals/impersonation-rule 导出规则。申请 SELECT 无法解决此错误。");
+                        "Trino 服务账号无法代执行映射主体。请配置 lh.trino.impersonation-rules-path 并 POST /lh/sec/principals/impersonation-sync（或见 deploy/trino/README-impersonation.md）。"
+                                + "申请 SELECT 无法解决此错误。");
                 blocked.put("queryId", queryId);
                 blocked.put("id", row.getId());
                 blocked.put("errorCode", "IMPERSONATION_DENIED");

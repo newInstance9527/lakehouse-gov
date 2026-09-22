@@ -73,4 +73,10 @@ public class LhTrinoPrincipalController {
     public CommonResult<Map<String, Object>> impersonationRule() {
         return CommonResult.data(principalService.impersonationFragment());
     }
+
+    @Operation(summary = "下发 impersonation 到 rules.json（主体变更后同步）")
+    @PostMapping("/lh/sec/principals/impersonation-sync")
+    public CommonResult<Map<String, Object>> impersonationSync() {
+        return CommonResult.data(principalService.syncImpersonationRules());
+    }
 }

@@ -27,4 +27,10 @@ public interface LhTrinoPrincipalService {
      * 只列出可代执行的主体名，不含库表权限。
      */
     Map<String, Object> impersonationFragment();
+
+    /**
+     * 将当前主体白名单下发到 {@code lh.trino.impersonation-rules-path} 指向的 rules.json。
+     * 仅超管；路径未配置则 skipped。
+     */
+    Map<String, Object> syncImpersonationRules();
 }
