@@ -275,15 +275,18 @@ public class GovKbServiceImpl implements GovKbService {
         if (param == null || StrUtil.isBlank(param.getQuery())) {
             return List.of();
         }
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
+        String ws = StrUtil.trim(param.getWs());
         String q = param.getQuery().trim();
         int topK = param.getTopK() == null ? 5 : Math.max(1, Math.min(param.getTopK(), 50));
 
         QueryWrapper<GovKbEntry> entryQw = new QueryWrapper<>();
         entryQw.lambda()
                 .eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
-                .eq(GovKbEntry::getWs, ws)
                 .eq(GovKbEntry::getStatus, "ready");
+        // 软过滤：传 ws 则按归属筛；空则全空间（AI 偏好补全用）
+        if (StrUtil.isNotBlank(ws)) {
+            entryQw.lambda().eq(GovKbEntry::getWs, ws);
+        }
         if (param.getCats() != null && !param.getCats().isEmpty()) {
             entryQw.lambda().in(GovKbEntry::getCat, param.getCats());
         }
@@ -324,6 +327,7 @@ public class GovKbServiceImpl implements GovKbService {
             m.put("chunkId", c.getId());
             m.put("title", e.getTitle());
             m.put("cat", e.getCat());
+            m.put("ws", e.getWs());
             m.put("text", c.getTextContent());
             m.put("score", kw);
             m.put("kwScore", kw);

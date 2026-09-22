@@ -50,10 +50,12 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -119,13 +121,34 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 .eq(GovAiModel::getDeleteFlag, NOT_DELETE)
                 .and(w -> w.eq(GovAiModel::getWs, workspace).or().eq(GovAiModel::getWs, "*")));
         Map<String, Object> kb = govKbService.overview(workspace);
+        List<Map<String, Object>> preferredAssets = new ArrayList<>();
+        try {
+            List<GovAsset> sample = assetMapper.selectList(new QueryWrapper<GovAsset>().lambda()
+                    .eq(GovAsset::getDeleteFlag, NOT_DELETE)
+                    .eq(GovAsset::getWs, workspace)
+                    .orderByDesc(GovAsset::getUpdateTime)
+                    .last("LIMIT 5"));
+            for (GovAsset a : sample) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", a.getId());
+                row.put("assetCode", a.getAssetCode());
+                row.put("name", StrUtil.blankToDefault(a.getCnName(), a.getName()));
+                row.put("ws", a.getWs());
+                preferredAssets.add(row);
+            }
+        } catch (Exception ignored) {
+            // soft degrade
+        }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ws", workspace);
+        out.put("softPrefer", true);
+        out.put("preferNote", "当前空间仅影响上下文偏好与软筛选；执行仍经 Grav/即席，不因空间绕过 ACL");
         out.put("assetCount", assets == null ? 0 : assets);
         out.put("metricCount", metrics);
         out.put("modelCount", models == null ? 0 : models);
         out.put("kbCount", kb.getOrDefault("total", 0));
         out.put("kbCiteCnt", kb.getOrDefault("citeCnt", 0));
+        out.put("preferredAssets", preferredAssets);
         return out;
     }
 
@@ -306,15 +329,11 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             }
             sendEvent(emitter, "meta", meta);
 
-            // 工具：知识检索（docqa / explain / manual）
+            // 工具：知识检索（偏好当前 ws，不足时软补全其他空间；非硬隔离）
             if ("docqa".equals(intent) || "explain".equals(intent) || "manual".equals(intent)
                     || StrUtil.containsIgnoreCase(safeText, "手册")
                     || StrUtil.containsIgnoreCase(safeText, "口径")) {
-                GovKbSearchParam sp = new GovKbSearchParam();
-                sp.setWs(workspace);
-                sp.setQuery(safeText);
-                sp.setTopK(5);
-                List<Map<String, Object>> hits = govKbService.search(sp);
+                List<Map<String, Object>> hits = searchKbPreferWs(workspace, safeText, 5);
                 for (Map<String, Object> h : hits) {
                     Map<String, Object> c = new LinkedHashMap<>();
                     c.put("type", "knowledge");
@@ -323,6 +342,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     c.put("title", h.get("title"));
                     c.put("text", h.get("text"));
                     c.put("score", h.get("score"));
+                    c.put("ws", h.get("ws"));
+                    c.put("preferWs", h.get("preferWs"));
                     citations.add(c);
                     sendEvent(emitter, "citation", c);
                 }
@@ -984,7 +1005,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     }
 
     /**
-     * resolve_metric：经指标中心 list/detail（等价 /lh/metric/list、/lh/metric/{code}），不旁路 mapper。
+     * resolve_metric：优先当前 ws，未命中则全局软回退（不硬隔离）。
      */
     private GovMetricVo resolveMetricTool(String text, String ws) {
         String code = extractMetricCode(text);
@@ -992,15 +1013,24 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             try {
                 return govMetricService.detail(code, ws);
             } catch (Exception ignored) {
-                // 编码未命中则关键词检索
+                try {
+                    return govMetricService.detail(code, null);
+                } catch (Exception ignored2) {
+                    // 编码未命中则关键词检索
+                }
             }
         }
         String kw = extractMetricKeyword(text);
         List<GovMetricVo> hits = searchMetricsViaApi(ws, kw);
+        if (hits.isEmpty()) {
+            hits = searchMetricsViaApi(null, kw);
+        }
         if (hits.isEmpty() && !"GMV".equalsIgnoreCase(kw)) {
-            // 常见口径别名再试一次
             if (containsMetricKeyword(text) && StrUtil.containsIgnoreCase(text, "GMV")) {
                 hits = searchMetricsViaApi(ws, "GMV");
+                if (hits.isEmpty()) {
+                    hits = searchMetricsViaApi(null, "GMV");
+                }
             }
         }
         if (hits.isEmpty()) {
@@ -1019,6 +1049,54 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             }
         }
         return hits.get(0);
+    }
+
+    /**
+     * 知识检索软偏好：先当前 ws，不足 topK 时从全空间补全（标记 preferWs）。
+     */
+    private List<Map<String, Object>> searchKbPreferWs(String preferWs, String query, int topK) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        GovKbSearchParam preferred = new GovKbSearchParam();
+        preferred.setWs(preferWs);
+        preferred.setQuery(query);
+        preferred.setTopK(topK);
+        try {
+            for (Map<String, Object> h : govKbService.search(preferred)) {
+                String key = String.valueOf(h.getOrDefault("chunkId", h.get("entryId")));
+                if (!seen.add(key)) {
+                    continue;
+                }
+                h.put("preferWs", true);
+                h.put("ws", preferWs);
+                out.add(h);
+            }
+        } catch (Exception ignored) {
+            // soft degrade
+        }
+        if (out.size() >= topK) {
+            return out.subList(0, topK);
+        }
+        GovKbSearchParam all = new GovKbSearchParam();
+        all.setWs(null);
+        all.setQuery(query);
+        all.setTopK(topK * 2);
+        try {
+            for (Map<String, Object> h : govKbService.search(all)) {
+                String key = String.valueOf(h.getOrDefault("chunkId", h.get("entryId")));
+                if (!seen.add(key)) {
+                    continue;
+                }
+                h.putIfAbsent("preferWs", false);
+                out.add(h);
+                if (out.size() >= topK) {
+                    break;
+                }
+            }
+        } catch (Exception ignored) {
+            // soft degrade
+        }
+        return out;
     }
 
     /** compile_metric：POST /lh/metric/compile */

@@ -70,16 +70,17 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
     @Override
     public Map<String, Object> summary(String ws, String range) {
-        String workspace = wsOrDefault(ws);
+        String filterWs = normalizeFilterWs(ws);
         int days = parseRangeDays(range);
-        List<TableCaliber> rows = buildCalibers(workspace, days);
+        List<TableCaliber> rows = buildCalibers(filterWs, days);
 
         long active = rows.stream().mapToLong(TableCaliber::activeBytes).sum();
         long reclaimable = rows.stream().mapToLong(TableCaliber::reclaimableBytes).sum();
         long total = active + reclaimable;
         long netGrowth = rows.stream().mapToLong(TableCaliber::netGrowthBytes).sum();
 
-        List<Map<String, Object>> bucketList = buckets(workspace);
+        // 桶为基础设施维度，不随空间软过滤收窄
+        List<Map<String, Object>> bucketList = buckets(null);
         Map<String, Object> tightest = bucketList.stream()
                 .filter(b -> b.get("daysToFullP95") instanceof Number)
                 .min(Comparator.comparingDouble(b -> ((Number) b.get("daysToFullP95")).doubleValue()))
@@ -92,7 +93,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
                 .orElse(null);
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ws", workspace);
+        out.put("ws", filterWs);
         out.put("range", rangeLabel(days));
         out.put("rangeDays", days);
         out.put("physicalBytes", total);
@@ -115,10 +116,10 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
     @Override
     public Map<String, Object> trend(String ws, String range, String group) {
-        String workspace = wsOrDefault(ws);
+        String filterWs = normalizeFilterWs(ws);
         int days = parseRangeDays(range);
         String grp = StrUtil.blankToDefault(group, "layer").toLowerCase(Locale.ROOT);
-        List<TableCaliber> rows = buildCalibers(workspace, days);
+        List<TableCaliber> rows = buildCalibers(filterWs, days);
 
         long activeNow = rows.stream().mapToLong(TableCaliber::activeBytes).sum();
         long reclaimNow = rows.stream().mapToLong(TableCaliber::reclaimableBytes).sum();
@@ -143,7 +144,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
         List<Map<String, Object>> series;
         if ("bucket".equals(grp)) {
-            series = buckets(workspace).stream().map(b -> {
+            series = buckets(null).stream().map(b -> {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("key", b.get("bucket"));
                 m.put("totalBytes", b.get("usedBytes"));
@@ -151,13 +152,28 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
                 return m;
             }).toList();
         } else if ("ws".equals(grp)) {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("key", workspace);
-            m.put("label", workspace);
-            m.put("activeBytes", activeNow);
-            m.put("totalBytes", totalNow);
-            m.put("reclaimableBytes", reclaimNow);
-            series = List.of(m);
+            Map<String, long[]> byWs = new LinkedHashMap<>();
+            for (TableCaliber r : rows) {
+                String code = StrUtil.blankToDefault(r.ws(), WS_DEFAULT);
+                byWs.computeIfAbsent(code, k -> new long[3]);
+                long[] a = byWs.get(code);
+                a[0] += r.activeBytes();
+                a[1] += r.totalBytes();
+                a[2] += r.reclaimableBytes();
+            }
+            if (byWs.isEmpty() && StrUtil.isNotBlank(filterWs)) {
+                byWs.put(filterWs, new long[]{activeNow, totalNow, reclaimNow});
+            }
+            series = byWs.entrySet().stream().map(e -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("key", e.getKey());
+                m.put("label", e.getKey());
+                m.put("ws", e.getKey());
+                m.put("activeBytes", e.getValue()[0]);
+                m.put("totalBytes", e.getValue()[1]);
+                m.put("reclaimableBytes", e.getValue()[2]);
+                return m;
+            }).toList();
         } else {
             Map<String, long[]> layerAgg = new LinkedHashMap<>();
             for (TableCaliber r : rows) {
@@ -183,7 +199,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
             }).toList();
         }
 
-        List<Map<String, Object>> changePoints = listChangePoints(workspace, days).stream()
+        List<Map<String, Object>> changePoints = listChangePoints(filterWs, days).stream()
                 .map(this::changePointToMap)
                 .toList();
 
@@ -200,7 +216,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ws", workspace);
+        out.put("ws", filterWs);
         out.put("range", rangeLabel(days));
         out.put("rangeDays", days);
         out.put("group", grp);
@@ -219,9 +235,9 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     @Override
     public Map<String, Object> tables(String ws, String range, String layer, String filter,
                                       String sort, String order, Integer page, Integer size) {
-        String workspace = wsOrDefault(ws);
+        String filterWs = normalizeFilterWs(ws);
         int days = parseRangeDays(range);
-        List<TableCaliber> rows = buildCalibers(workspace, days);
+        List<TableCaliber> rows = buildCalibers(filterWs, days);
 
         String layerF = StrUtil.trimToNull(layer);
         if (layerF != null) {
@@ -257,7 +273,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
                 .toList();
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ws", workspace);
+        out.put("ws", filterWs);
         out.put("range", rangeLabel(days));
         out.put("page", pageNo);
         out.put("size", pageSize);
@@ -361,17 +377,21 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
     @Override
     public List<Map<String, Object>> advice(String ws) {
-        String workspace = wsOrDefault(ws);
-        List<GovLcStorageAdvice> rows = adviceMapper.selectList(new QueryWrapper<GovLcStorageAdvice>().lambda()
-                .eq(GovLcStorageAdvice::getWs, workspace)
+        String filterWs = normalizeFilterWs(ws);
+        var qw = new QueryWrapper<GovLcStorageAdvice>().lambda()
                 .eq(GovLcStorageAdvice::getDeleteFlag, NOT_DELETE)
                 .in(GovLcStorageAdvice::getStatus, List.of("open", "linked"))
                 .orderByAsc(GovLcStorageAdvice::getPriority)
-                .orderByDesc(GovLcStorageAdvice::getEstReclaimBytes));
+                .orderByDesc(GovLcStorageAdvice::getEstReclaimBytes);
+        if (StrUtil.isNotBlank(filterWs)) {
+            qw.eq(GovLcStorageAdvice::getWs, filterWs);
+        }
+        List<GovLcStorageAdvice> rows = adviceMapper.selectList(qw);
         return rows.stream().map(a -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", a.getId());
             m.put("dt", a.getDt());
+            m.put("ws", a.getWs());
             m.put("fqtn", a.getFqtn());
             m.put("kind", a.getKind());
             m.put("priority", a.getPriority());
@@ -469,18 +489,31 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     // ─── helpers ───────────────────────────────────────────────
 
     private List<TableCaliber> buildCalibers(String ws, int days) {
-        List<GovLcTableStat> stats = tableStatMapper.selectList(new QueryWrapper<GovLcTableStat>().lambda()
-                .eq(GovLcTableStat::getWs, ws)
-                .eq(GovLcTableStat::getDeleteFlag, NOT_DELETE));
-        Map<String, GovLcPolicy> policies = policyMapper.selectList(new QueryWrapper<GovLcPolicy>().lambda()
-                        .eq(GovLcPolicy::getWs, ws)
-                        .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE))
+        // 软过滤：空 ws = 查看全部；有值则按归属筛（与目录/指标一致）
+        var qw = new QueryWrapper<GovLcTableStat>().lambda()
+                .eq(GovLcTableStat::getDeleteFlag, NOT_DELETE);
+        if (StrUtil.isNotBlank(ws)) {
+            qw.eq(GovLcTableStat::getWs, ws);
+        }
+        List<GovLcTableStat> stats = tableStatMapper.selectList(qw);
+
+        var polQw = new QueryWrapper<GovLcPolicy>().lambda()
+                .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE);
+        if (StrUtil.isNotBlank(ws)) {
+            polQw.eq(GovLcPolicy::getWs, ws);
+        }
+        Map<String, GovLcPolicy> policies = policyMapper.selectList(polQw)
                 .stream()
-                .collect(Collectors.toMap(GovLcPolicy::getTableFqn, p -> p, (a, b) -> a));
+                .collect(Collectors.toMap(
+                        p -> StrUtil.blankToDefault(p.getWs(), WS_DEFAULT) + "\0" + p.getTableFqn(),
+                        p -> p,
+                        (a, b) -> a));
 
         List<TableCaliber> out = new ArrayList<>();
         for (GovLcTableStat s : stats) {
-            out.add(derive(s, policies.get(s.getTableFqn()), days));
+            String code = StrUtil.blankToDefault(s.getWs(), WS_DEFAULT);
+            GovLcPolicy policy = policies.get(code + "\0" + s.getTableFqn());
+            out.add(derive(s, policy, days));
         }
         return out;
     }
@@ -556,6 +589,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
         int partitions = Math.max(1, (int) Math.min(files / 8, 500));
         return new TableCaliber(
+                StrUtil.blankToDefault(s.getWs(), WS_DEFAULT),
                 s.getTableFqn(),
                 s.getLayer(),
                 active,
@@ -581,6 +615,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
     private Map<String, Object> caliberToTableRow(TableCaliber r) {
         Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ws", r.ws());
         m.put("fqtn", r.fqtn());
         m.put("tableFqn", r.fqtn());
         m.put("layer", r.layer());
@@ -602,7 +637,8 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         m.put("collectedAt", r.collectedAt());
         m.put("deepLink", Map.of(
                 "lifecycle", "/lifecycle?table=" + r.fqtn() + "&action=" + r.suggestedAction() + "&from=storage-trend",
-                "catalog", "/catalog?q=" + r.fqtn()
+                "catalog", "/catalog?q=" + r.fqtn(),
+                "workspace", "/workspace?ws=" + r.ws()
         ));
         return m;
     }
@@ -621,11 +657,14 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     private List<GovLcStorageChangePoint> listChangePoints(String ws, int days) {
         LocalDate from = LocalDate.now().minusDays(days);
         Date fromDate = Date.from(from.atStartOfDay(ZoneId.systemDefault()).toInstant());
-        return changePointMapper.selectList(new QueryWrapper<GovLcStorageChangePoint>().lambda()
-                .eq(GovLcStorageChangePoint::getWs, ws)
+        var qw = new QueryWrapper<GovLcStorageChangePoint>().lambda()
                 .eq(GovLcStorageChangePoint::getDeleteFlag, NOT_DELETE)
                 .ge(GovLcStorageChangePoint::getDt, fromDate)
-                .orderByAsc(GovLcStorageChangePoint::getDt));
+                .orderByAsc(GovLcStorageChangePoint::getDt);
+        if (StrUtil.isNotBlank(ws)) {
+            qw.eq(GovLcStorageChangePoint::getWs, ws);
+        }
+        return changePointMapper.selectList(qw);
     }
 
     private Map<String, Object> changePointToMap(GovLcStorageChangePoint cp) {
@@ -747,6 +786,12 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         return days + "d";
     }
 
+    /** 软过滤：空 = 全部；有值则原样返回（不去默认成 default） */
+    private static String normalizeFilterWs(String ws) {
+        String t = StrUtil.trim(ws);
+        return StrUtil.isBlank(t) ? null : t;
+    }
+
     private static String wsOrDefault(String ws) {
         return StrUtil.blankToDefault(ws, WS_DEFAULT);
     }
@@ -778,6 +823,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     }
 
     private record TableCaliber(
+            String ws,
             String fqtn,
             String layer,
             long activeBytes,
