@@ -56,6 +56,7 @@ public class LhProperties {
     private Compliance compliance = new Compliance();
     private Metric metric = new Metric();
     private Quality quality = new Quality();
+    private Export export = new Export();
 
     @Getter
     @Setter
@@ -519,5 +520,19 @@ public class LhProperties {
         private String saPassword = "";
         /** Gravitino 主体名（审批发放写权限后登记）；身份名固定 sa_compliance */
         private String saGravitinoUser = "sa_compliance";
+    }
+
+    /**
+     * 出湖与回流：到期停作业 / 出库审计（波次 J1 · A6/A7）
+     */
+    @Getter
+    @Setter
+    public static class Export {
+        /** 到期扫描间隔（毫秒）；默认 5 分钟 */
+        private long expireMs = 300_000L;
+        /** 为 false 时关闭定时到期停作业（仍可手动 POST /lh/export/expire-due） */
+        private boolean expireEnabled = true;
+        /** 审批/到期时尝试写 Grav 表属性 lh.export.*；失败不阻断 */
+        private boolean gravAuditEnabled = true;
     }
 }

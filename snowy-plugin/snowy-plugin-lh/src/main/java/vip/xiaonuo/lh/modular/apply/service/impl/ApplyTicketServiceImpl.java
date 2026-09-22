@@ -28,6 +28,7 @@ import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.mapper.DataapiApiBindingMapper;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
+import vip.xiaonuo.lh.modular.export.service.ExportAuditService;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTransitionParam;
 import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
@@ -84,6 +85,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     private GovDelProcessingGate govDelProcessingGate;
     @Resource
     private ApplyApprovalCandidateService approvalCandidateService;
+    @Resource
+    @Lazy
+    private ExportAuditService exportAuditService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -612,6 +616,16 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
             r.put("ticketNo", t.getTicketNo());
             r.put("grantId", null);
             r.put("gravProjected", false);
+            if (TYPE_LAKE_EXPORT.equals(t.getTicketType())) {
+                try {
+                    Map<String, Object> audit = exportAuditService.record(
+                            ExportAuditService.EVENT_APPROVED, t, null);
+                    r.put("exportAudit", audit);
+                    r.put("gravProjected", Boolean.TRUE.equals(audit.get("gravOk")));
+                } catch (Exception e) {
+                    r.put("exportAuditSoftFail", e.getMessage());
+                }
+            }
             if (TYPE_API_PUBLISH.equals(t.getTicketType())) {
                 Map<String, Object> pub = autoPublishApiAfterApprove(t);
                 r.put("autoPublished", true);

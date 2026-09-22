@@ -220,6 +220,52 @@ public class GravitinoClient {
     }
 
     /**
+     * 出库审计：给表打 lh.export.* 属性（soft-fail 由调用方处理）。
+     * Grav TableChange setProperty；无表坐标时返回 ok=false。
+     */
+    public Map<String, Object> setTableProperties(String metalake, String catalog, String schema, String table,
+                                                  Map<String, String> properties) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", false);
+        if (StrUtil.hasBlank(metalake, catalog, schema, table) || properties == null || properties.isEmpty()) {
+            out.put("message", "metalake/catalog/schema/table/properties 不能为空");
+            return out;
+        }
+        String fullName = catalog + "." + schema + "." + table;
+        out.put("fullName", metalake + "." + fullName);
+        try {
+            JSONArray updates = new JSONArray();
+            properties.forEach((k, v) -> {
+                if (StrUtil.isBlank(k)) {
+                    return;
+                }
+                JSONObject sp = new JSONObject();
+                sp.set("@type", "setProperty");
+                sp.set("property", k);
+                sp.set("value", v == null ? "" : v);
+                updates.add(sp);
+            });
+            if (updates.isEmpty()) {
+                out.put("message", "无有效属性");
+                return out;
+            }
+            JSONObject put = new JSONObject();
+            put.set("updates", updates);
+            String path = "/api/metalakes/" + enc(metalake)
+                    + "/catalogs/" + enc(catalog)
+                    + "/schemas/" + enc(schema)
+                    + "/tables/" + enc(table);
+            String resp = authPut(path, put.toString());
+            out.put("ok", true);
+            out.put("response", resp);
+        } catch (Exception e) {
+            out.put("ok", false);
+            out.put("message", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+        }
+        return out;
+    }
+
+    /**
      * Gravitino ≥1.0 ACL：用户 ← Role ← Privilege（SELECT_TABLE 等）。
      * 旧路径 {@code /permissions/user/...} 已不存在（会 404）。
      */

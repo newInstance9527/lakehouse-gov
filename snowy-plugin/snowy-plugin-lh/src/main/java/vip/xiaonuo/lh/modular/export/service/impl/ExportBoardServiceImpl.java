@@ -13,7 +13,9 @@ import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlNode;
 import vip.xiaonuo.lh.modular.etl.mapper.IgEtlDagMapper;
 import vip.xiaonuo.lh.modular.etl.mapper.IgEtlNodeMapper;
+import vip.xiaonuo.lh.modular.export.service.ExportAuditService;
 import vip.xiaonuo.lh.modular.export.service.ExportBoardService;
+import vip.xiaonuo.lh.modular.export.service.ExportLifecycleService;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -44,6 +46,10 @@ public class ExportBoardServiceImpl implements ExportBoardService {
     private IgEtlDagMapper dagMapper;
     @Resource
     private IgEtlNodeMapper nodeMapper;
+    @Resource
+    private ExportAuditService exportAuditService;
+    @Resource
+    private ExportLifecycleService exportLifecycleService;
 
     @Override
     public Map<String, Object> summary(String ws) {
@@ -150,12 +156,25 @@ public class ExportBoardServiceImpl implements ExportBoardService {
     @Override
     public Map<String, Object> audit(String ws, String ticketNo) {
         String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
-        List<Map<String, Object>> jobs = jobs(workspace, null, ticketNo);
+        List<Map<String, Object>> formal = exportAuditService.list(workspace, ticketNo);
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("ok", true);
+        r.put("ws", workspace);
+        if (!formal.isEmpty()) {
+            r.put("source", "gov_export_audit");
+            r.put("count", formal.size());
+            r.put("lines", formal);
+            r.put("hint", "出库审计已正式落库 gov_export_audit；Grav 表属性为 soft-fail 标记");
+            return r;
+        }
+        // 回落：历史无审计行时仍给 soft 摘要，便于过渡
+        List<Map<String, Object>> jobRows = jobs(workspace, null, ticketNo);
         List<Map<String, Object>> lines = new ArrayList<>();
-        for (Map<String, Object> j : jobs) {
+        for (Map<String, Object> j : jobRows) {
             Map<String, Object> line = new LinkedHashMap<>();
             line.put("time", j.get("approvedAt") != null ? j.get("approvedAt") : j.get("createTime"));
             line.put("ticketNo", j.get("ticketNo"));
+            line.put("eventType", "soft");
             line.put("src", j.get("src"));
             line.put("target", j.get("target"));
             line.put("purpose", j.get("purpose"));
@@ -164,13 +183,16 @@ public class ExportBoardServiceImpl implements ExportBoardService {
             line.put("dagCode", j.get("dagCode"));
             lines.add(line);
         }
-        Map<String, Object> r = new LinkedHashMap<>();
-        r.put("ok", true);
-        r.put("ws", workspace);
+        r.put("source", "soft");
         r.put("count", lines.size());
         r.put("lines", lines);
-        r.put("hint", "一期审计摘要来自申请单+ETL 挂接；Gravitino 出库审计正式落库待二期");
+        r.put("hint", "暂无正式审计行；已回落申请单+ETL 摘要。新审批/到期停作业会写入 gov_export_audit");
         return r;
+    }
+
+    @Override
+    public Map<String, Object> expireDue() {
+        return exportLifecycleService.expireDue();
     }
 
     private Map<String, Object> toJobRow(ApplyTicket t, JSONObject p, Map<String, Object> sink) {
@@ -271,7 +293,9 @@ public class ExportBoardServiceImpl implements ExportBoardService {
         if ("pending".equals(ticketStatus)) {
             return "warn";
         }
-        if ("rejected".equals(ticketStatus) || "cancelled".equals(ticketStatus)) {
+        if ("expired".equals(ticketStatus)
+                || "rejected".equals(ticketStatus)
+                || "cancelled".equals(ticketStatus)) {
             return "urgent";
         }
         if (expiresAt != null) {

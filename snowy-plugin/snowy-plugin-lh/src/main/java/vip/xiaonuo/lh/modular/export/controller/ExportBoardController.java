@@ -5,8 +5,10 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.export.service.ExportBoardService;
 
@@ -36,11 +38,18 @@ public class ExportBoardController {
         return CommonResult.data(exportBoardService.jobs(ws, status, q));
     }
 
-    @Operation(summary = "出湖审计摘要（一期 soft）")
+    @Operation(summary = "出库审计（gov_export_audit 正式落库）")
     @GetMapping("/lh/export/audit")
     public CommonResult<Map<String, Object>> audit(
             @RequestParam(required = false) String ws,
             @RequestParam(required = false) String ticketNo) {
         return CommonResult.data(exportBoardService.audit(ws, ticketNo));
+    }
+
+    @Operation(summary = "到期停作业（扫描 expires_at 已过的 lake_export）")
+    @CommonLog("出湖到期停作业")
+    @PostMapping("/lh/export/expire-due")
+    public CommonResult<Map<String, Object>> expireDue() {
+        return CommonResult.data(exportBoardService.expireDue());
     }
 }
