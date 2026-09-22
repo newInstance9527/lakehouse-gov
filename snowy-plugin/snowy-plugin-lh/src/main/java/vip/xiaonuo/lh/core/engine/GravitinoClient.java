@@ -119,6 +119,8 @@ public class GravitinoClient {
                 col.type = stringifyType(c.get("type"));
                 col.nullable = !Boolean.FALSE.equals(c.getBool("nullable"));
                 col.comment = c.getStr("comment");
+                col.properties = extractColumnProperties(c);
+                col.masked = detectColumnMasked(c, col.properties);
                 gt.columns.add(col);
             }
         }
@@ -394,6 +396,54 @@ public class GravitinoClient {
         return String.valueOf(type);
     }
 
+    private static Map<String, String> extractColumnProperties(JSONObject c) {
+        Map<String, String> props = new LinkedHashMap<>();
+        if (c == null) {
+            return props;
+        }
+        Object raw = c.get("properties");
+        if (raw instanceof JSONObject jo) {
+            for (String key : jo.keySet()) {
+                Object v = jo.get(key);
+                if (v != null) {
+                    props.put(key, String.valueOf(v));
+                }
+            }
+        }
+        return props;
+    }
+
+    /**
+     * Grav 列是否挂了脱敏/敏感策略（properties 或显式字段；非列名启发式）。
+     */
+    public static boolean detectColumnMasked(JSONObject c, Map<String, String> properties) {
+        if (c != null) {
+            if (Boolean.TRUE.equals(c.getBool("masked")) || Boolean.TRUE.equals(c.getBool("mask"))) {
+                return true;
+            }
+            String maskExpr = firstStr(c, "mask", "maskExpression", "columnMask");
+            if (StrUtil.isNotBlank(maskExpr) && !"false".equalsIgnoreCase(maskExpr) && !"none".equalsIgnoreCase(maskExpr)) {
+                return true;
+            }
+        }
+        if (properties == null || properties.isEmpty()) {
+            return false;
+        }
+        for (Map.Entry<String, String> e : properties.entrySet()) {
+            String k = e.getKey() == null ? "" : e.getKey().toLowerCase(Locale.ROOT);
+            String v = e.getValue() == null ? "" : e.getValue().trim();
+            if (k.contains("mask") || k.contains("pii") || k.contains("sensitive")
+                    || "lh.mask".equals(k) || "security.mask".equals(k)) {
+                if (StrUtil.isBlank(v) || "false".equalsIgnoreCase(v) || "0".equals(v)
+                        || "none".equalsIgnoreCase(v) || "off".equalsIgnoreCase(v)) {
+                    continue;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String authGet(String path) {
         return authRequest("GET", path, null);
     }
@@ -555,5 +605,9 @@ public class GravitinoClient {
         public String type;
         public boolean nullable = true;
         public String comment;
+        /** 引擎/Catalog 带回的列属性（含 mask 策略键） */
+        public Map<String, String> properties = new LinkedHashMap<>();
+        /** true：Grav/策略声明该列需脱敏（非列名启发式） */
+        public boolean masked;
     }
 }

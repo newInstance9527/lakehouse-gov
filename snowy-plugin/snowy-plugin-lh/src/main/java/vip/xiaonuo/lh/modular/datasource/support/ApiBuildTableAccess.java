@@ -30,7 +30,7 @@ public class ApiBuildTableAccess {
 
     private static final String NOT_DELETE = "NOT_DELETE";
 
-    /** 列名启发式敏感提示（与即席一致；非 Grav 列 ACL） */
+    /** 列名启发式敏感提示（构建台 UI 提示；真 mask 标以即席/引擎策略为准，见 CpQueryColumnMaskResolver） */
     private static final Pattern MASK_HINT = Pattern.compile(
             "(mobile|phone|id_card|idcard|email|password|secret|token)", Pattern.CASE_INSENSITIVE);
 
@@ -98,7 +98,7 @@ public class ApiBuildTableAccess {
             }
             if (MASK_HINT.matcher(col.getName()).find()) {
                 col.setSensitive(true);
-                col.setMaskedHint("敏感列名提示（启发式，非引擎列 ACL）");
+                col.setMaskedHint("敏感列名提示（启发式，非引擎列 mask；真脱敏见即席 maskSource）");
             } else {
                 col.setSensitive(false);
             }

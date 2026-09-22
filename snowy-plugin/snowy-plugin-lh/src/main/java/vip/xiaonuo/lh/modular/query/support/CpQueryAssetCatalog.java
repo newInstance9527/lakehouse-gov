@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
  * 即席目录：门户资产 + 查询面过滤。树节点 name / sampleSql 使用 Trino 查询 FQN，不是 Grav 登记名。
@@ -39,8 +38,6 @@ public class CpQueryAssetCatalog {
 
     private static final String NOT_DELETE = "NOT_DELETE";
     private static final List<String> VISIBLE_STATUS = List.of("active", "syncing", "degraded");
-    private static final Pattern MASK_HINT = Pattern.compile(
-            "(mobile|phone|id_card|idcard|email|password|secret|token)", Pattern.CASE_INSENSITIVE);
 
     @Resource
     private GovAssetMapper assetMapper;
@@ -54,6 +51,8 @@ public class CpQueryAssetCatalog {
     private GravitinoClient gravitinoClient;
     @Resource
     private CpTrinoQueryCatalogService queryCatalogService;
+    @Resource
+    private CpQueryColumnMaskResolver columnMaskResolver;
 
     public List<Map<String, Object>> schemaTree(String ws) {
         String workspace = StrUtil.blankToDefault(StrUtil.trim(ws), "default");
@@ -177,7 +176,7 @@ public class CpQueryAssetCatalog {
                     + ref.getGravCatalog() + "；须映射到 Trino 实况 ∩ 白名单）");
         }
         boolean drift = ref.getDriftFlag() != null && ref.getDriftFlag() == 1;
-        List<Map<String, Object>> cols = parseColumns(ref.getColumnsJson());
+        List<Map<String, Object>> cols = parseColumns(ref.getColumnsJson(), ref.getId());
         if (drift || cols.isEmpty()) {
             cols = refreshColumns(ref, cols);
         }
@@ -193,7 +192,7 @@ public class CpQueryAssetCatalog {
         try {
             GravitinoClient.GravTable gt = gravitinoClient.loadTable(
                     ref.getGravMetalake(), ref.getGravCatalog(), ref.getGravSchema(), ref.getGravTable());
-            List<Map<String, Object>> fresh = mapGravColumns(gt);
+            List<Map<String, Object>> fresh = mapGravColumns(gt, ref.getId());
             if (fresh.isEmpty()) {
                 return fallback;
             }
@@ -442,7 +441,7 @@ public class CpQueryAssetCatalog {
         return (List<Map<String, Object>>) node.get("children");
     }
 
-    private static List<Map<String, Object>> parseColumns(String json) {
+    private List<Map<String, Object>> parseColumns(String json, String gravAssetId) {
         if (StrUtil.isBlank(json) || "[]".equals(json.trim()) || "null".equalsIgnoreCase(json.trim())) {
             return new ArrayList<>();
         }
@@ -458,14 +457,17 @@ public class CpQueryAssetCatalog {
             if (c == null || StrUtil.isBlank(c.getStr("name"))) {
                 continue;
             }
-            cols.add(columnVo(c.getStr("name"), c.getStr("type"),
+            String name = c.getStr("name");
+            boolean masked = Boolean.TRUE.equals(c.getBool("masked"))
+                    || columnMaskResolver.isColumnMasked(gravAssetId, name);
+            cols.add(columnVo(name, c.getStr("type"),
                     !Boolean.FALSE.equals(c.getBool("nullable")),
-                    c.getStr("comment"), Boolean.TRUE.equals(c.getBool("partition"))));
+                    c.getStr("comment"), Boolean.TRUE.equals(c.getBool("partition")), masked));
         }
         return cols;
     }
 
-    private static List<Map<String, Object>> mapGravColumns(GravitinoClient.GravTable gt) {
+    private List<Map<String, Object>> mapGravColumns(GravitinoClient.GravTable gt, String gravAssetId) {
         List<Map<String, Object>> cols = new ArrayList<>();
         if (gt == null || gt.columns == null) {
             return cols;
@@ -482,20 +484,21 @@ public class CpQueryAssetCatalog {
                     break;
                 }
             }
-            cols.add(columnVo(c.name, c.type, c.nullable, c.comment, partition));
+            boolean masked = c.masked || columnMaskResolver.isColumnMasked(gravAssetId, c.name);
+            cols.add(columnVo(c.name, c.type, c.nullable, c.comment, partition, masked));
         }
         return cols;
     }
 
     private static Map<String, Object> columnVo(String name, String type, boolean nullable,
-                                                String comment, boolean partition) {
+                                                String comment, boolean partition, boolean masked) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", name);
         m.put("type", StrUtil.blankToDefault(type, "unknown"));
         m.put("nullable", nullable);
         m.put("comment", StrUtil.nullToEmpty(comment));
         m.put("partition", partition);
-        m.put("masked", MASK_HINT.matcher(name).find());
+        m.put("masked", masked);
         return m;
     }
 

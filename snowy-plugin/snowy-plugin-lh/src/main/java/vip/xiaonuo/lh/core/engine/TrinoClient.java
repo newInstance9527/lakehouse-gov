@@ -145,6 +145,8 @@ public class TrinoClient {
             long elapsedMs = 0L;
             List<Map<String, Object>> stages = new ArrayList<>();
             StatsSnap snap = collect(body, columns, rows, o.maxRows);
+            List<String> engineMaskCols = new ArrayList<>();
+            absorbEngineMaskCols(body, columns, engineMaskCols);
             processedBytes = Math.max(processedBytes, snap.processedBytes);
             elapsedMs = Math.max(elapsedMs, snap.elapsedMs);
             pushStage(stages, o.onProgress, "queued", trinoId, processedBytes, rows.size(), elapsedMs, snap.state);
@@ -170,6 +172,7 @@ public class TrinoClient {
                 JSONObject page = JSONUtil.parseObj(nreq.execute().body());
                 throwIfTrinoError(page);
                 snap = collect(page, columns, rows, o.maxRows);
+                absorbEngineMaskCols(page, columns, engineMaskCols);
                 processedBytes = Math.max(processedBytes, snap.processedBytes);
                 elapsedMs = Math.max(elapsedMs, snap.elapsedMs);
                 truncated = snap.truncated;
@@ -201,6 +204,9 @@ public class TrinoClient {
             result.put("truncated", truncated);
             result.put("maxScanBytes", o.maxScanBytes > 0 ? o.maxScanBytes : null);
             result.put("stages", stages);
+            if (!engineMaskCols.isEmpty()) {
+                result.put("maskCols", List.copyOf(engineMaskCols));
+            }
             pushStage(stages, o.onProgress, "finished", trinoId, processedBytes, rows.size(), elapsedMs, "FINISHED");
             return result;
         } catch (CommonException e) {
@@ -354,6 +360,61 @@ public class TrinoClient {
             }
         }
         return snap;
+    }
+
+    /**
+     * 吸收引擎/代理在响应中显式回传的 mask 列（标准 Trino 无此字段；有则优先于门户投影）。
+     */
+    private static void absorbEngineMaskCols(JSONObject page, List<String> columns, List<String> sink) {
+        if (page == null || sink == null) {
+            return;
+        }
+        Object raw = page.get("maskCols");
+        if (raw == null) {
+            raw = page.get("maskedColumns");
+        }
+        if (raw instanceof JSONArray arr) {
+            for (int i = 0; i < arr.size(); i++) {
+                String n = arr.getStr(i);
+                if (StrUtil.isNotBlank(n) && !containsIgnoreCase(sink, n)) {
+                    sink.add(n.trim());
+                }
+            }
+        } else if (raw instanceof String s && StrUtil.isNotBlank(s)) {
+            for (String part : s.split("[,;\\s]+")) {
+                if (StrUtil.isNotBlank(part) && !containsIgnoreCase(sink, part)) {
+                    sink.add(part.trim());
+                }
+            }
+        }
+        if (page.containsKey("columns")) {
+            JSONArray cols = page.getJSONArray("columns");
+            for (int i = 0; i < cols.size(); i++) {
+                JSONObject c = cols.getJSONObject(i);
+                if (c == null) {
+                    continue;
+                }
+                boolean masked = Boolean.TRUE.equals(c.getBool("masked"))
+                        || Boolean.TRUE.equals(c.getBool("mask"));
+                String name = c.getStr("name");
+                if (masked && StrUtil.isNotBlank(name) && !containsIgnoreCase(sink, name)) {
+                    sink.add(name.trim());
+                }
+            }
+        }
+        // 列顺序已在 columns 中时，不强制补全
+        if (columns != null && !columns.isEmpty() && sink.isEmpty()) {
+            // no-op：标准 Trino 无 per-column mask 标记
+        }
+    }
+
+    private static boolean containsIgnoreCase(List<String> list, String name) {
+        for (String s : list) {
+            if (s != null && s.equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void pushStage(List<Map<String, Object>> stages, ProgressListener listener,

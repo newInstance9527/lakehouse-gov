@@ -27,6 +27,7 @@ import vip.xiaonuo.lh.modular.query.param.CpQuerySavedSaveParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
 import vip.xiaonuo.lh.modular.query.support.CpQueryAssetCatalog;
 import vip.xiaonuo.lh.modular.query.support.CpQueryCatalogGuard;
+import vip.xiaonuo.lh.modular.query.support.CpQueryColumnMaskResolver;
 import vip.xiaonuo.lh.modular.query.support.CpQueryConcurrencyGuard;
 import vip.xiaonuo.lh.modular.query.support.CpQueryParamBinder;
 import vip.xiaonuo.lh.modular.query.support.CpQueryPrincipalMapper;
@@ -41,7 +42,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 /**
  * 即席查询：治理拦截 → Trino → cp_query_exec 审计
@@ -54,8 +54,6 @@ public class CpQueryServiceImpl implements CpQueryService {
 
     private static final int DEFAULT_MAX_ROWS = 1000;
     private static final int HISTORY_DEFAULT = 30;
-    private static final Pattern MASK_HINT = Pattern.compile(
-            "(mobile|phone|id_card|idcard|email|password|secret|token)", Pattern.CASE_INSENSITIVE);
 
     @Resource
     private CpQueryExecMapper execMapper;
@@ -71,6 +69,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private CpQueryAssetCatalog assetCatalog;
     @Resource
     private CpTrinoQueryCatalogService queryCatalogService;
+    @Resource
+    private CpQueryColumnMaskResolver columnMaskResolver;
 
     @Override
     public Map<String, Object> exec(CpQueryExecParam param) {
@@ -271,7 +271,12 @@ public class CpQueryServiceImpl implements CpQueryService {
         List<String> columns = (List<String>) exec.getOrDefault("columns", List.of());
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> rows = (List<Map<String, Object>>) exec.getOrDefault("rows", List.of());
-        List<String> maskCols = detectMaskCols(columns);
+        CpQueryColumnMaskResolver.MaskResult mask = columnMaskResolver.resolve(
+                columns,
+                sql,
+                StrUtil.blankToDefault(user.id, principal.trinoUser),
+                CpQueryColumnMaskResolver.engineMaskColsFromExec(exec));
+        List<String> maskCols = mask.maskCols;
 
         String trinoQid = str(exec.get("trinoQueryId"));
         Long scanBytes = asLong(exec.get("scanBytes"));
@@ -330,6 +335,11 @@ public class CpQueryServiceImpl implements CpQueryService {
         out.put("maxRows", maxRows);
         out.put("maskCols", maskCols);
         out.put("masked", !maskCols.isEmpty());
+        out.put("maskSource", mask.maskSource);
+        out.put("maskDegraded", mask.maskDegraded);
+        if (StrUtil.isNotBlank(mask.maskMessage)) {
+            out.put("maskMessage", mask.maskMessage);
+        }
         out.put("degraded", degraded);
         if (degraded) {
             out.put("message", exec.get("message"));
@@ -933,19 +943,6 @@ public class CpQueryServiceImpl implements CpQueryService {
     private static String summarize(String sql) {
         String one = sql.replaceAll("\\s+", " ").trim();
         return one.length() > 80 ? one.substring(0, 80) + "…" : one;
-    }
-
-    private static List<String> detectMaskCols(List<String> columns) {
-        List<String> mask = new ArrayList<>();
-        if (columns == null) {
-            return mask;
-        }
-        for (String c : columns) {
-            if (c != null && MASK_HINT.matcher(c).find()) {
-                mask.add(c);
-            }
-        }
-        return mask;
     }
 
     private static List<Map<String, Object>> columnMeta(List<String> columns, List<String> maskCols) {
