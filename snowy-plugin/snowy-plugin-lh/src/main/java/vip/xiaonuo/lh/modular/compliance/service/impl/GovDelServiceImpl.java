@@ -42,7 +42,9 @@ import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelTargetVo;
 import vip.xiaonuo.lh.modular.compliance.service.GovDelService;
 import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.core.engine.ClickHouseClient;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcTableActionParam;
 import vip.xiaonuo.lh.modular.lifecycle.result.GovLcRunVo;
@@ -62,8 +64,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 合规删除 P0：请求/计划/执行流水/证据落库；引擎侧硬删为占位，
- * Iceberg 合并与定向快照过期通过 {@link GovLcService} 复用生命周期执行面。
+ * 合规删除 P0：请求/计划/执行流水/证据落库。
+ * Iceberg 硬删与 dry-run COUNT 走 Trino；CK dry-run COUNT 走 HTTP；
+ * 合并与定向快照过期通过 {@link GovLcService} 复用生命周期执行面。
  */
 @Service
 public class GovDelServiceImpl implements GovDelService {
@@ -164,6 +167,8 @@ public class GovDelServiceImpl implements GovDelService {
     private GovLineageService govLineageService;
     @Resource
     private TrinoClient trinoClient;
+    @Resource
+    private ClickHouseClient clickHouseClient;
     @Resource
     private LhProperties lhProperties;
 
@@ -374,37 +379,102 @@ public class GovDelServiceImpl implements GovDelService {
         }
         Date now = new Date();
         long rows = 0;
+        int engineOk = 0;
+        int stubOk = 0;
+        int engineFail = 0;
         List<Map<String, Object>> rowsByCarrier = new ArrayList<>();
         for (GovDelTarget t : targets) {
             if ("excluded".equals(t.getStatus())) {
                 continue;
             }
-            if (t.getRowsEst() == null || t.getRowsEst() == 0L) {
-                // 占位估算：Trino/CK COUNT 未接线前给出可复现的量级，供审批评估影响面
-                t.setRowsEst(estimateRows(req, t));
-                t.setUpdateTime(now);
-                targetMapper.updateById(t);
+            CountHit hit = countHit(req, t);
+            t.setRowsEst(hit.rows());
+            t.setUpdateTime(now);
+            targetMapper.updateById(t);
+            rows += hit.rows();
+            if (hit.degraded()) {
+                engineFail++;
+                stubOk++;
+            } else if ("stub".equals(hit.source())) {
+                stubOk++;
+            } else {
+                engineOk++;
             }
-            rows += t.getRowsEst();
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("targetId", t.getId());
             m.put("carrier", t.getCarrier());
             m.put("objectFqn", t.getObjectFqn());
             m.put("mode", t.getMode());
-            m.put("rowsEst", t.getRowsEst());
+            m.put("rowsEst", hit.rows());
+            m.put("source", hit.source());
+            m.put("degraded", hit.degraded());
+            if (StrUtil.isNotBlank(hit.message())) {
+                m.put("message", hit.message());
+            }
             rowsByCarrier.add(m);
         }
-        logExec(req, null, "plan.dry-run", "success", param.getExecKey(), null,
-                "试算命中 " + rows + " 行 / " + rowsByCarrier.size() + " 个载体（估算，未接引擎）");
+        boolean estimated = stubOk > 0 || engineFail > 0;
+        String source = "trino=" + engineOk + " · stub=" + stubOk
+                + (engineFail > 0 ? " · engineFail=" + engineFail : "");
+        logExec(req, null, "plan.dry-run", engineFail > 0 ? "warn" : "success", param.getExecKey(), null,
+                "试算命中 " + rows + " 行 / " + rowsByCarrier.size() + " 个载体（" + source + "）");
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("reqNo", req.getReqNo());
         out.put("rowsEstTotal", rows);
         out.put("targets", rowsByCarrier);
         out.put("snapshotNotice", "执行将对涉及的 Iceberg 表定向 expire_snapshots(retain_last=1)，这些表短期失去时间旅行回滚窗口");
-        out.put("estimated", true);
-        out.put("source", "stub；Trino/CK COUNT 接线见 doc/合规删除-跨模块待办.md");
+        out.put("estimated", estimated);
+        out.put("engineCounted", engineOk);
+        out.put("stubCounted", stubOk);
+        out.put("source", source);
         return out;
+    }
+
+    /**
+     * Iceberg → Trino COUNT；CK → ClickHouse HTTP COUNT；其余载体仍用可复现占位。
+     * 引擎不可达时 soft-fail 回退占位，不阻断试算。
+     */
+    private CountHit countHit(GovDelRequest req, GovDelTarget t) {
+        String carrier = StrUtil.blankToDefault(t.getCarrier(), "");
+        if ("iceberg".equals(carrier)) {
+            long n = countRemaining(req, t);
+            if (n >= 0) {
+                return new CountHit(n, "trino", false, null);
+            }
+            long stub = estimateRows(req, t);
+            return new CountHit(stub, "stub", true, "Trino COUNT 失败，已回退占位");
+        }
+        if ("ck".equals(carrier)) {
+            long n = countClickHouse(req, t);
+            if (n >= 0) {
+                return new CountHit(n, "ck", false, null);
+            }
+            long stub = estimateRows(req, t);
+            return new CountHit(stub, "stub", true, "ClickHouse COUNT 失败，已回退占位");
+        }
+        return new CountHit(estimateRows(req, t), "stub", false, null);
+    }
+
+    private long countClickHouse(GovDelRequest req, GovDelTarget t) {
+        try {
+            String column = subjectColumn(t);
+            if (StrUtil.isBlank(column)) {
+                return -1L;
+            }
+            GovLcMetadataSql.TableRef ref = GovDelCkSql.parse(t.getObjectFqn());
+            String sql = GovDelCkSql.count(ref.schema(), ref.table(), column, req.getSubjectIdHash());
+            Map<String, Object> exec = clickHouseClient.query(sql);
+            if (Boolean.TRUE.equals(exec.get("degraded"))) {
+                return -1L;
+            }
+            return parseCnt(exec);
+        } catch (Exception e) {
+            return -1L;
+        }
+    }
+
+    private record CountHit(long rows, String source, boolean degraded, String message) {
     }
 
     // ───────────────────────────── 审批与执行 ─────────────────────────────
@@ -690,30 +760,47 @@ public class GovDelServiceImpl implements GovDelService {
     private long countRemaining(GovDelRequest req, GovDelTarget t) {
         try {
             String column = subjectColumn(t);
+            if (StrUtil.isBlank(column)) {
+                return -1L;
+            }
             GovLcMetadataSql.TableRef ref = GovLcMetadataSql.parse(t.getObjectFqn(), icebergCatalog());
             String sql = GovDelIcebergSql.count(ref.schema(), ref.table(), column, req.getSubjectIdHash());
             Map<String, Object> exec = trinoJob(sql, ref);
             if (Boolean.TRUE.equals(exec.get("degraded"))) {
                 return -1L;
             }
-            Object rows = exec.get("rows");
-            if (!(rows instanceof List<?> list) || list.isEmpty() || !(list.get(0) instanceof Map<?, ?> map)) {
-                return -1L;
-            }
-            Object cnt = map.get("cnt");
-            if (cnt == null) {
-                for (Map.Entry<?, ?> e : map.entrySet()) {
-                    if ("cnt".equalsIgnoreCase(String.valueOf(e.getKey()))) {
-                        cnt = e.getValue();
-                        break;
-                    }
+            return parseCnt(exec);
+        } catch (Exception e) {
+            return -1L;
+        }
+    }
+
+    private static long parseCnt(Map<String, Object> exec) {
+        Object rows = exec.get("rows");
+        if (!(rows instanceof List<?> list) || list.isEmpty() || !(list.get(0) instanceof Map<?, ?> map)) {
+            return -1L;
+        }
+        Object cnt = map.get("cnt");
+        if (cnt == null) {
+            for (Map.Entry<?, ?> e : map.entrySet()) {
+                if ("cnt".equalsIgnoreCase(String.valueOf(e.getKey()))) {
+                    cnt = e.getValue();
+                    break;
                 }
             }
-            if (cnt instanceof Number n) {
-                return n.longValue();
-            }
-            return Long.parseLong(String.valueOf(cnt));
-        } catch (Exception e) {
+        }
+        if (cnt == null && map.size() == 1) {
+            cnt = map.values().iterator().next();
+        }
+        if (cnt instanceof Number n) {
+            return n.longValue();
+        }
+        if (cnt == null) {
+            return -1L;
+        }
+        try {
+            return Long.parseLong(String.valueOf(cnt).trim());
+        } catch (NumberFormatException e) {
             return -1L;
         }
     }
@@ -1648,7 +1735,7 @@ public class GovDelServiceImpl implements GovDelService {
         return s.substring(0, Math.min(5, s.length() - 2)) + "***" + s.substring(s.length() - 2);
     }
 
-    /** 估算占位：由 (主体 hash + 对象) 派生的稳定伪值，仅供审批看影响面量级。 */
+    /** 估算占位：非 Iceberg/CK 载体，或引擎不可达时的可复现量级。 */
     private long estimateRows(GovDelRequest req, GovDelTarget t) {
         int h = Math.abs((req.getSubjectIdHash() + t.getObjectFqn()).hashCode());
         return switch (t.getCarrier()) {
