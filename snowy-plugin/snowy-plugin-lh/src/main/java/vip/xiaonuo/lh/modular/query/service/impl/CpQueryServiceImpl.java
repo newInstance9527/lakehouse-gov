@@ -31,6 +31,7 @@ import vip.xiaonuo.lh.modular.query.support.CpQueryColumnMaskResolver;
 import vip.xiaonuo.lh.modular.query.support.CpQueryConcurrencyGuard;
 import vip.xiaonuo.lh.modular.query.support.CpQueryParamBinder;
 import vip.xiaonuo.lh.modular.query.support.CpQueryPrincipalMapper;
+import vip.xiaonuo.lh.modular.query.support.CpQueryRowFilterInjector;
 import vip.xiaonuo.lh.modular.query.support.CpQueryScanGuard;
 import vip.xiaonuo.lh.modular.query.support.CpTrinoQueryCatalogService;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
@@ -71,6 +72,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private CpTrinoQueryCatalogService queryCatalogService;
     @Resource
     private CpQueryColumnMaskResolver columnMaskResolver;
+    @Resource
+    private CpQueryRowFilterInjector rowFilterInjector;
 
     @Override
     public Map<String, Object> exec(CpQueryExecParam param) {
@@ -184,6 +187,19 @@ public class CpQueryServiceImpl implements CpQueryService {
 
         long t0 = System.currentTimeMillis();
         CpQueryPrincipalMapper.Principal principal = resolvePrincipal(user);
+        String subjectForPolicy = StrUtil.blankToDefault(user.id, principal.trinoUser);
+        CpQueryRowFilterInjector.InjectResult rowFilter =
+                rowFilterInjector.inject(sql, subjectForPolicy);
+        String sqlOriginal = sql;
+        if (rowFilter.applied && StrUtil.isNotBlank(rowFilter.sql) && !rowFilter.sql.equals(sql)) {
+            sql = rowFilter.sql;
+            row.setSqlText(sql);
+            row.setSqlHash(DigestUtil.sha256Hex(sql).substring(0, 32));
+            row.setSqlSummary(summarize(sqlOriginal) + " · 行级注入");
+            row.setUpdateTime(new Date());
+            execMapper.updateById(row);
+        }
+
         TrinoClient.ExecuteOptions opts = TrinoClient.ExecuteOptions.human(principal.trinoUser, maxRows);
         opts.catalog = row.getCatalogName();
         opts.schema = row.getSchemaName();
@@ -301,8 +317,15 @@ public class CpQueryServiceImpl implements CpQueryService {
             row.setStatusLabel("⚠ 超扫描限额");
             row.setErrorMsg(StrUtil.maxLength(scanOver, 1000));
         } else {
+            StringBuilder label = new StringBuilder("✓");
+            if (!maskCols.isEmpty()) {
+                label.append(" · 脱敏 ").append(maskCols.size()).append("列");
+            }
+            if (rowFilter.applied && !rowFilter.predicates.isEmpty()) {
+                label.append(" · 行级 ").append(rowFilter.predicates.size()).append("表");
+            }
             row.setStatus("ok");
-            row.setStatusLabel(maskCols.isEmpty() ? "✓" : "✓ · 脱敏 " + maskCols.size() + "列");
+            row.setStatusLabel(label.toString());
         }
         row.setTrinoQueryId(trinoQid);
         row.setRowCount(rows == null ? 0 : rows.size());
@@ -339,6 +362,17 @@ public class CpQueryServiceImpl implements CpQueryService {
         out.put("maskDegraded", mask.maskDegraded);
         if (StrUtil.isNotBlank(mask.maskMessage)) {
             out.put("maskMessage", mask.maskMessage);
+        }
+        out.put("rowFilterApplied", rowFilter.applied);
+        out.put("rowFilterSource", rowFilter.source);
+        out.put("rowFilterDegraded", rowFilter.degraded);
+        out.put("rowFilterPredicates", rowFilter.predicates);
+        if (StrUtil.isNotBlank(rowFilter.message)) {
+            out.put("rowFilterMessage", rowFilter.message);
+        }
+        if (rowFilter.applied) {
+            out.put("sqlOriginal", sqlOriginal);
+            out.put("sqlRewritten", true);
         }
         out.put("degraded", degraded);
         if (degraded) {
