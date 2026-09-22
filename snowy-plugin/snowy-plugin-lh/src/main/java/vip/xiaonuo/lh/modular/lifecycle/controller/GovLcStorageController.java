@@ -94,7 +94,7 @@ public class GovLcStorageController {
         return CommonResult.data(govLcStorageService.showback(ws, range, group));
     }
 
-    @Operation(summary = "重跑存储画像日批（Trino 元数据 → gov_lc_table_stat）")
+    @Operation(summary = "重跑存储画像日批（Trino 元数据 → gov_lc_table_stat + VM lh_table_storage_*）")
     @CommonLog("存储画像日批")
     @PostMapping({"/lh/lifecycle/storage/collect/rerun", "/api/governance/lifecycle/storage/collect/rerun"})
     public CommonResult<Map<String, Object>> collectRerun(@RequestParam(required = false) String ws) {

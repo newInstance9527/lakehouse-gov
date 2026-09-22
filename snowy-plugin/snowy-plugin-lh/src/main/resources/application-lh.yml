@@ -116,3 +116,11 @@ lh:
   catalog:
     # false=注册资产时 objectName 必须已在 ig_ds_table；true=允许手工对象名
     allow-manual-object-name: false
+  lifecycle:
+    spark-catalog: iceberg
+    # 空=跳过 VM；配好后日批直写 /api/v1/import/prometheus（禁 Pushgateway）
+    vm-import-url: ""
+    vm-import-timeout-ms: 15000
+    profile-daily-enabled: false
+    profile-table-timeout-ms: 60000
+    profile-max-tables: 200

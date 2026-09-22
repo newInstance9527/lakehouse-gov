@@ -349,6 +349,13 @@ public class LhProperties {
         private boolean profileDailyEnabled = false;
         private int profileTableTimeoutMs = 60_000;
         private int profileMaxTables = 200;
+        /**
+         * VictoriaMetrics 根地址（例 http://vm:8428）。空=跳过写 VM，仅回写 gov_lc_table_stat。
+         * 写入路径：{@code {url}/api/v1/import/prometheus}，不引 Pushgateway。
+         */
+        private String vmImportUrl = "";
+        /** VM import 超时（毫秒） */
+        private int vmImportTimeoutMs = 15_000;
     }
 
     /**

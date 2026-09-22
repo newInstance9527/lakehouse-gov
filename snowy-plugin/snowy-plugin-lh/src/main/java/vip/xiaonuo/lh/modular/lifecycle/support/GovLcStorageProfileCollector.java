@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
+import vip.xiaonuo.lh.core.engine.VictoriaMetricsClient;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcPolicy;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcRun;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcTableStat;
@@ -19,6 +20,9 @@ import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -28,8 +32,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * {@code job.storage.profile_daily}：Trino 读 Iceberg {@code $files}/{@code $snapshots}，回写 {@code gov_lc_table_stat}。
- * VictoriaMetrics 不在本作业写入。DS 流程同名，只作调度锚点；写库在门户，避免 Spark 作业直连业务库。
+ * {@code job.storage.profile_daily}：Trino 读 Iceberg {@code $files}/{@code $snapshots}/{@code $partitions}，
+ * 回写 {@code gov_lc_table_stat}，并直写 VictoriaMetrics {@code lh_table_storage_*}（禁 Pushgateway）。
+ * DS 同名流程只作调度锚点；写库/写 VM 在门户，避免 Spark 作业直连业务库。
  */
 @Component
 public class GovLcStorageProfileCollector {
@@ -41,6 +46,8 @@ public class GovLcStorageProfileCollector {
     @Resource
     private TrinoClient trinoClient;
     @Resource
+    private VictoriaMetricsClient victoriaMetricsClient;
+    @Resource
     private LhProperties lhProperties;
     @Resource
     private GovLcDsLauncher dsLauncher;
@@ -50,6 +57,8 @@ public class GovLcStorageProfileCollector {
     private GovLcTableStatMapper tableStatMapper;
     @Resource
     private GovLcRunMapper runMapper;
+    @Resource
+    private GovLcStorageAdviceWriter adviceWriter;
 
     /** 日批：画像治理范围内的表，并登记 DS 流程 {@code job.storage.profile_daily}。 */
     public Map<String, Object> runDaily(String ws) {
@@ -73,8 +82,10 @@ public class GovLcStorageProfileCollector {
         int partial = 0;
         int failed = 0;
         List<Map<String, Object>> rows = new ArrayList<>();
+        List<String> metricLines = new ArrayList<>();
+        long dayTs = GovLcStorageMetricsFormatter.dayCutEpochMs(Instant.now());
         for (String fqn : targets) {
-            Map<String, Object> one = profileOne(workspace, fqn, catalog);
+            Map<String, Object> one = profileOne(workspace, fqn, catalog, dayTs, metricLines);
             rows.add(one);
             String st = String.valueOf(one.get("collectStatus"));
             if ("ok".equals(st)) {
@@ -85,6 +96,12 @@ public class GovLcStorageProfileCollector {
                 failed++;
             }
         }
+
+        Map<String, Object> vmResult = writeVm(metricLines);
+        int vmSamples = metricLines.isEmpty() ? 0 : metricLines.size();
+        Date adviceDt = java.sql.Date.valueOf(
+                LocalDate.ofInstant(Instant.ofEpochMilli(dayTs), ZoneOffset.UTC));
+        List<Map<String, Object>> adviceRows = adviceWriter.upsertFromProfile(workspace, adviceDt, rows);
 
         String runId = null;
         String workflow = null;
@@ -109,8 +126,12 @@ public class GovLcStorageProfileCollector {
             Map<String, Object> metrics = launch.toMetricsJson();
             metrics.put("job", profileJobName(workspace));
             metrics.put("jobPrincipal", dsLauncher.jobPrincipal());
-            metrics.put("writeback", "gov_lc_table_stat");
-            metrics.put("vm", false);
+            metrics.put("writeback", "gov_lc_table_stat+vm");
+            metrics.put("vm", Boolean.TRUE.equals(vmResult.get("ok")) && !Boolean.TRUE.equals(vmResult.get("skipped")));
+            metrics.put("vmResult", vmResult);
+            metrics.put("vmSampleLines", vmSamples);
+            metrics.put("vmDayCutEpochMs", dayTs);
+            metrics.put("adviceCount", adviceRows.size());
             metrics.put("ok", ok);
             metrics.put("partial", partial);
             metrics.put("failed", failed);
@@ -123,6 +144,9 @@ public class GovLcStorageProfileCollector {
             runId = id;
             workflow = launch.workflowCode;
             degraded = launch.degraded;
+            if (Boolean.TRUE.equals(vmResult.get("degraded"))) {
+                degraded = true;
+            }
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -137,11 +161,23 @@ public class GovLcStorageProfileCollector {
         out.put("partial", partial);
         out.put("failed", failed);
         out.put("tables", rows);
-        out.put("source", "trino $files/$snapshots → gov_lc_table_stat");
+        out.put("vm", vmResult);
+        out.put("vmDayCutEpochMs", dayTs);
+        out.put("adviceCount", adviceRows.size());
+        out.put("advice", adviceRows);
+        out.put("source", "trino $files/$snapshots/$partitions → gov_lc_table_stat + lh_table_storage_*");
         return out;
     }
 
-    private Map<String, Object> profileOne(String ws, String fqn, String defaultCatalog) {
+    private Map<String, Object> writeVm(List<String> metricLines) {
+        String body = GovLcStorageMetricsFormatter.joinBody(metricLines);
+        Map<String, Object> result = victoriaMetricsClient.importPrometheus(body);
+        result.put("sampleLines", metricLines.size());
+        return result;
+    }
+
+    private Map<String, Object> profileOne(String ws, String fqn, String defaultCatalog,
+                                           long dayTs, List<String> metricLines) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("tableFqn", fqn);
         GovLcMetadataSql.TableRef ref;
@@ -151,6 +187,7 @@ public class GovLcStorageProfileCollector {
             mark(ws, fqn, null, "failed", e.getMessage(), null);
             row.put("collectStatus", "failed");
             row.put("error", e.getMessage());
+            row.put("vmWritten", false);
             return row;
         }
         try {
@@ -159,6 +196,7 @@ public class GovLcStorageProfileCollector {
                 mark(ws, fqn, ref, "failed", "Trino 不可达或 $files 无结果", null);
                 row.put("collectStatus", "failed");
                 row.put("error", "trino $files");
+                row.put("vmWritten", false);
                 return row;
             }
             long fileCount = nvl(longVal(files, "file_count"));
@@ -202,8 +240,22 @@ public class GovLcStorageProfileCollector {
                 error = join(error, "$snapshots: " + StrUtil.maxLength(e.getMessage(), 160));
             }
 
+            Integer partitions = null;
+            try {
+                Map<String, Object> parts = query(GovLcMetadataSql.partitions(ref), ref);
+                if (parts == null) {
+                    status = "partial";
+                    error = join(error, "$partitions 不可用");
+                } else {
+                    partitions = (int) Math.min(Integer.MAX_VALUE, nvl(longVal(parts, "partition_count")));
+                }
+            } catch (Exception e) {
+                status = "partial";
+                error = join(error, "$partitions: " + StrUtil.maxLength(e.getMessage(), 160));
+            }
+
             Snapshot written = mark(ws, fqn, ref, status, error, new Numbers(
-                    active, total, reclaimable, fileCount, avg, small, snapshots));
+                    active, total, reclaimable, fileCount, avg, small, snapshots, partitions));
             row.put("collectStatus", status);
             row.put("activeBytes", active);
             row.put("totalBytes", total);
@@ -212,9 +264,21 @@ public class GovLcStorageProfileCollector {
             row.put("avgFileBytes", avg);
             row.put("smallFileCount", small);
             row.put("snapshotCount", snapshots);
+            row.put("partitionCount", partitions);
             row.put("growth7dPct", written.growth);
             if (error != null) {
                 row.put("error", error);
+            }
+            // 失败隔离：failed 不写 VM；ok/partial 才入趋势点
+            boolean writeVm = !"failed".equals(status);
+            row.put("vmWritten", writeVm);
+            if (writeVm) {
+                double ratio = fileCount <= 0 ? 0.0 : (small * 1.0 / fileCount);
+                metricLines.addAll(GovLcStorageMetricsFormatter.format(
+                        new GovLcStorageMetricsFormatter.Sample(
+                                fqn, ws, written.layer, active, total, reclaimable,
+                                fileCount, avg, ratio, snapshots, partitions),
+                        dayTs));
             }
             return row;
         } catch (Exception e) {
@@ -222,6 +286,7 @@ public class GovLcStorageProfileCollector {
             mark(ws, fqn, ref, "failed", StrUtil.maxLength(e.getMessage(), 400), null);
             row.put("collectStatus", "failed");
             row.put("error", e.getMessage());
+            row.put("vmWritten", false);
             return row;
         }
     }
@@ -262,9 +327,11 @@ public class GovLcStorageProfileCollector {
         stat.setCollectError(error == null ? "" : StrUtil.maxLength(error, 500));
         stat.setCollectedAt(now);
         stat.setUpdateTime(now);
+        String layer = existing == null ? null : existing.getLayer();
         if (policy != null) {
             if (StrUtil.isNotBlank(policy.getLayer())) {
                 stat.setLayer(policy.getLayer());
+                layer = policy.getLayer();
             }
             if (StrUtil.isBlank(stat.getPolicyLabel()) && policy.getKeepDays() != null) {
                 stat.setPolicyLabel(policy.getKeepDays() + "天快照");
@@ -299,7 +366,7 @@ public class GovLcStorageProfileCollector {
         } else {
             tableStatMapper.updateById(stat);
         }
-        return new Snapshot(growth);
+        return new Snapshot(growth, layer);
     }
 
     private BigDecimal growthSince(long previous, Date previousAt, long current, Date now) {
@@ -435,9 +502,9 @@ public class GovLcStorageProfileCollector {
     }
 
     private record Numbers(long activeBytes, long totalBytes, long reclaimableBytes, long fileCount,
-                           long avgFileBytes, long smallFileCount, Integer snapshotCount) {
+                           long avgFileBytes, long smallFileCount, Integer snapshotCount, Integer partitionCount) {
     }
 
-    private record Snapshot(BigDecimal growth) {
+    private record Snapshot(BigDecimal growth, String layer) {
     }
 }

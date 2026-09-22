@@ -18,6 +18,7 @@ class GovLcProfileSqlTest {
         assertTrue(GovLcMetadataSql.files(ref).contains("33554432"));
         assertTrue(GovLcMetadataSql.allFiles(ref).contains("\"s_order$all_files\""));
         assertTrue(GovLcMetadataSql.snapshots(ref).contains("\"s_order$snapshots\""));
+        assertTrue(GovLcMetadataSql.partitions(ref).contains("\"s_order$partitions\""));
     }
 
     @Test

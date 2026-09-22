@@ -1,7 +1,7 @@
 package vip.xiaonuo.lh.modular.lifecycle.support;
 
 /**
- * Trino 读 Iceberg 元数据表的 SQL（{@code $files} / {@code $all_files} / {@code $snapshots}）。
+ * Trino 读 Iceberg 元数据表的 SQL（{@code $files} / {@code $all_files} / {@code $snapshots} / {@code $partitions}）。
  * 不扫数据层。
  */
 public final class GovLcMetadataSql {
@@ -51,6 +51,10 @@ public final class GovLcMetadataSql {
 
     public static String snapshots(TableRef table) {
         return "SELECT count(*) AS snapshot_count FROM " + meta(table, "snapshots");
+    }
+
+    public static String partitions(TableRef table) {
+        return "SELECT count(*) AS partition_count FROM " + meta(table, "partitions");
     }
 
     static String meta(TableRef table, String suffix) {
