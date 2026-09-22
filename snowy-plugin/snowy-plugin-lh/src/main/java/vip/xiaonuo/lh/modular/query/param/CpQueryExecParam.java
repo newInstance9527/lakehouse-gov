@@ -33,7 +33,7 @@ public class CpQueryExecParam {
     @Schema(description = "强制跳过扫描治理（仅调试；生产应拒绝）")
     private Boolean force;
 
-    @Schema(description = "提升配额：true 时扫描硬顶 50GB，否则 adhoc 默认 10GB")
+    @Schema(description = "提升配额：true 时申请硬顶 50GB；须持有已审批 scan_elevate→SCAN_ELEVATE grant（超管免审）")
     private Boolean elevated;
 
     @Schema(description = "命名参数 :name / ${name}")

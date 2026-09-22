@@ -29,6 +29,7 @@ import vip.xiaonuo.lh.modular.query.support.CpQueryAssetCatalog;
 import vip.xiaonuo.lh.modular.query.support.CpQueryCatalogGuard;
 import vip.xiaonuo.lh.modular.query.support.CpQueryColumnMaskResolver;
 import vip.xiaonuo.lh.modular.query.support.CpQueryConcurrencyGuard;
+import vip.xiaonuo.lh.modular.query.support.CpQueryElevateGate;
 import vip.xiaonuo.lh.modular.query.support.CpQueryParamBinder;
 import vip.xiaonuo.lh.modular.query.support.CpQueryPrincipalMapper;
 import vip.xiaonuo.lh.modular.query.support.CpQueryRowFilterInjector;
@@ -36,6 +37,7 @@ import vip.xiaonuo.lh.modular.query.support.CpQueryScanGuard;
 import vip.xiaonuo.lh.modular.query.support.CpTrinoQueryCatalogService;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
+import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.ArrayList;
 import java.util.Date;
@@ -74,6 +76,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private CpQueryColumnMaskResolver columnMaskResolver;
     @Resource
     private CpQueryRowFilterInjector rowFilterInjector;
+    @Resource
+    private SecAuthGrantService secAuthGrantService;
 
     @Override
     public Map<String, Object> exec(CpQueryExecParam param) {
@@ -127,7 +131,23 @@ public class CpQueryServiceImpl implements CpQueryService {
         execMapper.insert(row);
 
         boolean force = Boolean.TRUE.equals(param.getForce());
-        boolean elevated = Boolean.TRUE.equals(param.getElevated());
+        boolean elevatedRequested = Boolean.TRUE.equals(param.getElevated());
+        boolean elevatedAllowed = secAuthGrantService.hasScanElevateGrant();
+        boolean elevated = elevatedRequested && elevatedAllowed;
+        if (elevatedRequested && !elevatedAllowed) {
+            String msg = CpQueryElevateGate.denyMessage();
+            row.setStatus("blocked");
+            row.setStatusLabel("⚠ 抬额未授权");
+            row.setErrorMsg(StrUtil.maxLength(msg, 1000));
+            row.setDurMs(0L);
+            row.setRowCount(0);
+            row.setUpdateTime(new Date());
+            execMapper.updateById(row);
+            Map<String, Object> denied = CpQueryElevateGate.deniedPayload();
+            denied.put("queryId", queryId);
+            denied.put("id", row.getId());
+            return denied;
+        }
         // 查询面闸门：会话 catalog + SQL 三元组 catalog 须 ∈ 白名单 ∩ SHOW CATALOGS
         String deniedCat = CpQueryCatalogGuard.firstDenied(sql, row.getCatalogName(), queryCatalogService);
         if (deniedCat != null) {
@@ -352,6 +372,7 @@ public class CpQueryServiceImpl implements CpQueryService {
         out.put("scanLimit", formatBytes(limitBytes));
         out.put("scanOverLimit", scanOverLimit);
         out.put("elevated", elevated);
+        out.put("elevatedAllowed", elevatedAllowed);
         out.put("durMs", dur);
         out.put("duration", formatDur(dur));
         out.put("truncated", exec.get("truncated"));
@@ -859,6 +880,8 @@ public class CpQueryServiceImpl implements CpQueryService {
         out.put("audits", audits.size() > 10 ? audits.subList(0, 10) : audits);
         out.put("scanDefaultBytes", CpQueryScanGuard.ADHOC_DEFAULT_SCAN_BYTES);
         out.put("scanHardBytes", CpQueryScanGuard.PLATFORM_HARD_SCAN_BYTES);
+        out.put("scanElevateAllowed", secAuthGrantService.hasScanElevateGrant());
+        out.put("scanElevateApplyPath", CpQueryElevateGate.APPLY_PATH);
         out.put("adhocMaxConcurrent", CpQueryConcurrencyGuard.max());
         out.put("adhocConcurrent", CpQueryConcurrencyGuard.current());
         return out;

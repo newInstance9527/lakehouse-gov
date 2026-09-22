@@ -76,6 +76,18 @@ public interface SecAuthGrantService {
     }
 
     /**
+     * 即席扫描抬额：当前用户是否持有未过期的 SCAN_ELEVATE（resource_type=adhoc）。
+     * 超管视为已授权。
+     */
+    boolean hasScanElevateGrant();
+
+    /**
+     * 审批通过写即席扫描抬额 grant（privilege=SCAN_ELEVATE，resource=adhoc/platform）。
+     */
+    SecAuthGrant createScanElevateFromApproval(String ticketId, String subjectId,
+                                               Date expiresAt, String remark);
+
+    /**
      * 审批通过写 grant。
      * @param resourceType asset/datasource/etl/metric（已启用）
      * @param resourceId 资源主键

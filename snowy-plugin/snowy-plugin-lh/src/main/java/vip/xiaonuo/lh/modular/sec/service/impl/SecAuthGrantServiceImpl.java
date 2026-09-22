@@ -41,6 +41,10 @@ import java.util.Set;
 public class SecAuthGrantServiceImpl implements SecAuthGrantService {
 
     private static final String NOT_DELETE = "NOT_DELETE";
+    /** 与 {@link vip.xiaonuo.lh.modular.query.support.CpQueryElevateGate} 对齐 */
+    private static final String SCAN_ELEVATE_PRIVILEGE = "SCAN_ELEVATE";
+    private static final String SCAN_ELEVATE_RESOURCE_TYPE = "adhoc";
+    private static final String SCAN_ELEVATE_RESOURCE_ID = "platform";
 
     @Resource
     private SecAuthGrantMapper grantMapper;
@@ -333,6 +337,74 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             return false;
         }
         return LhOwnerGuard.isOwner(user, metric.getCreateUser(), metric.getOwner());
+    }
+
+    @Override
+    public boolean hasScanElevateGrant() {
+        if (LhLoginUsers.isSuperAdmin()) {
+            return true;
+        }
+        String userId;
+        try {
+            userId = LhLoginUsers.requireUserId();
+        } catch (CommonException e) {
+            return false;
+        }
+        Date now = new Date();
+        Long cnt = grantMapper.selectCount(baseActiveGrantQw(userId, now)
+                .eq(SecAuthGrant::getPrivilege, SCAN_ELEVATE_PRIVILEGE)
+                .eq(SecAuthGrant::getResourceType, SCAN_ELEVATE_RESOURCE_TYPE)
+                .eq(SecAuthGrant::getResourceId, SCAN_ELEVATE_RESOURCE_ID));
+        return cnt != null && cnt > 0;
+    }
+
+    @Override
+    public SecAuthGrant createScanElevateFromApproval(String ticketId, String subjectId,
+                                                      Date expiresAt, String remark) {
+        if (StrUtil.isBlank(subjectId)) {
+            throw new CommonException("抬额授权缺少主体");
+        }
+        // 同主体已有未过期抬额则续期/覆盖备注，避免重复行
+        Date now = new Date();
+        SecAuthGrant existing = grantMapper.selectOne(new QueryWrapper<SecAuthGrant>().lambda()
+                .eq(SecAuthGrant::getDeleteFlag, NOT_DELETE)
+                .eq(SecAuthGrant::getStatus, "active")
+                .eq(SecAuthGrant::getSubjectType, "user")
+                .eq(SecAuthGrant::getSubjectId, subjectId)
+                .eq(SecAuthGrant::getPrivilege, SCAN_ELEVATE_PRIVILEGE)
+                .eq(SecAuthGrant::getResourceType, SCAN_ELEVATE_RESOURCE_TYPE)
+                .eq(SecAuthGrant::getResourceId, SCAN_ELEVATE_RESOURCE_ID)
+                .and(w -> w.isNull(SecAuthGrant::getExpiresAt).or().gt(SecAuthGrant::getExpiresAt, now))
+                .last("LIMIT 1"));
+        if (existing != null) {
+            existing.setTicketId(StrUtil.blankToDefault(ticketId, existing.getTicketId()));
+            existing.setExpiresAt(expiresAt);
+            existing.setRemark(StrUtil.blankToDefault(remark, existing.getRemark()));
+            existing.setUpdateTime(now);
+            existing.setUpdateUser(LhLoginUsers.requireUserId());
+            grantMapper.updateById(existing);
+            return existing;
+        }
+        SecAuthGrant g = new SecAuthGrant();
+        g.setId(IdUtil.getSnowflakeNextIdStr());
+        g.setRevision(1);
+        g.setStatus("active");
+        g.setWs("default");
+        g.setRemark(remark);
+        g.setTicketId(ticketId);
+        g.setSubjectType("user");
+        g.setSubjectId(subjectId);
+        g.setResourceType(SCAN_ELEVATE_RESOURCE_TYPE);
+        g.setResourceId(SCAN_ELEVATE_RESOURCE_ID);
+        g.setPrivilege(SCAN_ELEVATE_PRIVILEGE);
+        g.setGravProjected(0);
+        g.setEffectiveAt(now);
+        g.setExpiresAt(expiresAt);
+        g.setDeleteFlag(NOT_DELETE);
+        g.setCreateTime(now);
+        g.setCreateUser(LhLoginUsers.requireUserId());
+        grantMapper.insert(g);
+        return g;
     }
 
     @Override

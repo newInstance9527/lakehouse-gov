@@ -53,6 +53,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public static final String TYPE_API_SUBSCRIBE = "api_subscribe";
     /** 指标发布 / 变更 / 查询权限 */
     public static final String TYPE_METRIC = "metric";
+    /** 即席扫描抬额（硬顶 50GB） */
+    public static final String TYPE_SCAN_ELEVATE = "scan_elevate";
 
     @Resource
     private ApplyTicketMapper ticketMapper;
@@ -98,7 +100,39 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (TYPE_METRIC.equals(type)) {
             return createMetric(param, userId);
         }
+        if (TYPE_SCAN_ELEVATE.equals(type)) {
+            return createScanElevate(param, userId);
+        }
         return createTableRead(param, userId, type);
+    }
+
+    /**
+     * 即席扫描抬额：审批通过后写 SCAN_ELEVATE grant，exec elevated=true 才放行硬顶 50GB。
+     */
+    private ApplyTicket createScanElevate(ApplyTicketCreateParam param, String userId) {
+        ApplyTicket t = newTicketShell(userId, TYPE_SCAN_ELEVATE, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("SE-"));
+        t.setExpiresAt(parseExpire(param.getExpireLabel()));
+        JSONObject payload = new JSONObject();
+        payload.set("privilege", "SCAN_ELEVATE");
+        payload.set("resourceType", "adhoc");
+        payload.set("resourceId", "platform");
+        payload.set("scanHardLimitBytes", 50L * 1024 * 1024 * 1024);
+        payload.set("expireLabel", param.getExpireLabel());
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            t.setTitle("扫描抬额 · 硬顶 50GB");
+        }
+        if (StrUtil.isBlank(t.getReason())) {
+            t.setReason(StrUtil.blankToDefault(param.getReason(), "即席查询需抬升扫描限额至平台硬顶 50GB"));
+        }
+        ticketMapper.insert(t);
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAssetId(null);
+        item.setAction("SCAN_ELEVATE");
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
     }
 
     /**
@@ -491,6 +525,32 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
             r.put("grantId", null);
             r.put("gravProjected", false);
             r.put("issuedKey", issued);
+            return r;
+        }
+        // 即席扫描抬额：写 SCAN_ELEVATE grant
+        if (TYPE_SCAN_ELEVATE.equals(t.getTicketType())) {
+            SecAuthGrant grant = secAuthGrantService.createScanElevateFromApproval(
+                    t.getId(),
+                    t.getApplicant(),
+                    t.getExpiresAt(),
+                    StrUtil.blankToDefault(param.getRemark(), "scan elevate · " + t.getTicketNo()));
+            item.setResultGrantId(grant.getId());
+            item.setUpdateTime(new Date());
+            itemMapper.updateById(item);
+            t.setStatus("approved");
+            t.setApprovedBy(LhLoginUsers.requireUserId());
+            t.setApprovedAt(new Date());
+            t.setRemark(param.getRemark());
+            t.setUpdateTime(new Date());
+            t.setUpdateUser(LhLoginUsers.requireUserId());
+            ticketMapper.updateById(t);
+            r.put("ticket", t);
+            r.put("ticketNo", t.getTicketNo());
+            r.put("grantId", grant.getId());
+            r.put("gravProjected", false);
+            r.put("privilege", "SCAN_ELEVATE");
+            r.put("resourceType", "adhoc");
+            r.put("resourceId", "platform");
             return r;
         }
 
@@ -901,6 +961,10 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
         if ("metric".equals(t) || "metric_publish".equals(t) || "metrics".equals(t)) {
             return TYPE_METRIC;
+        }
+        if ("scan_elevate".equals(t) || "elevated".equals(t) || "elevate".equals(t)
+                || "scan_quota".equals(t) || "adhoc_elevate".equals(t)) {
+            return TYPE_SCAN_ELEVATE;
         }
         return t;
     }
