@@ -124,8 +124,11 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     public Page<GovAssetVo> page(GovAssetPageParam param) {
         QueryWrapper<GovAsset> qw = new QueryWrapper<GovAsset>().checkSqlInjection();
         qw.lambda().eq(GovAsset::getDeleteFlag, NOT_DELETE);
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovAsset::getWs, ws);
+        // 软过滤：传 ws 则按归属筛；空则「查看全部」（非 Catalog 硬隔离）
+        String ws = StrUtil.trim(param.getWs());
+        if (StrUtil.isNotBlank(ws)) {
+            qw.lambda().eq(GovAsset::getWs, ws);
+        }
 
         String layer = param.getLayer();
         if (StrUtil.isNotBlank(layer)) {

@@ -101,10 +101,13 @@ public class GovMetricServiceImpl implements GovMetricService {
 
     @Override
     public Map<String, Object> overview(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
-        List<GovMetric> all = metricMapper.selectList(new QueryWrapper<GovMetric>().lambda()
-                .eq(GovMetric::getWs, workspace)
-                .eq(GovMetric::getDeleteFlag, NOT_DELETE));
+        var qw = new QueryWrapper<GovMetric>().lambda()
+                .eq(GovMetric::getDeleteFlag, NOT_DELETE);
+        String workspace = StrUtil.trim(ws);
+        if (StrUtil.isNotBlank(workspace)) {
+            qw.eq(GovMetric::getWs, workspace);
+        }
+        List<GovMetric> all = metricMapper.selectList(qw);
         long atom = all.stream().filter(m -> "原子".equals(m.getKind())).count();
         long derive = all.stream().filter(m -> "衍生".equals(m.getKind())).count();
         long composite = all.stream().filter(m -> "复合".equals(m.getKind())).count();
@@ -115,7 +118,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         out.put("deriveCount", derive);
         out.put("compositeCount", composite);
         out.put("activeCount", active);
-        out.put("ws", workspace);
+        out.put("ws", StrUtil.isNotBlank(workspace) ? workspace : "all");
         return out;
     }
 
@@ -123,8 +126,11 @@ public class GovMetricServiceImpl implements GovMetricService {
     public Page<GovMetricVo> page(GovMetricPageParam param) {
         QueryWrapper<GovMetric> qw = new QueryWrapper<GovMetric>().checkSqlInjection();
         qw.lambda().eq(GovMetric::getDeleteFlag, NOT_DELETE);
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovMetric::getWs, ws);
+        // 软过滤：传 ws 则按归属筛；空则「查看全部」
+        String ws = StrUtil.trim(param.getWs());
+        if (StrUtil.isNotBlank(ws)) {
+            qw.lambda().eq(GovMetric::getWs, ws);
+        }
         if (StrUtil.isNotBlank(param.getDomain()) && !"all".equalsIgnoreCase(param.getDomain())) {
             qw.lambda().eq(GovMetric::getDomainCode, normalizeDomain(param.getDomain()));
         }

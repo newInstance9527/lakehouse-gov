@@ -120,8 +120,11 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
         QueryWrapper<IgEtlDag> qw = new QueryWrapper<>();
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(IgEtlDag::getWs, ws);
+        // 软过滤：传 ws 则按归属筛；空则「查看全部」
+        String ws = StrUtil.trim(param.getWs());
+        if (StrUtil.isNotBlank(ws)) {
+            qw.lambda().eq(IgEtlDag::getWs, ws);
+        }
         if (StrUtil.isNotBlank(param.getStatus())) {
             qw.lambda().eq(IgEtlDag::getStatus, param.getStatus());
         }
