@@ -107,6 +107,70 @@ public class GovLcStorageAdviceWriter {
         );
     }
 
+    /**
+     * 主台提交 compact/expire：建议 open → linked，并写入 {@code linked_run_id}。
+     * 优先按 adviceId；否则按 ws+fqtn+kind 取最新 open。
+     */
+    public String linkToRun(String adviceId, String ws, String fqtn, String kind, String runId) {
+        if (StrUtil.isBlank(runId)) {
+            return null;
+        }
+        GovLcStorageAdvice row = null;
+        if (StrUtil.isNotBlank(adviceId)) {
+            row = adviceMapper.selectById(adviceId.trim());
+            if (row != null && !NOT_DELETE.equals(row.getDeleteFlag())) {
+                row = null;
+            }
+        }
+        if (row == null && StrUtil.isNotBlank(fqtn) && StrUtil.isNotBlank(kind)) {
+            row = adviceMapper.selectOne(new QueryWrapper<GovLcStorageAdvice>().lambda()
+                    .eq(GovLcStorageAdvice::getWs, StrUtil.blankToDefault(ws, "default"))
+                    .eq(GovLcStorageAdvice::getFqtn, fqtn.trim())
+                    .eq(GovLcStorageAdvice::getKind, kind.trim())
+                    .eq(GovLcStorageAdvice::getDeleteFlag, NOT_DELETE)
+                    .eq(GovLcStorageAdvice::getStatus, "open")
+                    .orderByDesc(GovLcStorageAdvice::getCreateTime)
+                    .last("LIMIT 1"));
+        }
+        if (row == null) {
+            return null;
+        }
+        String st = StrUtil.blankToDefault(row.getStatus(), "open");
+        if ("done".equals(st) || "ignored".equals(st)) {
+            return row.getId();
+        }
+        row.setStatus("linked");
+        row.setLinkedRunId(runId);
+        row.setRevision(row.getRevision() == null ? 2 : row.getRevision() + 1);
+        row.setUpdateTime(new Date());
+        adviceMapper.updateById(row);
+        return row.getId();
+    }
+
+    /** 作业成功：linked → done（按 linked_run_id）。 */
+    public int markDoneByRunId(String runId) {
+        if (StrUtil.isBlank(runId)) {
+            return 0;
+        }
+        List<GovLcStorageAdvice> rows = adviceMapper.selectList(new QueryWrapper<GovLcStorageAdvice>().lambda()
+                .eq(GovLcStorageAdvice::getLinkedRunId, runId.trim())
+                .eq(GovLcStorageAdvice::getDeleteFlag, NOT_DELETE)
+                .in(GovLcStorageAdvice::getStatus, List.of("open", "linked")));
+        if (rows == null || rows.isEmpty()) {
+            return 0;
+        }
+        Date now = new Date();
+        int n = 0;
+        for (GovLcStorageAdvice row : rows) {
+            row.setStatus("done");
+            row.setRevision(row.getRevision() == null ? 2 : row.getRevision() + 1);
+            row.setUpdateTime(now);
+            adviceMapper.updateById(row);
+            n++;
+        }
+        return n;
+    }
+
     private static String human(long bytes) {
         if (bytes >= 1L << 40) {
             return String.format("%.1f TiB", bytes / (double) (1L << 40));

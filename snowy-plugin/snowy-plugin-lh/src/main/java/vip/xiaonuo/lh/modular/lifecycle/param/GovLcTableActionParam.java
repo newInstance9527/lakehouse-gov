@@ -22,6 +22,9 @@ public class GovLcTableActionParam {
     @Schema(description = "备注")
     private String remark;
 
+    @Schema(description = "存储趋势建议 id（gov_lc_storage_advice）；执行时回写 linked_run_id")
+    private String adviceId;
+
     @Schema(description = "合规删除请求号。与 retainLast 同时出现时才允许覆盖过期参数")
     private String reqNo;
 

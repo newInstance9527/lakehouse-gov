@@ -35,6 +35,7 @@ import vip.xiaonuo.lh.modular.compliance.entity.GovDelRequest;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelRequestMapper;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcDsLauncher;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcRunEffectWriter;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageAdviceWriter;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -79,6 +80,8 @@ public class GovLcServiceImpl implements GovLcService {
     @Resource
     private GovLcStorageService govLcStorageService;
     @Resource
+    private GovLcStorageAdviceWriter adviceWriter;
+    @Resource
     private GovLcRunEffectWriter effectWriter;
     @Resource
     private GovDelRequestMapper govDelRequestMapper;
@@ -86,8 +89,13 @@ public class GovLcServiceImpl implements GovLcService {
     @Override
     public Map<String, Object> overview(String ws) {
         String workspace = wsOrDefault(ws);
+        // 总存储 = 物理口径，与 /lh/lifecycle/storage/summary 同源（三口径）
+        Map<String, Object> summary = govLcStorageService.summary(workspace, "30d");
+        long physicalBytes = toLong(summary.get("physicalBytes"));
+        long activeBytes = toLong(summary.get("activeBytes"));
+        long reclaimableBytes = toLong(summary.get("reclaimableBytes"));
+
         List<GovLcTableStat> stats = listStats(workspace);
-        long totalBytes = stats.stream().mapToLong(s -> nvl(s.getSizeBytes())).sum();
         long warnTables = stats.stream().filter(s -> !"ok".equalsIgnoreCase(StrUtil.blankToDefault(s.getStatus(), "ok"))).count();
         long archiveCandidates = stats.stream()
                 .filter(s -> StrUtil.containsIgnoreCase(StrUtil.blankToDefault(s.getPolicyLabel(), ""), "归档"))
@@ -104,8 +112,13 @@ public class GovLcServiceImpl implements GovLcService {
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ws", workspace);
-        out.put("totalStorageBytes", totalBytes);
-        out.put("totalStorageTb", bytesToTb(totalBytes));
+        out.put("totalStorageBytes", physicalBytes);
+        out.put("totalStorageTb", bytesToTb(physicalBytes));
+        out.put("storageCaliber", "physical");
+        out.put("activeBytes", activeBytes);
+        out.put("reclaimableBytes", reclaimableBytes);
+        out.put("reclaimablePct", summary.get("reclaimablePct"));
+        out.put("storageRange", summary.get("range"));
         out.put("monthCleanedGb", cleanedApproxGb);
         out.put("compactSuccessCount", compactCount);
         out.put("archiveCandidatePartitions", Math.max(38, archiveCandidates * 10));
@@ -116,6 +129,7 @@ public class GovLcServiceImpl implements GovLcService {
                 "warmTb", 2.8,
                 "coldTb", 0.3
         ));
+        out.put("caliberNote", "总存储=物理口径；与 storage/summary 同源（active+reclaimable=physical）");
         return out;
     }
 
@@ -509,6 +523,21 @@ public class GovLcServiceImpl implements GovLcService {
             run.setStatus("queued");
         }
         runMapper.insert(run);
+        // 建议闭环：open → linked + linked_run_id
+        try {
+            String linkedAdviceId = adviceWriter.linkToRun(
+                    param.getAdviceId(), workspace, fqn, kind, runId);
+            if (StrUtil.isNotBlank(linkedAdviceId)) {
+                Map<String, Object> metrics = StrUtil.isNotBlank(run.getMetricsJson())
+                        ? new LinkedHashMap<>(JSONUtil.parseObj(run.getMetricsJson()))
+                        : new LinkedHashMap<>();
+                metrics.put("adviceId", linkedAdviceId);
+                run.setMetricsJson(JSONUtil.toJsonStr(metrics));
+                runMapper.updateById(run);
+            }
+        } catch (Exception ignored) {
+            // 建议回写失败不阻断主路径
+        }
         return toRunVo(run);
     }
 
@@ -532,6 +561,14 @@ public class GovLcServiceImpl implements GovLcService {
             if (pid != null && StrUtil.isNotBlank(String.valueOf(pid))) {
                 dsId = String.valueOf(pid);
             } else {
+                // 无 DS 实例可同步时，若已成功仍闭合建议
+                if ("success".equals(run.getStatus())) {
+                    try {
+                        adviceWriter.markDoneByRunId(run.getId());
+                    } catch (Exception ignored) {
+                        /* ignore */
+                    }
+                }
                 return toRunVo(run);
             }
         }
@@ -578,6 +615,18 @@ public class GovLcServiceImpl implements GovLcService {
                 run.setRevision(nvlInt(run.getRevision()) + 1);
             }
             changed = true;
+        }
+        // 建议闭环：linked → done
+        if ("success".equals(mapped) && !Boolean.TRUE.equals(metrics.get("adviceDone"))) {
+            try {
+                int n = adviceWriter.markDoneByRunId(run.getId());
+                metrics.put("adviceDone", true);
+                metrics.put("adviceDoneCount", n);
+                changed = true;
+            } catch (Exception e) {
+                metrics.put("adviceDoneError", e.getMessage());
+                changed = true;
+            }
         }
         if (changed) {
             run.setMetricsJson(JSONUtil.toJsonStr(metrics));
@@ -797,6 +846,20 @@ public class GovLcServiceImpl implements GovLcService {
             return 0;
         }
         return BigDecimal.valueOf(bytes / (1024.0 * 1024 * 1024 * 1024)).setScale(2, RoundingMode.HALF_UP).doubleValue();
+    }
+
+    private long toLong(Object v) {
+        if (v == null) {
+            return 0L;
+        }
+        if (v instanceof Number n) {
+            return n.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(v).trim());
+        } catch (Exception e) {
+            return 0L;
+        }
     }
 
     private Date monthStart() {
