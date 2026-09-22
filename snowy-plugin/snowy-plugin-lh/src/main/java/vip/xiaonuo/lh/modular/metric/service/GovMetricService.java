@@ -2,6 +2,7 @@ package vip.xiaonuo.lh.modular.metric.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricCompileParam;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricMaterializeParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricPageParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTransitionParam;
@@ -9,6 +10,7 @@ import vip.xiaonuo.lh.modular.metric.param.GovMetricTrialParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricUpsertParam;
 import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,4 +43,13 @@ public interface GovMetricService {
 
     /** 手动触发日波动采样（运维） */
     Map<String, Object> sampleRerun(String ws);
+
+    /** 核心看板卡片：未对账 / 分区失败 → ready=false（数据未就绪） */
+    Map<String, Object> board(String ws);
+
+    /** 物化登记列表 */
+    List<Map<String, Object>> listMaterialize(String metricCode, String ws);
+
+    /** 登记物化目标并可选启动 DS 作业模板 */
+    Map<String, Object> materialize(String metricCode, GovMetricMaterializeParam param);
 }

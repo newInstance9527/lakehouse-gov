@@ -504,6 +504,14 @@ public class LhProperties {
         private int sampleMaxMetrics = 50;
         /** 日波动绝对值 ≥ 该百分比标 anomaly（默认 20） */
         private double anomalyThresholdPct = 20d;
+        /** 物化 / 对账作业 SA 名（写 DS 参数） */
+        private String jobPrincipal = "job.metric";
+        /** 物化 DS 任务超时（分钟） */
+        private int materializeTimeoutMinutes = 60;
+        /** DS 不可达时仍登记 job_ref（soft-fail） */
+        private boolean allowDegradedMaterialize = true;
+        /** 热路径 / 看板检查 recon_partition 失败的回看小时数 */
+        private int reconLookbackHours = 48;
     }
 
     /**

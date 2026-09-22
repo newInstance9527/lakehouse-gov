@@ -15,7 +15,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
+import cn.hutool.core.util.StrUtil;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricCompileParam;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricMaterializeParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricPageParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTransitionParam;
@@ -23,7 +25,9 @@ import vip.xiaonuo.lh.modular.metric.param.GovMetricTrialParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricUpsertParam;
 import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
+import vip.xiaonuo.lh.modular.recon.support.ReconPartitionService;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -36,11 +40,19 @@ public class GovMetricController {
 
     @Resource
     private GovMetricService govMetricService;
+    @Resource
+    private ReconPartitionService reconPartitionService;
 
     @Operation(summary = "KPI 概览")
     @GetMapping("/lh/metric/overview")
     public CommonResult<Map<String, Object>> overview(@RequestParam(required = false) String ws) {
         return CommonResult.data(govMetricService.overview(ws));
+    }
+
+    @Operation(summary = "核心看板（对账门禁）")
+    @GetMapping("/lh/metric/board")
+    public CommonResult<Map<String, Object>> board(@RequestParam(required = false) String ws) {
+        return CommonResult.data(govMetricService.board(ws));
     }
 
     @Operation(summary = "指标分页列表")
@@ -126,5 +138,43 @@ public class GovMetricController {
     @PostMapping("/lh/metric/anomaly/rerun")
     public CommonResult<Map<String, Object>> sampleRerun(@RequestParam(required = false) String ws) {
         return CommonResult.data(govMetricService.sampleRerun(ws));
+    }
+
+    @Operation(summary = "物化登记列表")
+    @GetMapping("/lh/metric/{code}/materialize")
+    public CommonResult<List<Map<String, Object>>> listMaterialize(
+            @PathVariable("code") String code,
+            @RequestParam(required = false) String ws) {
+        return CommonResult.data(govMetricService.listMaterialize(code, ws));
+    }
+
+    @Operation(summary = "登记/触发物化作业模板")
+    @CommonLog("指标物化")
+    @PostMapping("/lh/metric/{code}/materialize")
+    public CommonResult<Map<String, Object>> materialize(
+            @PathVariable("code") String code,
+            @RequestBody(required = false) GovMetricMaterializeParam param) {
+        return CommonResult.data(govMetricService.materialize(code, param));
+    }
+
+    @Operation(summary = "分区对账流水（看板/可靠性）")
+    @GetMapping("/lh/recon/partition")
+    public CommonResult<Map<String, Object>> reconPartitionList(
+            @RequestParam(required = false) String metricCode,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(reconPartitionService.listRecent(
+                metricCode, status, limit == null ? 50 : limit));
+    }
+
+    @Operation(summary = "登记分区对账结果并回写 recon_ok")
+    @CommonLog("分区对账登记")
+    @PostMapping("/lh/recon/partition/run")
+    public CommonResult<Map<String, Object>> reconPartitionRun(@RequestBody Map<String, Object> body) {
+        Object code = body != null ? body.get("metricCode") : null;
+        if (code != null && StrUtil.isNotBlank(String.valueOf(code))) {
+            return CommonResult.data(reconPartitionService.runForMetric(String.valueOf(code), body));
+        }
+        return CommonResult.data(reconPartitionService.record(body == null ? Map.of() : body));
     }
 }

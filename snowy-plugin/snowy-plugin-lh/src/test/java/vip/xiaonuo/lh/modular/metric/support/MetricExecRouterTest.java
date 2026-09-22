@@ -50,6 +50,14 @@ class MetricExecRouterTest {
         assertNotNull(d.materialize());
     }
 
+    @Test
+    void hotWithPartitionFailFallsBack() {
+        MetricExecRouter.Decision d = MetricExecRouter.decide(
+                "hot", true, okMat(), "分区对账失败 dt=2026-09-22 status=fail");
+        assertFalse(d.useHot());
+        assertTrue(d.fallbackReason().contains("分区对账失败"));
+    }
+
     private static GovMetricMaterialize okMat() {
         GovMetricMaterialize m = new GovMetricMaterialize();
         m.setEngine("clickhouse");

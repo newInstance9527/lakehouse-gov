@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.auth.core.util.StpLoginUserUtil;
 import vip.xiaonuo.common.exception.CommonException;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.ClickHouseClient;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
@@ -26,6 +27,7 @@ import vip.xiaonuo.lh.modular.metric.support.MetricExecGuard;
 import vip.xiaonuo.lh.modular.metric.support.MetricExecRouter;
 import vip.xiaonuo.lh.modular.metric.support.MetricMaterializeRewrite;
 import vip.xiaonuo.lh.modular.metric.support.MetricParamBinder;
+import vip.xiaonuo.lh.modular.metric.support.MetricPartitionReconGate;
 import vip.xiaonuo.lh.modular.metric.support.MetricQueryCache;
 import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
 import vip.xiaonuo.lh.modular.query.mapper.CpQueryExecMapper;
@@ -71,6 +73,10 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
     private SecAuthGrantService secAuthGrantService;
     @Resource
     private MetricQueryCache metricQueryCache;
+    @Resource
+    private MetricPartitionReconGate partitionReconGate;
+    @Resource
+    private LhProperties lhProperties;
 
     @Override
     public Map<String, Object> query(GovMetricQueryParam param) {
@@ -133,8 +139,13 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             throw new CommonException("指标版本不存在");
         }
         GovMetricMaterialize ckMat = findMaterialize(head.getMetricCode(), ver.getVer(), "clickhouse");
+        int lookback = lhProperties.getMetric() != null ? lhProperties.getMetric().getReconLookbackHours() : 48;
+        String partBlock = partitionReconGate.blockReasonForMetric(
+                head.getMetricCode(),
+                ckMat != null ? ckMat.getTargetTable() : null,
+                lookback);
         MetricExecRouter.Decision route = MetricExecRouter.decide(
-                prefer, clickHouseClient.configured(), ckMat);
+                prefer, clickHouseClient.configured(), ckMat, partBlock);
 
         GovMetricSqlCompiler.CompileOut compiled;
         try {

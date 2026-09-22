@@ -11,19 +11,23 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricDep;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricHistory;
+import vip.xiaonuo.lh.modular.metric.entity.GovMetricMaterialize;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricSample;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricSql;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricVer;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricDepMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricHistoryMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMapper;
+import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMaterializeMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricSampleMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricSqlMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricVerMapper;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricCompileParam;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricMaterializeParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricPageParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTransitionParam;
@@ -33,9 +37,14 @@ import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricExecService;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricFormulaParser;
+import vip.xiaonuo.lh.modular.metric.support.GovMetricMaterializeDsLauncher;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricSampleCollector;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricSqlCompiler;
 import vip.xiaonuo.lh.modular.metric.support.MetricAnomalyCalc;
+import vip.xiaonuo.lh.modular.metric.support.MetricMaterializeJobTemplate;
+import vip.xiaonuo.lh.modular.metric.support.MetricMaterializeRewrite;
+import vip.xiaonuo.lh.modular.metric.support.MetricPartitionReconGate;
+import vip.xiaonuo.lh.modular.recon.support.ReconPartitionService;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAssetSourceLink;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
@@ -98,6 +107,16 @@ public class GovMetricServiceImpl implements GovMetricService {
     private GovAssetSourceLinkMapper govAssetSourceLinkMapper;
     @Resource
     private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private GovMetricMaterializeMapper materializeMapper;
+    @Resource
+    private GovMetricMaterializeDsLauncher materializeDsLauncher;
+    @Resource
+    private MetricPartitionReconGate partitionReconGate;
+    @Resource
+    private ReconPartitionService reconPartitionService;
+    @Resource
+    private LhProperties lhProperties;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -118,6 +137,16 @@ public class GovMetricServiceImpl implements GovMetricService {
         out.put("deriveCount", derive);
         out.put("compositeCount", composite);
         out.put("activeCount", active);
+        long matOk = materializeMapper.selectCount(new QueryWrapper<GovMetricMaterialize>().lambda()
+                .eq(GovMetricMaterialize::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetricMaterialize::getStatus, "active")
+                .eq(GovMetricMaterialize::getReconOk, 1));
+        long matBlocked = materializeMapper.selectCount(new QueryWrapper<GovMetricMaterialize>().lambda()
+                .eq(GovMetricMaterialize::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetricMaterialize::getStatus, "active")
+                .and(w -> w.isNull(GovMetricMaterialize::getReconOk).or().ne(GovMetricMaterialize::getReconOk, 1)));
+        out.put("materializeReconOk", matOk);
+        out.put("materializeBlocked", matBlocked);
         out.put("ws", StrUtil.isNotBlank(workspace) ? workspace : "all");
         return out;
     }
@@ -448,8 +477,199 @@ public class GovMetricServiceImpl implements GovMetricService {
         return sampleCollector.runDaily(ws);
     }
 
-    // —— helpers ——
+    @Override
+    public Map<String, Object> board(String ws) {
+        var qw = new QueryWrapper<GovMetric>().lambda()
+                .eq(GovMetric::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetric::getStatus, "active");
+        String workspace = StrUtil.trim(ws);
+        if (StrUtil.isNotBlank(workspace)) {
+            qw.eq(GovMetric::getWs, workspace);
+        }
+        List<GovMetric> active = metricMapper.selectList(qw);
+        int lookback = lhProperties.getMetric() != null ? lhProperties.getMetric().getReconLookbackHours() : 48;
+        List<Map<String, Object>> cards = new ArrayList<>();
+        int ready = 0;
+        int blocked = 0;
+        for (GovMetric m : active) {
+            GovMetricMaterialize mat = materializeMapper.selectOne(new QueryWrapper<GovMetricMaterialize>().lambda()
+                    .eq(GovMetricMaterialize::getDeleteFlag, NOT_DELETE)
+                    .eq(GovMetricMaterialize::getMetricCode, m.getMetricCode())
+                    .eq(GovMetricMaterialize::getEngine, "clickhouse")
+                    .eq(GovMetricMaterialize::getStatus, "active")
+                    .orderByDesc(GovMetricMaterialize::getUpdateTime)
+                    .last("LIMIT 1"));
+            String partBlock = partitionReconGate.blockReasonForMetric(
+                    m.getMetricCode(), mat != null ? mat.getTargetTable() : null, lookback);
+            boolean reconOk = mat != null && mat.getReconOk() != null && mat.getReconOk() == 1;
+            boolean boardReady = reconOk && StrUtil.isBlank(partBlock);
+            String reason = null;
+            if (mat == null) {
+                reason = "无 clickhouse 物化登记";
+            } else if (!reconOk) {
+                reason = "物化对账未通过（recon_ok≠1）";
+            } else if (StrUtil.isNotBlank(partBlock)) {
+                reason = partBlock;
+            }
+            if (boardReady) {
+                ready++;
+            } else {
+                blocked++;
+            }
+            Map<String, Object> card = new LinkedHashMap<>();
+            card.put("metricCode", m.getMetricCode());
+            card.put("name", m.getName());
+            card.put("ver", m.getCurrentVer());
+            card.put("ready", boardReady);
+            card.put("statusLabel", boardReady ? "可进看板" : "数据未就绪");
+            card.put("reason", reason);
+            card.put("reconOk", reconOk);
+            card.put("jobRef", mat != null ? mat.getJobRef() : null);
+            card.put("targetTable", mat != null ? mat.getTargetTable() : null);
+            cards.add(card);
+        }
+        Map<String, Object> recon = reconPartitionService.listRecent(null, null, 20);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ws", StrUtil.isNotBlank(workspace) ? workspace : "all");
+        out.put("readyCount", ready);
+        out.put("blockedCount", blocked);
+        out.put("cards", cards);
+        out.put("reconRecent", recon);
+        return out;
+    }
 
+    @Override
+    public List<Map<String, Object>> listMaterialize(String metricCode, String ws) {
+        GovMetric head = requireMetric(metricCode, ws);
+        List<GovMetricMaterialize> rows = materializeMapper.selectList(new QueryWrapper<GovMetricMaterialize>().lambda()
+                .eq(GovMetricMaterialize::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetricMaterialize::getMetricCode, head.getMetricCode())
+                .orderByDesc(GovMetricMaterialize::getUpdateTime));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (GovMetricMaterialize m : rows) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", m.getId());
+            row.put("metricCode", m.getMetricCode());
+            row.put("ver", m.getVer());
+            row.put("engine", m.getEngine());
+            row.put("targetTable", m.getTargetTable());
+            row.put("grainJson", m.getGrainJson());
+            row.put("jobRef", m.getJobRef());
+            row.put("reconOk", m.getReconOk() != null && m.getReconOk() == 1);
+            row.put("status", m.getStatus());
+            row.put("remark", m.getRemark());
+            row.put("updateTime", m.getUpdateTime());
+            out.add(row);
+        }
+        return out;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> materialize(String metricCode, GovMetricMaterializeParam param) {
+        if (param == null) {
+            param = new GovMetricMaterializeParam();
+        }
+        GovMetric head = requireMetric(metricCode, param.getWs());
+        secAuthGrantService.assertCanEditMetric(head);
+        if (!"active".equals(head.getStatus()) && !"review".equals(head.getStatus())) {
+            throw new CommonException("仅待发布/已启用指标可登记物化");
+        }
+        GovMetricVer ver = verMapper.selectById(head.getCurrentVerId());
+        if (ver == null) {
+            throw new CommonException("当前版本不存在");
+        }
+        String eng = MetricMaterializeRewrite.normalizeEngine(
+                StrUtil.blankToDefault(param.getEngine(), "clickhouse"));
+        if (!"clickhouse".equals(eng) && !"iceberg".equals(eng)) {
+            throw new CommonException("engine 仅支持 clickhouse / iceberg");
+        }
+        String code = head.getMetricCode();
+        String target = StrUtil.blankToDefault(param.getTargetTable(),
+                "ads.metric_" + code.toLowerCase(Locale.ROOT).replace('-', '_') + "_d");
+        MetricMaterializeRewrite.assertSafeTable(target);
+        String grain = StrUtil.blankToDefault(param.getGrainJson(), "[\"dt\"]");
+        String partitionDt = StrUtil.blankToDefault(param.getPartitionDt(),
+                java.time.LocalDate.now().minusDays(1).toString());
+
+        String compiledSql = null;
+        try {
+            GovMetricSqlCompiler.CompileOut compiled = GovMetricSqlCompiler.compile(
+                    head, ver, "trino", c -> resolveNode(c, head.getWs()), Map.of());
+            compiledSql = compiled.sqlText();
+        } catch (Exception e) {
+            compiledSql = "SELECT 1 AS metric_value, DATE '" + partitionDt + "' AS dt";
+        }
+
+        String sql = "clickhouse".equals(eng)
+                ? MetricMaterializeJobTemplate.clickHouseInsertSql(code, ver.getVer(), target, compiledSql, partitionDt)
+                : MetricMaterializeJobTemplate.icebergInsertSql(code, ver.getVer(), target, compiledSql, partitionDt);
+
+        GovMetricMaterialize mat = materializeMapper.selectOne(new QueryWrapper<GovMetricMaterialize>().lambda()
+                .eq(GovMetricMaterialize::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetricMaterialize::getMetricCode, code)
+                .eq(GovMetricMaterialize::getVer, ver.getVer())
+                .eq(GovMetricMaterialize::getEngine, eng)
+                .last("LIMIT 1"));
+        boolean created = false;
+        if (mat == null) {
+            mat = new GovMetricMaterialize();
+            mat.setId(IdUtil.getSnowflakeNextIdStr());
+            mat.setRevision(1);
+            mat.setStatus("active");
+            mat.setWs(head.getWs());
+            mat.setMetricCode(code);
+            mat.setVer(ver.getVer());
+            mat.setEngine(eng);
+            mat.setTargetTable(target);
+            mat.setGrainJson(grain);
+            mat.setReconOk(0);
+            mat.setDeleteFlag(NOT_DELETE);
+            created = true;
+        } else {
+            mat.setRevision(mat.getRevision() == null ? 1 : mat.getRevision() + 1);
+            mat.setTargetTable(target);
+            mat.setGrainJson(grain);
+            mat.setStatus("active");
+        }
+        mat.setRemark(StrUtil.blankToDefault(param.getRemark(), mat.getRemark()));
+
+        boolean doLaunch = param.getLaunch() == null || Boolean.TRUE.equals(param.getLaunch());
+        Map<String, Object> launchMap = Map.of();
+        if (doLaunch) {
+            String runId = "mat-" + code + "-" + System.currentTimeMillis();
+            GovMetricMaterializeDsLauncher.LaunchResult launch = materializeDsLauncher.launchMaterialize(
+                    code, ver.getVer(), eng, target, sql, runId, partitionDt);
+            mat.setJobRef(launch.jobRef);
+            launchMap = launch.toMap();
+            if (!launch.ok && !(lhProperties.getMetric() != null && lhProperties.getMetric().isAllowDegradedMaterialize())) {
+                throw new CommonException("物化作业启动失败: " + launch.message);
+            }
+        } else if (StrUtil.isBlank(mat.getJobRef())) {
+            mat.setJobRef(MetricMaterializeJobTemplate.workflowName(code));
+        }
+
+        if (created) {
+            materializeMapper.insert(mat);
+        } else {
+            materializeMapper.updateById(mat);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("metricCode", code);
+        out.put("ver", ver.getVer());
+        out.put("engine", eng);
+        out.put("targetTable", target);
+        out.put("jobRef", mat.getJobRef());
+        out.put("reconOk", mat.getReconOk() != null && mat.getReconOk() == 1);
+        out.put("sql", sql);
+        out.put("workflowName", MetricMaterializeJobTemplate.workflowName(code));
+        out.put("launch", launchMap);
+        out.put("created", created);
+        return out;
+    }
+
+    // —— helpers ——
     private void bumpVersion(GovMetric head) {
         GovMetricVer old = verMapper.selectById(head.getCurrentVerId());
         if (old == null) {

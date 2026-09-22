@@ -5,6 +5,7 @@ import vip.xiaonuo.lh.modular.metric.entity.GovMetricMaterialize;
 
 /**
  * 指标执行路由：{@code prefer=hot} 且物化对账通过 + CK 可用 → ClickHouse；否则 soft-fail 回退 Trino。
+ * <p>J5：额外接受 {@code partitionReconBlock}（来自 {@code recon_partition} 失败流水）。</p>
  */
 public final class MetricExecRouter {
 
@@ -12,6 +13,11 @@ public final class MetricExecRouter {
     }
 
     public static Decision decide(String prefer, boolean ckConfigured, GovMetricMaterialize mat) {
+        return decide(prefer, ckConfigured, mat, null);
+    }
+
+    public static Decision decide(String prefer, boolean ckConfigured, GovMetricMaterialize mat,
+                                  String partitionReconBlock) {
         String p = StrUtil.blankToDefault(prefer, "trino").trim().toLowerCase();
         if (!"hot".equals(p)) {
             return Decision.trino();
@@ -27,6 +33,9 @@ public final class MetricExecRouter {
         }
         if (mat.getReconOk() == null || mat.getReconOk() != 1) {
             return Decision.fallback("物化对账未通过（recon_ok≠1）");
+        }
+        if (StrUtil.isNotBlank(partitionReconBlock)) {
+            return Decision.fallback(partitionReconBlock);
         }
         if (StrUtil.isBlank(mat.getTargetTable())) {
             return Decision.fallback("物化目标表为空");
