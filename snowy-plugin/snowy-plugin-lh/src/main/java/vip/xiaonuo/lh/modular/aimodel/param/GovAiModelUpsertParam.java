@@ -56,6 +56,12 @@ public class GovAiModelUpsertParam {
     @Schema(description = "chat|embed")
     private String kind;
 
+    @Schema(description = "local|egress；空则按 baseUrl/vendor 推断")
+    private String egressKind;
+
+    @Schema(description = "安全岗已标记外发可用（egress 模型必填为 true 方可进生产路由）")
+    private Boolean egressApproved;
+
     @Schema(description = "工作空间")
     private String ws;
 

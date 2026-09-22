@@ -27,6 +27,7 @@ import vip.xiaonuo.lh.modular.aimodel.param.GovAiModelUpsertParam;
 import vip.xiaonuo.lh.modular.aimodel.param.GovAiRouteUpsertParam;
 import vip.xiaonuo.lh.modular.aimodel.result.GovAiModelVo;
 import vip.xiaonuo.lh.modular.aimodel.result.GovAiRouteVo;
+import vip.xiaonuo.lh.modular.ai.support.AiEgressPolicy;
 import vip.xiaonuo.lh.modular.aimodel.service.GovAiModelService;
 
 import java.math.BigDecimal;
@@ -169,6 +170,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         row.setInputRate(param.getInputRate() == null ? BigDecimal.ZERO : param.getInputRate());
         row.setOutputRate(param.getOutputRate() == null ? BigDecimal.ZERO : param.getOutputRate());
         row.setEnabled(true);
+        applyEgressFields(row, param, true);
         row.setLatencyMs(0);
         row.setRoleLabel(firstNonBlank(param.getRoleLabel(), param.getRole(), param.getUse(), ""));
         row.setKeyMask(maskKey(param.getKey()));
@@ -231,6 +233,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             row.setVaultPath(vaultPath);
             row.setKeyMask(maskKey(param.getKey()));
         }
+        applyEgressFields(row, param, false);
         row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
         modelMapper.updateById(row);
         GovAiModelVo vo = toVo(row);
@@ -458,6 +461,15 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             row.setFallbackModelId(p.getFallbackModelId());
             row.setEnabled(p.getEnabled() == null || Boolean.TRUE.equals(p.getEnabled()));
             row.setRemark(p.getRemark());
+            // D5：生产路由绑定外发模型须安全岗标记
+            if (Boolean.TRUE.equals(row.getEnabled())) {
+                if (StrUtil.isNotBlank(row.getPrimaryModelId())) {
+                    AiEgressPolicy.assertAllowed(requireModel(row.getPrimaryModelId()), row.getScene());
+                }
+                if (StrUtil.isNotBlank(row.getFallbackModelId())) {
+                    AiEgressPolicy.assertAllowed(requireModel(row.getFallbackModelId()), row.getScene());
+                }
+            }
             row.setStatus(Boolean.TRUE.equals(row.getEnabled()) ? "ok" : "off");
             row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
             if (routeMapper.selectById(row.getId()) == null) {
@@ -661,6 +673,11 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         vo.setInputRate(row.getInputRate());
         vo.setOutputRate(row.getOutputRate());
         vo.setEnabled(row.getEnabled());
+        String egressKind = StrUtil.blankToDefault(row.getEgressKind(),
+                AiEgressPolicy.classify(row.getVendor(), row.getBaseUrl(), row.getPriceUnit()));
+        vo.setEgressKind(egressKind);
+        vo.setEgressApproved(Boolean.TRUE.equals(row.getEgressApproved())
+                || AiEgressPolicy.isLocal(egressKind));
         vo.setStatus(row.getStatus());
         vo.setLatencyMs(row.getLatencyMs());
         vo.setLatency(row.getLatencyMs() == null || row.getLatencyMs() <= 0
@@ -708,6 +725,30 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         vo.setStatus(row.getStatus());
         vo.setRemark(row.getRemark());
         return vo;
+    }
+
+    /**
+     * D5：写入/刷新 egress_kind；外发模型的安全岗标记来自入参（新建默认未评估）。
+     */
+    private static void applyEgressFields(GovAiModel row, GovAiModelUpsertParam param, boolean creating) {
+        String kind = StrUtil.isNotBlank(param.getEgressKind())
+                ? param.getEgressKind().trim().toLowerCase(Locale.ROOT)
+                : AiEgressPolicy.classify(row.getVendor(), row.getBaseUrl(), row.getPriceUnit());
+        if (!AiEgressPolicy.KIND_LOCAL.equals(kind) && !AiEgressPolicy.KIND_EGRESS.equals(kind)) {
+            kind = AiEgressPolicy.classify(row.getVendor(), row.getBaseUrl(), row.getPriceUnit());
+        }
+        row.setEgressKind(kind);
+        if (AiEgressPolicy.isLocal(kind)) {
+            row.setEgressApproved(true);
+            return;
+        }
+        if (param.getEgressApproved() != null) {
+            row.setEgressApproved(Boolean.TRUE.equals(param.getEgressApproved()));
+        } else if (creating) {
+            row.setEgressApproved(false);
+        } else if (row.getEgressApproved() == null) {
+            row.setEgressApproved(false);
+        }
     }
 
     /** 脱敏：sk-****...last4（Vault） */

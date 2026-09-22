@@ -22,6 +22,8 @@ import vip.xiaonuo.lh.modular.ai.param.GovAiChatParam;
 import vip.xiaonuo.lh.modular.ai.param.GovAiRunSqlParam;
 import vip.xiaonuo.lh.modular.ai.param.GovAiSessionCreateParam;
 import vip.xiaonuo.lh.modular.ai.service.GovAiChatService;
+import vip.xiaonuo.lh.modular.ai.support.AiEgressPolicy;
+import vip.xiaonuo.lh.modular.ai.support.AiPromptGuard;
 import vip.xiaonuo.lh.modular.ai.support.AiSqlGuard;
 import vip.xiaonuo.lh.modular.ai.support.IntentRouter;
 import vip.xiaonuo.lh.modular.aimodel.entity.GovAiModel;
@@ -258,7 +260,27 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     private void runChat(SseEmitter emitter, GovAiSession session, GovAiChatParam param, String workspace) {
         long start = System.currentTimeMillis();
         String userId = safeUserId();
-        String intent = IntentRouter.route(param.getText(), param.getScene());
+        // D5：Prompt PII/密钥扫描（密钥阻断；PII 脱敏后继续）
+        AiPromptGuard.ScanResult promptScan = AiPromptGuard.prepareForLlm(param.getText());
+        if (promptScan.isBlocked()) {
+            try {
+                sendEvent(emitter, "done", Map.of(
+                        "error", promptScan.getBlockReason(),
+                        "promptBlocked", true,
+                        "findings", promptScan.getFindings()));
+            } catch (Exception ignored) {
+                // emitter 可能已关闭
+            } finally {
+                try {
+                    emitter.complete();
+                } catch (Exception ignored) {
+                    // ignore
+                }
+            }
+            return;
+        }
+        String safeText = promptScan.getRedacted();
+        String intent = IntentRouter.route(safeText, param.getScene());
         String turnId = IdUtil.getSnowflakeNextIdStr();
         List<Map<String, Object>> citations = new ArrayList<>();
         List<Map<String, Object>> actions = new ArrayList<>();
@@ -266,23 +288,31 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         String answer;
 
         try {
-            // 落库用户轮次
+            // D5：选用外发模型须安全岗标记（sandbox 豁免）
+            assertEgressForChat(modelId, param.getScene());
+
+            // 落库用户轮次（审计保留原文；下发用脱敏文本）
             persistTurn(session.getId(), turnId + "-u", "user", intent, param.getText(),
                     null, null, null, modelId, null, userId);
 
-            sendEvent(emitter, "meta", Map.of(
-                    "intent", intent,
-                    "sessionId", session.getId(),
-                    "turnId", turnId,
-                    "ws", workspace));
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("intent", intent);
+            meta.put("sessionId", session.getId());
+            meta.put("turnId", turnId);
+            meta.put("ws", workspace);
+            if (promptScan.isRedacted()) {
+                meta.put("promptRedacted", true);
+                meta.put("promptFindings", promptScan.getFindings());
+            }
+            sendEvent(emitter, "meta", meta);
 
             // 工具：知识检索（docqa / explain / manual）
             if ("docqa".equals(intent) || "explain".equals(intent) || "manual".equals(intent)
-                    || StrUtil.containsIgnoreCase(param.getText(), "手册")
-                    || StrUtil.containsIgnoreCase(param.getText(), "口径")) {
+                    || StrUtil.containsIgnoreCase(safeText, "手册")
+                    || StrUtil.containsIgnoreCase(safeText, "口径")) {
                 GovKbSearchParam sp = new GovKbSearchParam();
                 sp.setWs(workspace);
-                sp.setQuery(param.getText());
+                sp.setQuery(safeText);
                 sp.setTopK(5);
                 List<Map<String, Object>> hits = govKbService.search(sp);
                 for (Map<String, Object> h : hits) {
@@ -301,10 +331,10 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             // 工具：诊断 → 质量失败规则 + 血缘上游
             String diagnoseTable = null;
             if ("diagnose".equals(intent)
-                    || StrUtil.containsIgnoreCase(param.getText(), "质量")
-                    || StrUtil.containsIgnoreCase(param.getText(), "阻断")
-                    || StrUtil.containsIgnoreCase(param.getText(), "告警")) {
-                diagnoseTable = extractTableName(param.getText());
+                    || StrUtil.containsIgnoreCase(safeText, "质量")
+                    || StrUtil.containsIgnoreCase(safeText, "阻断")
+                    || StrUtil.containsIgnoreCase(safeText, "告警")) {
+                diagnoseTable = extractTableName(safeText);
                 appendDiagnoseCitations(emitter, citations, actions, workspace, diagnoseTable);
             }
 
@@ -312,9 +342,9 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             String metricCode = null;
             String metricName = null;
             String compiledSql = null;
-            boolean metricTopic = "nl2sql".equals(intent) || containsMetricKeyword(param.getText());
+            boolean metricTopic = "nl2sql".equals(intent) || containsMetricKeyword(safeText);
             if (metricTopic) {
-                GovMetricVo metric = resolveMetricTool(param.getText(), workspace);
+                GovMetricVo metric = resolveMetricTool(safeText, workspace);
                 if (metric != null && StrUtil.isNotBlank(metric.getMetricCode())) {
                     metricCode = metric.getMetricCode();
                     metricName = metric.getName();
@@ -342,9 +372,9 @@ public class GovAiChatServiceImpl implements GovAiChatService {
 
             // 生成回答（口径类无 metric_code 则拒编造）
             if (metricTopic && StrUtil.isBlank(metricCode)) {
-                answer = missingMetricCodeAnswer(param.getText());
+                answer = missingMetricCodeAnswer(safeText);
             } else {
-                answer = buildAnswer(intent, param.getText(), citations, metricCode, metricName,
+                answer = buildAnswer(intent, safeText, citations, metricCode, metricName,
                         compiledSql, modelId, diagnoseTable);
                 answer = ensureMetricCodeInAnswer(answer, metricCode);
             }
@@ -380,7 +410,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     actions.add(metricsLink);
                     sendEvent(emitter, "action", metricsLink);
                 } else {
-                    String sql = heuristicSql(param.getText());
+                    String sql = heuristicSql(safeText);
                     Map<String, Object> open = new LinkedHashMap<>();
                     open.put("type", "deeplink");
                     open.put("label", "在即席查询打开");
@@ -409,7 +439,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             }
 
             int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
-            int promptTok = estimateTokens(param.getText());
+            int promptTok = estimateTokens(safeText);
             int completionTok = estimateTokens(answer);
             persistTurn(session.getId(), turnId, "assistant", intent, answer,
                     JSONUtil.toJsonStr(citations),
@@ -446,7 +476,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
 
             // 更新会话标题
             if ("新对话".equals(session.getTitle()) || StrUtil.isBlank(session.getTitle())) {
-                session.setTitle(StrUtil.maxLength(param.getText().trim(), 40));
+                session.setTitle(StrUtil.maxLength(safeText.trim(), 40));
                 sessionMapper.updateById(session);
             }
 
@@ -469,6 +499,18 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         }
     }
 
+    /** D5：chat 选用外发模型时校验安全岗标记 */
+    private void assertEgressForChat(String modelId, String scene) {
+        if (StrUtil.isBlank(modelId)) {
+            return;
+        }
+        GovAiModel model = modelMapper.selectById(modelId);
+        if (model == null || !NOT_DELETE.equals(model.getDeleteFlag())) {
+            return;
+        }
+        AiEgressPolicy.assertAllowed(model, scene);
+    }
+
     private String buildAnswer(String intent, String text, List<Map<String, Object>> citations,
                                String metricCode, String metricName, String compiledSql,
                                String modelId, String diagnoseTable) {
@@ -488,16 +530,23 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             ctx.append("编译SQL=\n").append(compiledSql).append('\n');
         }
         for (Map<String, Object> c : citations) {
+            String citeText = String.valueOf(c.getOrDefault("text", ""));
+            AiPromptGuard.ScanResult citeScan = AiPromptGuard.prepareForLlm(citeText);
+            if (citeScan.isBlocked()) {
+                citeText = "***REDACTED_SECRET***";
+            } else {
+                citeText = citeScan.getRedacted();
+            }
             ctx.append("- [").append(c.get("type")).append("] ")
                     .append(c.getOrDefault("title", "")).append(": ")
-                    .append(StrUtil.maxLength(String.valueOf(c.getOrDefault("text", "")), 200))
+                    .append(StrUtil.maxLength(citeText, 200))
                     .append('\n');
         }
         if (liteLlmClient.available()) {
             String llm = liteLlmClient.chatSimple(modelId,
                     "你是湖仓治理助手 DataLake Copilot。基于给定上下文回答；"
                             + "引用业务口径必须给出 metric_code；禁止编造 GMV 等生产口径或直出生产 SQL；"
-                            + "有编译 SQL 时原样引用并标注 metric_code。",
+                            + "有编译 SQL 时原样引用并标注 metric_code；禁止复述用户明文手机号/证件/密钥。",
                     "用户问题：\n" + text + "\n\n上下文：\n" + ctx);
             if (StrUtil.isNotBlank(llm)) {
                 return llm;

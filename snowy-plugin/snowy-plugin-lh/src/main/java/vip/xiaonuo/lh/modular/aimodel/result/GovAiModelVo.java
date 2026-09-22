@@ -33,6 +33,10 @@ public class GovAiModelVo {
     private BigDecimal inputRate;
     private BigDecimal outputRate;
     private Boolean enabled;
+    /** local | egress */
+    private String egressKind;
+    /** 安全岗已评估外发可用 */
+    private Boolean egressApproved;
     private String status;
     private Integer latencyMs;
     private String latency;

@@ -38,6 +38,10 @@ public class GovAiModel extends CommonEntity {
     private BigDecimal inputRate;
     private BigDecimal outputRate;
     private Boolean enabled;
+    /** local | egress */
+    private String egressKind;
+    /** 安全岗已评估外发可用 */
+    private Boolean egressApproved;
     private Integer latencyMs;
     private String roleLabel;
     private String keyMask;
