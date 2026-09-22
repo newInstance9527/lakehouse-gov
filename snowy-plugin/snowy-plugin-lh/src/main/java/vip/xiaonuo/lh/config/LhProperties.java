@@ -244,10 +244,21 @@ public class LhProperties {
         private String vaultPath = LhVaultPaths.MINIO;
         private String accessKey;
         private String secretKey;
-        /** 平台自有对象桶（即席抽样 / 证据包等）；默认 lh-portal */
+        /** 平台自有对象桶（即席抽样等）；默认 lh-portal */
         private String bucket = "lh-portal";
         /** 即席数据集抽样对象前缀；完整 key = {prefix}/{ws}/{dsCode}/sample.json */
         private String datasetPrefix = "adhoc/dataset";
+        /**
+         * 合规证据包桶（建议独立 Object Lock 桶）；默认 lh-audit。
+         * 新建时优先带 objectLock；已有无锁桶则落盘后 WORM soft-fail。
+         */
+        private String evidenceBucket = "lh-audit";
+        /** 证据包前缀；完整 key = {prefix}/{reqNo}/{sha256}.zip */
+        private String evidencePrefix = "compliance/evidence";
+        /** WORM 保留天数（COMPLIANCE/GOVERNANCE）；默认 2555≈7 年 */
+        private Integer evidenceWormDays = 2555;
+        /** COMPLIANCE | GOVERNANCE | NONE */
+        private String evidenceWormMode = "COMPLIANCE";
         /** AWS SDK / MinIO region；MinIO 常用 us-east-1 */
         private String region = "us-east-1";
     }

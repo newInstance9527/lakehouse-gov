@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
@@ -151,10 +152,18 @@ public class GovDelController {
         return CommonResult.data(govDelService.abort(param));
     }
 
-    @Operation(summary = "证据包：清单 + sha256")
+    @Operation(summary = "证据包：清单 + 落对象存储（WORM）+ sha256")
+    @CommonLog("合规删除生成证据包")
     @GetMapping({"/lh/compliance/evidence", "/api/governance/compliance/evidence"})
     public CommonResult<Map<String, Object>> evidence(@RequestParam("reqId") String reqId) {
         return CommonResult.data(govDelService.evidence(reqId));
+    }
+
+    @Operation(summary = "二次授权下载证据包 ZIP（回填请求号 + 用途；写审计）")
+    @CommonLog("合规删除下载证据包")
+    @PostMapping({"/lh/compliance/evidence/download", "/api/governance/compliance/evidence/download"})
+    public CommonResult<Map<String, Object>> downloadEvidence(@RequestBody @Valid GovDelEvidenceDownloadParam param) {
+        return CommonResult.data(govDelService.downloadEvidence(param));
     }
 
     @Operation(summary = "主体索引列表")

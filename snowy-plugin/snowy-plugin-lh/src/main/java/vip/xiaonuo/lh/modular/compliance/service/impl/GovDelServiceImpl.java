@@ -30,6 +30,7 @@ import vip.xiaonuo.lh.modular.compliance.mapper.GovDelRequestMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSubjectMapMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelTargetMapper;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
@@ -47,6 +48,7 @@ import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelEvidenceObjectStore;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelSinkExecutor;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcTableActionParam;
@@ -55,7 +57,10 @@ import vip.xiaonuo.lh.modular.lifecycle.service.GovLcService;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcMetadataSql;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
@@ -65,6 +70,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * 合规删除 P0：请求/计划/执行流水/证据落库。
@@ -174,6 +181,8 @@ public class GovDelServiceImpl implements GovDelService {
     private ClickHouseClient clickHouseClient;
     @Resource
     private GovDelSinkExecutor sinkExecutor;
+    @Resource
+    private GovDelEvidenceObjectStore evidenceObjectStore;
     @Resource
     private LhProperties lhProperties;
     @Resource
@@ -1453,19 +1462,245 @@ public class GovDelServiceImpl implements GovDelService {
         }).toList());
 
         String json = JSONUtil.toJsonStr(pkg);
-        String sha = SecureUtil.sha256(json);
-        GovDelEvidence snapshot = addEvidence(req, "package", "证据包快照 " + req.getReqNo(), null);
-        snapshot.setSha256(sha);
-        snapshot.setObjectPath("s3://lake-audit/compliance/" + req.getReqNo() + "/evidence.json");
+        String contentSha = SecureUtil.sha256(json);
+        byte[] zipBytes = buildEvidenceZip(req.getReqNo(), json, items);
+
+        boolean stored = false;
+        boolean wormApplied = false;
+        String wormMode = null;
+        String retainUntil = null;
+        String wormNote = null;
+        String objectPath = null;
+        String objectKey = null;
+        String bucket = null;
+        String zipSha = contentSha;
+        String storeError = null;
+
+        try {
+            GovDelEvidenceObjectStore.PutResult put = evidenceObjectStore.putZip(req.getReqNo(), zipBytes);
+            stored = true;
+            wormApplied = put.isWormApplied();
+            wormMode = put.getWormMode();
+            retainUntil = put.getRetainUntil();
+            wormNote = put.getWormNote();
+            objectPath = put.getUri();
+            objectKey = put.getObjectKey();
+            bucket = put.getBucket();
+            zipSha = put.getSha256();
+            logExec(req, null, "evidence.pack", "success", null, null,
+                    "证据包落盘 " + objectPath + " · WORM=" + wormApplied
+                            + (retainUntil != null ? " until " + retainUntil : ""));
+        } catch (Exception e) {
+            storeError = StrUtil.maxLength(e.getMessage(), 300);
+            wormNote = "对象存储不可达，仅门户清单可用：" + storeError;
+            logExec(req, null, "evidence.pack", "degraded", null, null, wormNote);
+        }
+
+        GovDelEvidence snapshot = addEvidence(req, "package", "证据包快照 " + req.getReqNo(),
+                JSONUtil.toJsonStr(Map.of(
+                        "contentSha256", contentSha,
+                        "zipSha256", zipSha,
+                        "stored", stored,
+                        "wormApplied", wormApplied,
+                        "wormMode", StrUtil.blankToDefault(wormMode, ""),
+                        "retainUntil", StrUtil.blankToDefault(retainUntil, ""),
+                        "objectKey", StrUtil.blankToDefault(objectKey, ""),
+                        "bucket", StrUtil.blankToDefault(bucket, "")
+                )));
+        snapshot.setSha256(zipSha);
+        if (StrUtil.isNotBlank(objectPath)) {
+            snapshot.setObjectPath(objectPath);
+        }
         evidenceMapper.updateById(snapshot);
+
+        List<Map<String, Object>> checklist = evidenceChecklist(req, targets, items);
+        checklist.add(checkItem("对象存储落盘", stored, stored ? objectPath : wormNote));
+        checklist.add(checkItem("WORM 保留期", wormApplied,
+                wormApplied ? (wormMode + " until " + retainUntil) : StrUtil.blankToDefault(wormNote, "未生效")));
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("package", pkg);
-        out.put("sha256", sha);
-        out.put("objectPath", snapshot.getObjectPath());
-        out.put("checklist", evidenceChecklist(req, targets, items));
-        out.put("note", "对象存储落盘与 WORM 归档见 doc/合规删除-跨模块待办.md（P1）");
+        out.put("sha256", zipSha);
+        out.put("contentSha256", contentSha);
+        out.put("objectPath", objectPath);
+        out.put("objectKey", objectKey);
+        out.put("bucket", bucket);
+        out.put("stored", stored);
+        out.put("wormApplied", wormApplied);
+        out.put("wormMode", wormMode);
+        out.put("retainUntil", retainUntil);
+        out.put("wormNote", wormNote);
+        out.put("fileName", req.getReqNo() + "-evidence.zip");
+        out.put("checklist", checklist);
+        out.put("downloadHint", "POST /lh/compliance/evidence/download（confirmReqNo + reason）");
+        if (storeError != null) {
+            out.put("storeError", storeError);
+        }
         return out;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> downloadEvidence(GovDelEvidenceDownloadParam param) {
+        GovDelRequest req = requireRequest(param.getReqId());
+        String confirm = StrUtil.trim(param.getConfirmReqNo());
+        if (!req.getReqNo().equals(confirm)) {
+            throw new CommonException("二次确认失败：请回填正确的请求号 {}", req.getReqNo());
+        }
+        String reason = StrUtil.trim(param.getReason());
+        if (StrUtil.isBlank(reason) || reason.length() < 4) {
+            throw new CommonException("请填写下载用途（至少 4 字），将写入审计");
+        }
+
+        // 优先取最近一次已落盘的 package 条目
+        GovDelEvidence packaged = evidenceMapper.selectOne(new QueryWrapper<GovDelEvidence>().lambda()
+                .eq(GovDelEvidence::getReqId, req.getId())
+                .eq(GovDelEvidence::getKind, "package")
+                .eq(GovDelEvidence::getDeleteFlag, NOT_DELETE)
+                .isNotNull(GovDelEvidence::getObjectPath)
+                .ne(GovDelEvidence::getObjectPath, "")
+                .orderByDesc(GovDelEvidence::getCreateTime)
+                .last("LIMIT 1"));
+        if (packaged == null || StrUtil.isBlank(packaged.getObjectPath())) {
+            // 自动生成并落盘后再下
+            Map<String, Object> packed = evidence(req.getId());
+            if (!Boolean.TRUE.equals(packed.get("stored"))) {
+                throw new CommonException("证据包尚未落对象存储：{}", packed.get("wormNote"));
+            }
+            packaged = evidenceMapper.selectOne(new QueryWrapper<GovDelEvidence>().lambda()
+                    .eq(GovDelEvidence::getReqId, req.getId())
+                    .eq(GovDelEvidence::getKind, "package")
+                    .eq(GovDelEvidence::getDeleteFlag, NOT_DELETE)
+                    .isNotNull(GovDelEvidence::getObjectPath)
+                    .orderByDesc(GovDelEvidence::getCreateTime)
+                    .last("LIMIT 1"));
+        }
+        if (packaged == null || StrUtil.isBlank(packaged.getObjectPath())) {
+            throw new CommonException("无可用证据包对象路径");
+        }
+
+        String objectPath = packaged.getObjectPath();
+        String bucket;
+        String objectKey;
+        Map<String, Object> meta = parseEvidenceMeta(packaged.getContent());
+        if (meta.get("bucket") != null && StrUtil.isNotBlank(String.valueOf(meta.get("bucket")))
+                && meta.get("objectKey") != null && StrUtil.isNotBlank(String.valueOf(meta.get("objectKey")))) {
+            bucket = String.valueOf(meta.get("bucket"));
+            objectKey = String.valueOf(meta.get("objectKey"));
+        } else {
+            String[] parsed = parseS3aPath(objectPath);
+            bucket = parsed[0];
+            objectKey = parsed[1];
+        }
+
+        byte[] zip;
+        try {
+            zip = evidenceObjectStore.getZip(bucket, objectKey);
+        } catch (Exception e) {
+            throw new CommonException("读取证据包失败：{}", StrUtil.maxLength(e.getMessage(), 200));
+        }
+
+        logExec(req, null, "evidence.download", "success", null, null,
+                "二次授权下载证据包 · 用途：" + StrUtil.maxLength(reason, 200)
+                        + " · 操作人：" + currentOperator() + " · " + objectPath);
+        addEvidence(req, "audit", "证据包二次授权下载",
+                JSONUtil.toJsonStr(Map.of(
+                        "action", "evidence.download",
+                        "reqNo", req.getReqNo(),
+                        "operator", currentOperator(),
+                        "reason", reason,
+                        "objectPath", objectPath,
+                        "sha256", StrUtil.blankToDefault(packaged.getSha256(), ""),
+                        "bytes", zip.length,
+                        "at", new Date()
+                )));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("reqId", req.getId());
+        out.put("reqNo", req.getReqNo());
+        out.put("fileName", req.getReqNo() + "-evidence.zip");
+        out.put("contentType", "application/zip");
+        out.put("sha256", packaged.getSha256());
+        out.put("objectPath", objectPath);
+        out.put("bytes", zip.length);
+        out.put("contentBase64", Base64.getEncoder().encodeToString(zip));
+        out.put("reason", reason);
+        out.put("operator", currentOperator());
+        out.put("downloadedAt", new Date());
+        return out;
+    }
+
+    private byte[] buildEvidenceZip(String reqNo, String evidenceJson, List<GovDelEvidence> items) {
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+                ZipEntry root = new ZipEntry("evidence.json");
+                zos.putNextEntry(root);
+                zos.write(evidenceJson.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+
+                ZipEntry meta = new ZipEntry("meta.json");
+                zos.putNextEntry(meta);
+                zos.write(JSONUtil.toJsonStr(Map.of(
+                        "reqNo", reqNo,
+                        "packedAt", new Date(),
+                        "itemCount", items == null ? 0 : items.size()
+                )).getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+
+                if (items != null) {
+                    int i = 0;
+                    for (GovDelEvidence e : items) {
+                        if ("package".equals(e.getKind())) {
+                            continue;
+                        }
+                        String name = "items/" + String.format("%03d", i++) + "-"
+                                + StrUtil.blankToDefault(e.getKind(), "item") + ".json";
+                        ZipEntry entry = new ZipEntry(name);
+                        zos.putNextEntry(entry);
+                        Map<String, Object> body = new LinkedHashMap<>();
+                        body.put("kind", e.getKind());
+                        body.put("title", e.getTitle());
+                        body.put("objectPath", e.getObjectPath());
+                        body.put("sha256", e.getSha256());
+                        body.put("content", e.getContent());
+                        body.put("createTime", e.getCreateTime());
+                        zos.write(JSONUtil.toJsonStr(body).getBytes(StandardCharsets.UTF_8));
+                        zos.closeEntry();
+                    }
+                }
+            }
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new CommonException("组装证据 ZIP 失败：{}", e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseEvidenceMeta(String content) {
+        if (StrUtil.isBlank(content)) {
+            return Map.of();
+        }
+        try {
+            Object o = JSONUtil.parse(content);
+            if (o instanceof Map<?, ?> m) {
+                return (Map<String, Object>) m;
+            }
+        } catch (Exception ignored) {
+            // ignore
+        }
+        return Map.of();
+    }
+
+    /** 解析 {@code s3a://bucket/key} → [bucket, key] */
+    private String[] parseS3aPath(String uri) {
+        String u = StrUtil.removePrefix(StrUtil.blankToDefault(uri, ""), "s3a://");
+        u = StrUtil.removePrefix(u, "s3://");
+        int slash = u.indexOf('/');
+        if (slash <= 0 || slash >= u.length() - 1) {
+            throw new CommonException("非法对象路径：{}", uri);
+        }
+        return new String[]{u.substring(0, slash), u.substring(slash + 1)};
     }
 
     private List<Map<String, Object>> evidenceChecklist(GovDelRequest req, List<GovDelTarget> targets,

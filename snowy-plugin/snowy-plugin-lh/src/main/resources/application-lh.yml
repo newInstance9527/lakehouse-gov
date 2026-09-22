@@ -110,6 +110,11 @@ lh:
     vault-path: platform/minio/s3
     bucket: lh-portal
     dataset-prefix: adhoc/dataset
+    # 合规证据包：独立 Object Lock 桶优先；无锁则落盘 + wormApplied=false
+    evidence-bucket: lh-audit
+    evidence-prefix: compliance/evidence
+    evidence-worm-days: 2555
+    evidence-worm-mode: COMPLIANCE
     region: us-east-1
     # access-key / secret-key 建议只写 Vault，此处可留空
   etl:

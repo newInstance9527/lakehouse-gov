@@ -2,6 +2,7 @@ package vip.xiaonuo.lh.modular.compliance.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestCreateParam;
@@ -66,8 +67,17 @@ public interface GovDelService {
 
     GovDelRequestVo abort(GovDelActionParam param);
 
-    /** 证据包：工单 + 计划 + 执行流水 + 验证 + 回执，返回可归档清单。 */
+    /**
+     * 证据包：组装清单 + ZIP 落对象存储（WORM 保留期）；返回 checklist / sha256 / objectPath。
+     * MinIO 不可达时 soft-fail：仍回 checklist，{@code stored=false}。
+     */
     Map<String, Object> evidence(String reqIdOrNo);
+
+    /**
+     * 二次授权下载证据包 ZIP：须回填 req_no + 用途；从对象存储读取并写审计。
+     * 响应含 contentBase64，不得写入列表默认字段。
+     */
+    Map<String, Object> downloadEvidence(GovDelEvidenceDownloadParam param);
 
     List<GovDelSubjectMapVo> listSubjectMaps(String ws, String subjectType, String carrier);
 
