@@ -32,6 +32,7 @@ import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.listener.CommonDataChangeEventCenter;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.sys.core.enums.SysDataTypeEnum;
+import vip.xiaonuo.sys.modular.org.entity.SysOrg;
 import vip.xiaonuo.sys.modular.org.param.SysOrgSelectorTreeParam;
 import vip.xiaonuo.sys.modular.org.service.SysOrgService;
 import vip.xiaonuo.sys.modular.position.entity.SysPosition;
@@ -43,6 +44,7 @@ import vip.xiaonuo.sys.modular.user.entity.SysUser;
 import vip.xiaonuo.sys.modular.user.service.SysUserService;
 
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -67,7 +69,17 @@ public class SysPositionServiceImpl extends ServiceImpl<SysPositionMapper, SysPo
         queryWrapper.lambda().select(SysPosition::getId, SysPosition::getOrgId, SysPosition::getName, SysPosition::getCode,
                 SysPosition::getCategory, SysPosition::getSortCode);
         if(ObjectUtil.isNotEmpty(sysPositionPageParam.getOrgId())) {
-            queryWrapper.lambda().eq(SysPosition::getOrgId, sysPositionPageParam.getOrgId());
+            if (Boolean.TRUE.equals(sysPositionPageParam.getSearchIncludeChild())) {
+                List<String> childOrgIdList = CollStreamUtil.toList(sysOrgService.getChildListById(sysOrgService
+                        .getAllOrgList(), sysPositionPageParam.getOrgId(), true), SysOrg::getId);
+                if (ObjectUtil.isNotEmpty(childOrgIdList)) {
+                    queryWrapper.lambda().in(SysPosition::getOrgId, childOrgIdList);
+                } else {
+                    queryWrapper.lambda().eq(SysPosition::getId, "-1");
+                }
+            } else {
+                queryWrapper.lambda().eq(SysPosition::getOrgId, sysPositionPageParam.getOrgId());
+            }
         }
         if(ObjectUtil.isNotEmpty(sysPositionPageParam.getCategory())) {
             queryWrapper.lambda().eq(SysPosition::getCategory, sysPositionPageParam.getCategory());
@@ -82,7 +94,19 @@ public class SysPositionServiceImpl extends ServiceImpl<SysPositionMapper, SysPo
         } else {
             queryWrapper.lambda().orderByAsc(SysPosition::getSortCode);
         }
-        return this.page(CommonPageRequest.defaultPage(), queryWrapper);
+        Page<SysPosition> page = this.page(CommonPageRequest.defaultPage(), queryWrapper);
+        fillOrgName(page.getRecords());
+        return page;
+    }
+
+    /** 回填所属部门名称，便于父节点汇总下级职位时区分归属 */
+    private void fillOrgName(List<SysPosition> records) {
+        if (ObjectUtil.isEmpty(records)) {
+            return;
+        }
+        Map<String, String> orgNameMap = sysOrgService.getAllOrgList().stream()
+                .collect(Collectors.toMap(SysOrg::getId, SysOrg::getName, (a, b) -> a));
+        records.forEach(p -> p.setOrgName(orgNameMap.get(p.getOrgId())));
     }
 
     @Transactional(rollbackFor = Exception.class)

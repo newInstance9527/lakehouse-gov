@@ -90,7 +90,7 @@ public class GovLineageServiceImpl implements GovLineageService {
     public Map<String, Object> graph(String node, String focus, String omFqn, Integer upDepth, Integer downDepth, String ws) {
         int up = clamp(upDepth, 5);
         int down = clamp(downDepth, 5);
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String focusKey = firstNonBlank(omFqn, node, focus);
         if (StrUtil.isBlank(focusKey)) {
             focusKey = pickDefaultFocusTable(workspace);
@@ -138,7 +138,7 @@ public class GovLineageServiceImpl implements GovLineageService {
     public Map<String, Object> impact(String node, String focus, String omFqn, Integer upDepth, Integer downDepth, String ws) {
         int up = clamp(upDepth, 5);
         int down = clamp(downDepth, 5);
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String focusKey = firstNonBlank(omFqn, node, focus);
         if (StrUtil.isBlank(focusKey)) {
             focusKey = pickDefaultFocusTable(workspace);
@@ -199,8 +199,8 @@ public class GovLineageServiceImpl implements GovLineageService {
     public Page<GovLineageEdgeVo> pageFields(GovLineagePageParam param) {
         QueryWrapper<GovLineageFieldEdge> qw = new QueryWrapper<>();
         qw.lambda().eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE);
-        String workspace = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovLineageFieldEdge::getWs, workspace);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
+        qw.lambda().eq(StrUtil.isNotBlank(workspace), GovLineageFieldEdge::getWs, workspace);
         String q = StrUtil.blankToDefault(param.getQ(), param.getKeyword());
         if (StrUtil.isNotBlank(q)) {
             qw.and(w -> w.like("from_table", q).or().like("from_field", q)
@@ -297,9 +297,9 @@ public class GovLineageServiceImpl implements GovLineageService {
         if (StrUtil.isBlank(etlJobId)) {
             return 0;
         }
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<GovLineageFieldEdge> rows = edgeMapper.selectList(new QueryWrapper<GovLineageFieldEdge>().lambda()
-                .eq(GovLineageFieldEdge::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLineageFieldEdge::getWs, workspace)
                 .eq(GovLineageFieldEdge::getEtlJobId, etlJobId.trim())
                 .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE));
         Date now = new Date();
@@ -317,7 +317,7 @@ public class GovLineageServiceImpl implements GovLineageService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> syncFields(String ws, String etlJobId) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String markKey = "ws:" + workspace + (StrUtil.isBlank(etlJobId) ? "" : (":job:" + etlJobId));
         String markValue = String.valueOf(System.currentTimeMillis());
 
@@ -328,7 +328,7 @@ public class GovLineageServiceImpl implements GovLineageService {
         int topologyOk = 0;
         List<String> notes = new ArrayList<>();
         QueryWrapper<IgEtlDag> dqw = new QueryWrapper<>();
-        dqw.lambda().eq(IgEtlDag::getWs, workspace);
+        dqw.lambda().eq(StrUtil.isNotBlank(workspace), IgEtlDag::getWs, workspace);
         if (StrUtil.isNotBlank(etlJobId)) {
             dqw.and(w -> w.eq("dag_code", etlJobId).or().eq("id", etlJobId));
         }
@@ -372,7 +372,7 @@ public class GovLineageServiceImpl implements GovLineageService {
         }
 
         long edges = edgeMapper.selectCount(new QueryWrapper<GovLineageFieldEdge>().lambda()
-                .eq(GovLineageFieldEdge::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLineageFieldEdge::getWs, workspace)
                 .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE));
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("ok", true);
@@ -439,7 +439,7 @@ public class GovLineageServiceImpl implements GovLineageService {
 
     @Override
     public Map<String, Object> syncStatus(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<CbLineageSyncWatermark> list = watermarkMapper.selectList(new QueryWrapper<CbLineageSyncWatermark>()
                 .likeRight("mark_key", "ws:" + workspace)
                 .orderByDesc("update_time"));
@@ -637,10 +637,10 @@ public class GovLineageServiceImpl implements GovLineageService {
 
     @Override
     public Map<String, Object> assessPublishGate(String ws, String tableHint) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String table = StrUtil.trim(tableHint);
         List<GovLineageDdlBlock> active = ddlBlockMapper.selectList(new QueryWrapper<GovLineageDdlBlock>().lambda()
-                .eq(GovLineageDdlBlock::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLineageDdlBlock::getWs, workspace)
                 .eq(GovLineageDdlBlock::getActive, 1)
                 .eq(GovLineageDdlBlock::getDeleteFlag, NOT_DELETE));
         if (active.isEmpty()) {
@@ -648,7 +648,7 @@ public class GovLineageServiceImpl implements GovLineageService {
             if (StrUtil.isNotBlank(table)) {
                 List<GovLineageChangeEval> pendingRows = changeEvalMapper.selectList(
                         new QueryWrapper<GovLineageChangeEval>().lambda()
-                                .eq(GovLineageChangeEval::getWs, workspace)
+                                .eq(StrUtil.isNotBlank(workspace), GovLineageChangeEval::getWs, workspace)
                                 .eq(GovLineageChangeEval::getStatus, "pending")
                                 .eq(GovLineageChangeEval::getDeleteFlag, NOT_DELETE));
                 for (GovLineageChangeEval e : pendingRows) {
@@ -691,10 +691,10 @@ public class GovLineageServiceImpl implements GovLineageService {
 
     @Override
     public Map<String, Object> assessLineageIngestGate(String ws, String tableHint) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String table = StrUtil.trim(tableHint);
         long total = edgeMapper.selectCount(new QueryWrapper<GovLineageFieldEdge>().lambda()
-                .eq(GovLineageFieldEdge::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLineageFieldEdge::getWs, workspace)
                 .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE));
         if (total <= 0) {
             Map<String, Object> skip = new LinkedHashMap<>();
@@ -712,7 +712,7 @@ public class GovLineageServiceImpl implements GovLineageService {
             return pass;
         }
         long matched = edgeMapper.selectCount(new QueryWrapper<GovLineageFieldEdge>().lambda()
-                .eq(GovLineageFieldEdge::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLineageFieldEdge::getWs, workspace)
                 .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE)
                 .and(w -> w.like(GovLineageFieldEdge::getFromTable, table)
                         .or().like(GovLineageFieldEdge::getToTable, table)));
@@ -1013,7 +1013,7 @@ public class GovLineageServiceImpl implements GovLineageService {
 
     private List<GovLineageFieldEdge> listActiveEdges(String ws) {
         return edgeMapper.selectList(new QueryWrapper<GovLineageFieldEdge>().lambda()
-                .eq(GovLineageFieldEdge::getWs, ws)
+                .eq(StrUtil.isNotBlank(ws), GovLineageFieldEdge::getWs, ws)
                 .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE));
     }
 
@@ -1089,11 +1089,11 @@ public class GovLineageServiceImpl implements GovLineageService {
             return null;
         }
         String shortName = table.contains(".") ? table.substring(table.lastIndexOf('.') + 1) : table;
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         try {
             List<vip.xiaonuo.lh.modular.catalog.entity.GovAsset> hits =
                     govAssetMapper.selectList(new QueryWrapper<vip.xiaonuo.lh.modular.catalog.entity.GovAsset>().lambda()
-                            .eq(vip.xiaonuo.lh.modular.catalog.entity.GovAsset::getWs, workspace)
+                            .eq(StrUtil.isNotBlank(workspace), vip.xiaonuo.lh.modular.catalog.entity.GovAsset::getWs, workspace)
                             .eq(vip.xiaonuo.lh.modular.catalog.entity.GovAsset::getDeleteFlag, NOT_DELETE)
                             .and(w -> w.eq(vip.xiaonuo.lh.modular.catalog.entity.GovAsset::getName, table)
                                     .or().eq(vip.xiaonuo.lh.modular.catalog.entity.GovAsset::getName, shortName)

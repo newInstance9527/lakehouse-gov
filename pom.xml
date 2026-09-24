@@ -27,6 +27,11 @@
         <dingtalk-stream.version>1.3.7</dingtalk-stream.version>
         <druid.version>1.2.21</druid.version>
         <dynamic-datasource.version>4.3.1</dynamic-datasource.version>
+        <!-- Tika 2.9.x 需要 getNextEntry():TarArchiveEntry；MinIO/EasyExcel 会拉到 1.19/1.21 -->
+        <commons-compress.version>1.26.1</commons-compress.version>
+        <tika.version>2.9.2</tika.version>
+        <!-- 与 Tika 2.9.2 一致；避免 EasyExcel 的 POI 4.1.2 + schemas 混入导致 docx NoSuchFieldError -->
+        <poi.version>5.2.5</poi.version>
         <easy-poi.version>4.4.0</easy-poi.version>
         <easy-trans.version>3.1.4</easy-trans.version>
         <easyexcel.version>3.3.3</easyexcel.version>
@@ -307,6 +312,43 @@
                 <groupId>cn.afterturn</groupId>
                 <artifactId>easypoi-spring-boot-starter</artifactId>
                 <version>${easy-poi.version}</version>
+            </dependency>
+
+            <!-- KB 上传：对齐 Tika 2.9.x；否则 MinIO 1.21 / EasyExcel+POI 1.19 会 NoSuchMethodError -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-compress</artifactId>
+                <version>${commons-compress.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-core</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-parsers-standard-package</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.poi</groupId>
+                <artifactId>poi</artifactId>
+                <version>${poi.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.poi</groupId>
+                <artifactId>poi-ooxml</artifactId>
+                <version>${poi.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.poi</groupId>
+                <artifactId>poi-scratchpad</artifactId>
+                <version>${poi.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.poi</groupId>
+                <artifactId>poi-ooxml-lite</artifactId>
+                <version>${poi.version}</version>
             </dependency>
 
             <!-- sm-crypto -->

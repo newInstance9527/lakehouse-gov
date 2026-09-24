@@ -9,7 +9,7 @@ import lombok.Setter;
 @Setter
 public class ApplyTicketCreateParam {
 
-    @Schema(description = "类型：table_read|lake_export|resource_manage|compliance_delete|api_publish|api_subscribe|metric|scan_elevate|quality_fix；兼容前端 export/perm/manage/compliance/publish/api/elevated/quality")
+    @Schema(description = "类型：table_read|lake_export|resource_manage|compliance_delete|api_publish|script_publish|api_subscribe|metric|scan_elevate|quality_fix；兼容前端 export/perm/manage/compliance/publish/api/elevated/quality")
     private String ticketType;
 
     @NotBlank
@@ -43,8 +43,17 @@ public class ApplyTicketCreateParam {
     @Schema(description = "资源类型：asset|datasource|etl（resource_manage）")
     private String resourceType;
 
-    @Schema(description = "资源 ID（resource_manage；asset 时亦可填 assetId）")
+    @Schema(description = "资源 ID（resource_manage；asset 时亦可填 assetId；script_publish 填 cp_release.id）")
     private String resourceId;
+
+    @Schema(description = "脚本 id（script_publish）")
+    private String scriptId;
+
+    @Schema(description = "发布目标环境（script_publish：dev/stg）")
+    private String publishEnv;
+
+    @Schema(description = "回滚预案（script_publish）")
+    private String rollbackPlan;
 
     @Schema(description = "合规删除请求号 gov_del_request.req_no（compliance_delete MUST）")
     private String reqNo;
@@ -78,4 +87,7 @@ public class ApplyTicketCreateParam {
 
     @Schema(description = "口径变更说明（metric + change）")
     private String caliberDiff;
+
+    @Schema(description = "幂等键；亦可放请求头 Idempotency-Key / X-Idempotency-Key")
+    private String idempotencyKey;
 }

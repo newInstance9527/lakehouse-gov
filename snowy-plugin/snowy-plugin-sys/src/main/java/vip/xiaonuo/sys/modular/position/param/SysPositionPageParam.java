@@ -46,6 +46,13 @@ public class SysPositionPageParam {
     @Schema(description = "组织id")
     private String orgId;
 
+    /**
+     * 是否包含下级组织职位（默认 false，仅本部门）。
+     * 职位管理选父节点查挂接职位时应传 true。
+     */
+    @Schema(description = "是否包含下级组织，true=本部门及所有子部门")
+    private Boolean searchIncludeChild;
+
     /** 职位分类 */
     @Schema(description = "职位分类")
     private String category;

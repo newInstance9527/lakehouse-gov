@@ -159,6 +159,13 @@ public class CpScriptGitStore {
     }
 
     public String bindRemote(String ws, String remoteUrl) {
+        return bindRemote(ws, remoteUrl, true);
+    }
+
+    /**
+     * 绑定 origin 并推送 stg（及可选 tags）。失败返回警告文案，不抛业务异常。
+     */
+    public String bindRemote(String ws, String remoteUrl, boolean pushTags) {
         if (StrUtil.isBlank(remoteUrl)) {
             return null;
         }
@@ -168,7 +175,12 @@ public class CpScriptGitStore {
             config.setString("remote", "origin", "url", remoteUrl.trim());
             config.save();
             try {
-                git.push().setRemote("origin").setRefSpecs(new RefSpec("refs/heads/stg:refs/heads/stg")).call();
+                var push = git.push().setRemote("origin")
+                        .setRefSpecs(new RefSpec("refs/heads/stg:refs/heads/stg"));
+                if (pushTags) {
+                    push.setPushTags();
+                }
+                push.call();
                 return null;
             } catch (Exception pushFail) {
                 return "远程已记录但推送失败: " + pushFail.getMessage();
@@ -176,6 +188,70 @@ public class CpScriptGitStore {
         } catch (Exception e) {
             return "绑定 Git 远程失败: " + e.getMessage();
         }
+    }
+
+    /** 仅推送已有 remote（publish/rollback 后补推 tag）。 */
+    public String pushOrigin(String ws, boolean pushTags) {
+        ensure(ws);
+        try (Git git = Git.open(repoDir(ws))) {
+            String url = git.getRepository().getConfig().getString("remote", "origin", "url");
+            if (StrUtil.isBlank(url)) {
+                return "未配置 origin，跳过推送";
+            }
+            var push = git.push().setRemote("origin")
+                    .setRefSpecs(new RefSpec("refs/heads/stg:refs/heads/stg"));
+            if (pushTags) {
+                push.setPushTags();
+            }
+            push.call();
+            return null;
+        } catch (Exception e) {
+            return "推送 origin 失败: " + e.getMessage();
+        }
+    }
+
+    /**
+     * 从当前 HEAD 建分支并推送到 origin（评审分支 review/{id}）。
+     * @return 警告文案；成功 null
+     */
+    public String createAndPushBranch(String ws, String branch) {
+        String name = sanitizeBranch(branch);
+        if (StrUtil.isBlank(name)) {
+            return "分支名为空";
+        }
+        ensure(ws);
+        try (Git git = Git.open(repoDir(ws))) {
+            boolean exists = git.getRepository().findRef("refs/heads/" + name) != null;
+            if (!exists) {
+                git.branchCreate().setName(name).call();
+            }
+            String url = git.getRepository().getConfig().getString("remote", "origin", "url");
+            if (StrUtil.isBlank(url)) {
+                return "未配置 origin，分支仅本地: " + name;
+            }
+            git.push().setRemote("origin")
+                    .setRefSpecs(new RefSpec("refs/heads/" + name + ":refs/heads/" + name))
+                    .setForce(false)
+                    .call();
+            return null;
+        } catch (Exception e) {
+            return "创建/推送分支 " + name + " 失败: " + e.getMessage();
+        }
+    }
+
+    /**
+     * 确保 base 分支（默认 prod）存在并已推送；不存在时从当前 HEAD 创建。
+     * 首次发布时 PR 可能无 diff（head==base），合并仍完成门闩。
+     */
+    public String ensureBaseBranch(String ws, String baseBranch) {
+        String name = sanitizeBranch(StrUtil.blankToDefault(baseBranch, "prod"));
+        return createAndPushBranch(ws, name);
+    }
+
+    private static String sanitizeBranch(String branch) {
+        return StrUtil.blankToDefault(branch, "")
+                .trim()
+                .replaceAll("[^A-Za-z0-9._\\-/]", "-");
     }
 
     private void ensure(String ws) {

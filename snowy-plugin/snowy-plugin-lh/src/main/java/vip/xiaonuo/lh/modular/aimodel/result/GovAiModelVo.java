@@ -16,6 +16,10 @@ public class GovAiModelVo {
     private String name;
     private String vendor;
     private String kind;
+    /** 对话模型是否支持图片输入（视觉/多模态） */
+    private Boolean supportsVision;
+    /** 是否支持图片输出（生图） */
+    private Boolean supportsImageOutput;
     private String modelName;
     private String baseUrl;
     private String endpoint;
@@ -51,4 +55,18 @@ public class GovAiModelVo {
     private Boolean litellmSyncOk;
     private Boolean litellmSyncSkipped;
     private String litellmSyncMessage;
+    /** 模型 Token 总限额；null/0 = 不限 */
+    private Long tokenQuota;
+    /** 模型成本总限额；null/0 = 不限 */
+    private BigDecimal costQuota;
+    /** 累计已用 Token（gov_ai_usage_daily 全量按 modelId 汇总） */
+    private Long tokenUsed;
+    private Long tokenRemaining;
+    private Integer tokenPct;
+    /** 累计已用成本 */
+    private BigDecimal costUsed;
+    private BigDecimal costRemaining;
+    private Integer costPct;
+    /** true = Token/成本至少一项有总限额 */
+    private Boolean quotaLimited;
 }

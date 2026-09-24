@@ -21,9 +21,15 @@ public interface GovAiModelService {
 
     Page<GovAiModelVo> page(GovAiModelPageParam param);
 
+    /** 模型详情（Key 仅脱敏） */
+    GovAiModelVo detail(String id);
+
     GovAiModelVo create(GovAiModelUpsertParam param);
 
     GovAiModelVo update(String id, GovAiModelUpsertParam param);
+
+    /** 软删模型；尽力停用 LiteLLM 别名 */
+    void delete(String id);
 
     /** 轮换 Key → Vault；列表仅脱敏 */
     GovAiModelVo rotate(String id, GovAiModelRotateParam param);
@@ -51,6 +57,27 @@ public interface GovAiModelService {
 
     Map<String, Object> usage(String range, String group, String ws);
 
-    /** 累加当日用量（chat / embed 调用后） */
-    void recordUsage(String ws, String modelId, long promptTokens, long completionTokens);
+    /** 累加当日用量（chat / embed 调用后）；latencyMs 可空，有值则计入平均响应 */
+    void recordUsage(String ws, String modelId, long promptTokens, long completionTokens, Integer latencyMs);
+
+    /** @see #recordUsage(String, String, long, long, Integer) */
+    default void recordUsage(String ws, String modelId, long promptTokens, long completionTokens) {
+        recordUsage(ws, modelId, promptTokens, completionTokens, null);
+    }
+
+    /**
+     * AI 用量硬门禁（须在调用 LiteLLM / OpenAI 兼容上游之前）：
+     * <ol>
+     *   <li>工作空间日配额 {@code gov_ws_quota.ai_*}</li>
+     *   <li>所选模型总限额 {@code gov_ai_model.token_quota}/{@code cost_quota}
+     *       （按 modelId 汇总 {@code gov_ai_usage_daily} 全量）</li>
+     * </ol>
+     * null/0 = 该维不限。
+     */
+    void assertDailyQuota(String ws, String modelId);
+
+    /** @see #assertDailyQuota(String, String) */
+    default void assertDailyQuota(String ws) {
+        assertDailyQuota(ws, null);
+    }
 }

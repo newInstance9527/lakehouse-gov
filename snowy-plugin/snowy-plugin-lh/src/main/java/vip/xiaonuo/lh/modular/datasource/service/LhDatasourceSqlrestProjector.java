@@ -10,6 +10,8 @@ import org.springframework.stereotype.Component;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.engine.SqlrestClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
+import vip.xiaonuo.lh.core.ws.ExternalBindingGuard;
+import vip.xiaonuo.lh.core.ws.ExternalName;
 import vip.xiaonuo.lh.modular.datasource.entity.LhConsumerBinding;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.enums.LhDatasourceStatusEnum;
@@ -43,6 +45,8 @@ public class LhDatasourceSqlrestProjector {
     private LhVaultClient vaultClient;
     @Resource
     private LhConsumerBindingMapper bindingMapper;
+    @Resource
+    private ExternalBindingGuard externalBindingGuard;
 
     public static boolean isProjectable(String portalType) {
         return portalType != null && PROJECTABLE.contains(portalType.toLowerCase(Locale.ROOT));
@@ -91,8 +95,12 @@ public class LhDatasourceSqlrestProjector {
             return result;
         }
 
-        String dsName = "lh_" + StrUtil.blankToDefault(ds.getDsCode(), ds.getId());
+        String ws = StrUtil.blankToDefault(ds.getWs(), "default");
+        String code = StrUtil.blankToDefault(ds.getDsCode(), ds.getId());
+        String dsName = ExternalName.of(ws, code);
+        String extId = ExternalName.extId(ExternalName.KIND_SQLREST_DS, ws, code);
         LhConsumerBinding existing = findBinding(ds.getId());
+        externalBindingGuard.assertConsumerExtIdFree(extId, existing == null ? null : existing.getId());
         Long sqlrestId = null;
         if (existing != null && StrUtil.isNotBlank(existing.getProjection())) {
             sqlrestId = JSONUtil.parseObj(existing.getProjection()).getLong("sqlrestDatasourceId");
@@ -130,13 +138,14 @@ public class LhDatasourceSqlrestProjector {
         boolean ok = Boolean.TRUE.equals(srResp.get("ok")) && sqlrestId != null;
         result.put("ok", ok);
         result.put("degraded", Boolean.TRUE.equals(srResp.get("degraded")));
+        result.put("extId", extId);
         result.put("sqlrest", srResp);
         result.put("sqlrestDatasourceId", sqlrestId);
         result.put("sqlrestType", mapped.sqlrestType());
         result.put("sqlrestName", dsName);
 
         if (ok) {
-            upsertBindingOk(ds.getId(), sqlrestId, mapped.sqlrestType(), dsName);
+            upsertBindingOk(ds.getId(), sqlrestId, mapped.sqlrestType(), dsName, extId);
         } else {
             upsertBindingError(ds.getId(), String.valueOf(srResp.get("message")));
             if (StrUtil.isBlank(String.valueOf(result.get("message")))) {
@@ -194,12 +203,13 @@ public class LhDatasourceSqlrestProjector {
                 .last("LIMIT 1"));
     }
 
-    private void upsertBindingOk(String dsId, Long sqlrestId, String sqlrestType, String name) {
+    private void upsertBindingOk(String dsId, Long sqlrestId, String sqlrestType, String name, String extId) {
         LhConsumerBinding b = findBinding(dsId);
         Map<String, Object> proj = new LinkedHashMap<>();
         proj.put("sqlrestDatasourceId", sqlrestId);
         proj.put("sqlrestType", sqlrestType);
         proj.put("sqlrestName", name);
+        proj.put("extId", extId);
         // consumer_id 用门户 dsId 保持唯一键稳定；SQLREST id 只放 projection
         String consumerId = "ds:" + dsId;
         if (b == null) {
@@ -209,6 +219,7 @@ public class LhDatasourceSqlrestProjector {
             b.setDsId(dsId);
             b.setConsumerType(CONSUMER_TYPE);
             b.setConsumerId(consumerId);
+            b.setExtId(extId);
             b.setStatus("ENABLE");
             b.setDeleteFlag("NOT_DELETE");
             b.setProjection(JSONUtil.toJsonStr(proj));
@@ -218,6 +229,7 @@ public class LhDatasourceSqlrestProjector {
             bindingMapper.insert(b);
         } else {
             b.setConsumerId(consumerId);
+            b.setExtId(extId);
             b.setProjection(JSONUtil.toJsonStr(proj));
             b.setSyncState("synced");
             b.setLastSyncAt(new Date());

@@ -53,7 +53,7 @@ public class ExportBoardServiceImpl implements ExportBoardService {
 
     @Override
     public Map<String, Object> summary(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<ApplyTicket> tickets = listExportTickets(workspace, null);
         List<Map<String, Object>> sinks = listOutboundSinks(workspace);
 
@@ -95,7 +95,7 @@ public class ExportBoardServiceImpl implements ExportBoardService {
 
     @Override
     public List<Map<String, Object>> jobs(String ws, String status, String q) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String statusFilter = StrUtil.trim(status);
         String keyword = StrUtil.trim(q);
 
@@ -155,7 +155,7 @@ public class ExportBoardServiceImpl implements ExportBoardService {
 
     @Override
     public Map<String, Object> audit(String ws, String ticketNo) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<Map<String, Object>> formal = exportAuditService.list(workspace, ticketNo);
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("ok", true);
@@ -231,7 +231,7 @@ public class ExportBoardServiceImpl implements ExportBoardService {
         QueryWrapper<ApplyTicket> qw = new QueryWrapper<>();
         qw.lambda().eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
                 .eq(ApplyTicket::getTicketType, ApplyTicketServiceImpl.TYPE_LAKE_EXPORT)
-                .eq(ApplyTicket::getWs, ws)
+                .eq(StrUtil.isNotBlank(ws), ApplyTicket::getWs, ws)
                 .eq(StrUtil.isNotBlank(status), ApplyTicket::getStatus, status)
                 .orderByDesc(ApplyTicket::getCreateTime);
         return ticketMapper.selectList(qw);
@@ -239,7 +239,7 @@ public class ExportBoardServiceImpl implements ExportBoardService {
 
     private List<Map<String, Object>> listOutboundSinks(String ws) {
         List<IgEtlDag> dags = dagMapper.selectList(new QueryWrapper<IgEtlDag>().lambda()
-                .eq(IgEtlDag::getWs, ws));
+                .eq(StrUtil.isNotBlank(ws), IgEtlDag::getWs, ws));
         Map<String, IgEtlDag> byId = dags.stream()
                 .collect(Collectors.toMap(IgEtlDag::getId, d -> d, (a, b) -> a));
         if (byId.isEmpty()) {

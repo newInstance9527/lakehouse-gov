@@ -13,6 +13,8 @@ import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.ApisixClient;
 import vip.xiaonuo.lh.core.engine.SqlrestClient;
+import vip.xiaonuo.lh.core.ws.ExternalBindingGuard;
+import vip.xiaonuo.lh.core.ws.ExternalName;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiKeyMeta;
@@ -64,6 +66,8 @@ public class DataapiServiceImpl implements DataapiService {
     private ApiBuildTableAccess apiBuildTableAccess;
     @Resource
     private LhProperties lhProperties;
+    @Resource
+    private ExternalBindingGuard externalBindingGuard;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -265,8 +269,10 @@ public class DataapiServiceImpl implements DataapiService {
         } else {
             apiBuildTableAccess.assertSqlTablesSelectable(portalDsCheck, engine, sqlForBody);
         }
+        ensureProjectionExtId(binding);
+        String srName = ExternalName.of(binding.getWs(), binding.getId());
         Map<String, Object> body = sqlrestClient.buildSaveBody(
-                binding.getName(),
+                srName,
                 StrUtil.blankToDefault(param.getDescription(), binding.getName()),
                 binding.getMethod(),
                 binding.getPublicPath(),
@@ -433,11 +439,12 @@ public class DataapiServiceImpl implements DataapiService {
             degraded = true;
         }
 
-        String routeId = StrUtil.blankToDefault(b.getApisixRouteId(), "lh-dataapi-" + b.getId());
+        String routeId = ExternalName.of(b.getWs(), b.getId());
         int qps = b.getQpsLimit() == null ? 100 : b.getQpsLimit();
         int burst = b.getBurstLimit() == null ? qps * 2 : b.getBurstLimit();
         Map<String, Object> apisix = Map.of("ok", true, "skipped", true, "edgeMode", sqlrestClient.edgeMode());
         if (sqlrestClient.useApisixEdge()) {
+            externalBindingGuard.assertApisixRouteIdFree(routeId, b.getId());
             apisix = apisixClient.upsertRoute(
                     routeId, b.getPublicPath(), b.getMethod(), sqlrestClient.executorUpstream(), qps, burst);
             if (!Boolean.TRUE.equals(apisix.get("ok"))) {
@@ -584,9 +591,16 @@ public class DataapiServiceImpl implements DataapiService {
         int fail = 0;
         List<Map<String, Object>> details = new ArrayList<>();
         for (DataapiApiBinding b : list) {
-            String routeId = StrUtil.blankToDefault(b.getApisixRouteId(), "lh-dataapi-" + b.getId());
+            String routeId = ExternalName.of(b.getWs(), b.getId());
             int qps = b.getQpsLimit() == null ? 100 : b.getQpsLimit();
             int burst = b.getBurstLimit() == null ? qps * 2 : b.getBurstLimit();
+            try {
+                externalBindingGuard.assertApisixRouteIdFree(routeId, b.getId());
+            } catch (CommonException ex) {
+                fail++;
+                details.add(Map.of("ok", false, "routeId", routeId, "message", ex.getMessage()));
+                continue;
+            }
             Map<String, Object> r = apisixClient.upsertRoute(
                     routeId, b.getPublicPath(), b.getMethod(), sqlrestClient.executorUpstream(), qps, burst);
             if (Boolean.TRUE.equals(r.get("ok"))) {
@@ -1224,7 +1238,17 @@ public class DataapiServiceImpl implements DataapiService {
         b.setState("draft");
         b.setDeleteFlag(NOT_DELETE);
         applyParam(b, param);
+        ensureProjectionExtId(b);
         return b;
+    }
+
+    /** SQLREST/APISIX 投影外部名：写入 ext_id 并做全局唯一校验 */
+    private void ensureProjectionExtId(DataapiApiBinding b) {
+        String ws = StrUtil.blankToDefault(b.getWs(), WS_DEFAULT);
+        String code = StrUtil.blankToDefault(b.getId(), "api");
+        String extId = ExternalName.extId(ExternalName.KIND_SQLREST_API, ws, code);
+        externalBindingGuard.assertDataapiExtIdFree(extId, b.getId());
+        b.setExtId(extId);
     }
 
     private void applyParam(DataapiApiBinding b, DataapiBindingParam param) {
@@ -1289,6 +1313,7 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("burst", b.getBurstLimit());
         m.put("sqlrestApiId", b.getSqlrestApiId());
         m.put("apisixRouteId", b.getApisixRouteId());
+        m.put("extId", b.getExtId());
         m.put("sourceKind", b.getSourceKind());
         m.put("sourceRef", b.getSourceRef());
         m.put("portalDsId", b.getPortalDsId());

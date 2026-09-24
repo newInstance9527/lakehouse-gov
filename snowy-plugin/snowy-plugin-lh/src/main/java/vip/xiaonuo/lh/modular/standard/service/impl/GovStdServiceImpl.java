@@ -85,23 +85,23 @@ public class GovStdServiceImpl implements GovStdService {
 
     @Override
     public Map<String, Object> overview(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         long fields = fieldMapper.selectCount(new QueryWrapper<GovStdField>().lambda()
-                .eq(GovStdField::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdField::getWs, workspace)
                 .eq(GovStdField::getDeleteFlag, NOT_DELETE));
         long codes = codeMapper.selectCount(new QueryWrapper<GovStdCode>().lambda()
-                .eq(GovStdCode::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdCode::getWs, workspace)
                 .eq(GovStdCode::getDeleteFlag, NOT_DELETE));
         long mappings = mappingMapper.selectCount(new QueryWrapper<GovStdMapping>().lambda()
-                .eq(GovStdMapping::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdMapping::getWs, workspace)
                 .eq(GovStdMapping::getDeleteFlag, NOT_DELETE));
         long failOrWarn = detectMapper.selectCount(new QueryWrapper<GovStdDetectResult>().lambda()
-                .eq(GovStdDetectResult::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdDetectResult::getWs, workspace)
                 .in(GovStdDetectResult::getStatus, List.of("fail", "warn")));
         long detectTotal = detectMapper.selectCount(new QueryWrapper<GovStdDetectResult>().lambda()
-                .eq(GovStdDetectResult::getWs, workspace));
+                .eq(StrUtil.isNotBlank(workspace), GovStdDetectResult::getWs, workspace));
         long okDetect = detectMapper.selectCount(new QueryWrapper<GovStdDetectResult>().lambda()
-                .eq(GovStdDetectResult::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdDetectResult::getWs, workspace)
                 .eq(GovStdDetectResult::getStatus, "ok"));
         int rate = detectTotal == 0 ? 100 : (int) Math.round(okDetect * 100.0 / detectTotal);
 
@@ -119,8 +119,8 @@ public class GovStdServiceImpl implements GovStdService {
     public Page<GovStdFieldVo> pageFields(GovStdPageParam param) {
         QueryWrapper<GovStdField> qw = new QueryWrapper<GovStdField>().checkSqlInjection();
         qw.lambda().eq(GovStdField::getDeleteFlag, NOT_DELETE);
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovStdField::getWs, ws);
+        String ws = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
+        qw.lambda().eq(StrUtil.isNotBlank(ws), GovStdField::getWs, ws);
         String domain = firstNonBlank(param.getDomain(), param.getDomainCode());
         if (StrUtil.isNotBlank(domain)) {
             qw.lambda().eq(GovStdField::getDomainCode, domain.trim());
@@ -158,7 +158,7 @@ public class GovStdServiceImpl implements GovStdService {
         fieldName = fieldName.trim();
         String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
         GovStdField existing = fieldMapper.selectOne(new QueryWrapper<GovStdField>().lambda()
-                .eq(GovStdField::getWs, ws)
+                .eq(StrUtil.isNotBlank(ws), GovStdField::getWs, ws)
                 .eq(GovStdField::getFieldName, fieldName)
                 .eq(GovStdField::getDeleteFlag, NOT_DELETE)
                 .last("LIMIT 1"));
@@ -216,8 +216,8 @@ public class GovStdServiceImpl implements GovStdService {
     public Page<GovStdCodeVo> pageCodes(GovStdPageParam param) {
         QueryWrapper<GovStdCode> qw = new QueryWrapper<GovStdCode>().checkSqlInjection();
         qw.lambda().eq(GovStdCode::getDeleteFlag, NOT_DELETE);
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovStdCode::getWs, ws);
+        String ws = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
+        qw.lambda().eq(StrUtil.isNotBlank(ws), GovStdCode::getWs, ws);
         if (StrUtil.isNotBlank(param.getStatus())) {
             qw.lambda().eq(GovStdCode::getComplianceStatus, param.getStatus().trim().toLowerCase(Locale.ROOT));
         }
@@ -261,7 +261,7 @@ public class GovStdServiceImpl implements GovStdService {
         }
         String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
         GovStdCode existing = codeMapper.selectOne(new QueryWrapper<GovStdCode>().lambda()
-                .eq(GovStdCode::getWs, ws)
+                .eq(StrUtil.isNotBlank(ws), GovStdCode::getWs, ws)
                 .eq(GovStdCode::getCodeSetId, codeSetId)
                 .eq(GovStdCode::getDeleteFlag, NOT_DELETE)
                 .last("LIMIT 1"));
@@ -332,7 +332,7 @@ public class GovStdServiceImpl implements GovStdService {
     public Page<GovStdNamingVo> pageNamings(GovStdPageParam param) {
         QueryWrapper<GovStdNaming> qw = new QueryWrapper<GovStdNaming>().checkSqlInjection();
         qw.lambda().eq(GovStdNaming::getDeleteFlag, NOT_DELETE);
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
+        String ws = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
         qw.lambda().eq(GovStdNaming::getWs, ws);
         if (StrUtil.isNotBlank(param.getLayer())) {
             qw.lambda().eq(GovStdNaming::getLayer, param.getLayer().trim());
@@ -404,8 +404,8 @@ public class GovStdServiceImpl implements GovStdService {
     public Page<GovStdMappingVo> pageMappings(GovStdPageParam param) {
         QueryWrapper<GovStdMapping> qw = new QueryWrapper<GovStdMapping>().checkSqlInjection();
         qw.lambda().eq(GovStdMapping::getDeleteFlag, NOT_DELETE);
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovStdMapping::getWs, ws);
+        String ws = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
+        qw.lambda().eq(StrUtil.isNotBlank(ws), GovStdMapping::getWs, ws);
         if (StrUtil.isNotBlank(param.getStatus())) {
             qw.lambda().eq(GovStdMapping::getStatus, param.getStatus().trim().toLowerCase(Locale.ROOT));
         }
@@ -455,7 +455,7 @@ public class GovStdServiceImpl implements GovStdService {
         String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
 
         GovStdMapping existing = mappingMapper.selectOne(new QueryWrapper<GovStdMapping>().lambda()
-                .eq(GovStdMapping::getWs, ws)
+                .eq(StrUtil.isNotBlank(ws), GovStdMapping::getWs, ws)
                 .eq(GovStdMapping::getSrcObject, srcObject.trim())
                 .eq(GovStdMapping::getSrcField, srcField.trim())
                 .eq(GovStdMapping::getTargetTable, targetTable)
@@ -524,8 +524,8 @@ public class GovStdServiceImpl implements GovStdService {
     @Override
     public Page<GovStdDetectVo> pageDetects(GovStdPageParam param) {
         QueryWrapper<GovStdDetectResult> qw = new QueryWrapper<GovStdDetectResult>().checkSqlInjection();
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovStdDetectResult::getWs, ws);
+        String ws = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
+        qw.lambda().eq(StrUtil.isNotBlank(ws), GovStdDetectResult::getWs, ws);
         if (StrUtil.isNotBlank(param.getStatus())) {
             qw.lambda().eq(GovStdDetectResult::getStatus, param.getStatus().trim().toLowerCase(Locale.ROOT));
         }
@@ -554,11 +554,11 @@ public class GovStdServiceImpl implements GovStdService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> runLandingDetect(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String runId = "std-detect-" + IdUtil.getSnowflakeNextIdStr();
         Date now = new Date();
         List<GovStdMapping> mappings = mappingMapper.selectList(new QueryWrapper<GovStdMapping>().lambda()
-                .eq(GovStdMapping::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdMapping::getWs, workspace)
                 .eq(GovStdMapping::getDeleteFlag, NOT_DELETE));
         int ok = 0;
         int warn = 0;
@@ -571,7 +571,7 @@ public class GovStdServiceImpl implements GovStdService {
 
             // 1) 标准字段是否登记
             GovStdField stdField = fieldMapper.selectOne(new QueryWrapper<GovStdField>().lambda()
-                    .eq(GovStdField::getWs, workspace)
+                    .eq(StrUtil.isNotBlank(workspace), GovStdField::getWs, workspace)
                     .eq(GovStdField::getFieldName, m.getStdFieldName())
                     .eq(GovStdField::getDeleteFlag, NOT_DELETE)
                     .last("LIMIT 1"));
@@ -607,7 +607,7 @@ public class GovStdServiceImpl implements GovStdService {
             // 3) 码值合规（映射绑定码值集时）
             if (StrUtil.isNotBlank(m.getCodeSetId())) {
                 GovStdCode code = codeMapper.selectOne(new QueryWrapper<GovStdCode>().lambda()
-                        .eq(GovStdCode::getWs, workspace)
+                        .eq(StrUtil.isNotBlank(workspace), GovStdCode::getWs, workspace)
                         .eq(GovStdCode::getCodeSetId, m.getCodeSetId().trim())
                         .eq(GovStdCode::getDeleteFlag, NOT_DELETE)
                         .last("LIMIT 1"));
@@ -652,7 +652,7 @@ public class GovStdServiceImpl implements GovStdService {
         // 无映射时：对已登记标准字段做存在性占位检测，避免空跑无反馈
         if (mappings.isEmpty()) {
             List<GovStdField> fields = fieldMapper.selectList(new QueryWrapper<GovStdField>().lambda()
-                    .eq(GovStdField::getWs, workspace)
+                    .eq(StrUtil.isNotBlank(workspace), GovStdField::getWs, workspace)
                     .eq(GovStdField::getDeleteFlag, NOT_DELETE)
                     .last("LIMIT 50"));
             for (GovStdField f : fields) {
@@ -737,7 +737,7 @@ public class GovStdServiceImpl implements GovStdService {
             return Map.of();
         }
         List<GovStdMapping> list = mappingMapper.selectList(new QueryWrapper<GovStdMapping>().lambda()
-                .eq(GovStdMapping::getWs, ws)
+                .eq(StrUtil.isNotBlank(ws), GovStdMapping::getWs, ws)
                 .eq(GovStdMapping::getDeleteFlag, NOT_DELETE)
                 .in(GovStdMapping::getStdFieldName, names));
         return list.stream().collect(Collectors.groupingBy(GovStdMapping::getStdFieldName, Collectors.counting()));
@@ -946,9 +946,9 @@ public class GovStdServiceImpl implements GovStdService {
         if (byId != null && NOT_DELETE.equals(byId.getDeleteFlag())) {
             return byId;
         }
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         GovStdField byName = fieldMapper.selectOne(new QueryWrapper<GovStdField>().lambda()
-                .eq(GovStdField::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdField::getWs, workspace)
                 .eq(GovStdField::getFieldName, idOrName.trim())
                 .eq(GovStdField::getDeleteFlag, NOT_DELETE)
                 .last("LIMIT 1"));
@@ -966,9 +966,9 @@ public class GovStdServiceImpl implements GovStdService {
         if (byId != null && NOT_DELETE.equals(byId.getDeleteFlag())) {
             return byId;
         }
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         GovStdCode bySet = codeMapper.selectOne(new QueryWrapper<GovStdCode>().lambda()
-                .eq(GovStdCode::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovStdCode::getWs, workspace)
                 .eq(GovStdCode::getCodeSetId, idOrCodeSetId.trim())
                 .eq(GovStdCode::getDeleteFlag, NOT_DELETE)
                 .last("LIMIT 1"));

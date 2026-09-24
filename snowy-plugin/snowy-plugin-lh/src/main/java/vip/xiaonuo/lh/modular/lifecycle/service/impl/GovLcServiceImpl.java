@@ -88,7 +88,7 @@ public class GovLcServiceImpl implements GovLcService {
 
     @Override
     public Map<String, Object> overview(String ws) {
-        String workspace = wsOrDefault(ws);
+        String workspace = listWs(ws);
         // 总存储 = 物理口径，与 /lh/lifecycle/storage/summary 同源（三口径）
         Map<String, Object> summary = govLcStorageService.summary(workspace, "30d");
         long physicalBytes = toLong(summary.get("physicalBytes"));
@@ -103,7 +103,7 @@ public class GovLcServiceImpl implements GovLcService {
 
         Date monthStart = monthStart();
         List<GovLcRun> monthRuns = runMapper.selectList(new QueryWrapper<GovLcRun>().lambda()
-                .eq(GovLcRun::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLcRun::getWs, workspace)
                 .eq(GovLcRun::getDeleteFlag, NOT_DELETE)
                 .ge(GovLcRun::getCreateTime, monthStart)
                 .eq(GovLcRun::getStatus, "success"));
@@ -135,9 +135,9 @@ public class GovLcServiceImpl implements GovLcService {
 
     @Override
     public Map<String, Object> latestJobs(String ws) {
-        String workspace = wsOrDefault(ws);
+        String workspace = listWs(ws);
         GovLcRun latestDaily = runMapper.selectOne(new QueryWrapper<GovLcRun>().lambda()
-                .eq(GovLcRun::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLcRun::getWs, workspace)
                 .eq(GovLcRun::getKind, "daily")
                 .eq(GovLcRun::getDeleteFlag, NOT_DELETE)
                 .orderByDesc(GovLcRun::getCreateTime)
@@ -185,10 +185,10 @@ public class GovLcServiceImpl implements GovLcService {
         if (StrUtil.isBlank(tableFqn)) {
             throw new CommonException("table 不能为空");
         }
-        String workspace = wsOrDefault(ws);
+        String workspace = listWs(ws);
         String fqn = tableFqn.trim();
         GovLcTableStat stat = tableStatMapper.selectOne(new QueryWrapper<GovLcTableStat>().lambda()
-                .eq(GovLcTableStat::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLcTableStat::getWs, workspace)
                 .eq(GovLcTableStat::getTableFqn, fqn)
                 .eq(GovLcTableStat::getDeleteFlag, NOT_DELETE)
                 .last("LIMIT 1"));
@@ -226,9 +226,9 @@ public class GovLcServiceImpl implements GovLcService {
 
     @Override
     public List<GovLcPolicyVo> listPolicies(String ws) {
-        String workspace = wsOrDefault(ws);
+        String workspace = listWs(ws);
         return policyMapper.selectList(new QueryWrapper<GovLcPolicy>().lambda()
-                        .eq(GovLcPolicy::getWs, workspace)
+                        .eq(StrUtil.isNotBlank(workspace), GovLcPolicy::getWs, workspace)
                         .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE)
                         .orderByAsc(GovLcPolicy::getTableFqn))
                 .stream()
@@ -241,7 +241,7 @@ public class GovLcServiceImpl implements GovLcService {
         if (StrUtil.isBlank(tableFqn)) {
             throw new CommonException("table 不能为空");
         }
-        GovLcPolicy policy = findPolicy(wsOrDefault(ws), tableFqn.trim());
+        GovLcPolicy policy = findPolicy(listWs(ws), tableFqn.trim());
         if (policy == null) {
             throw new CommonException("策略不存在：" + tableFqn);
         }
@@ -367,7 +367,7 @@ public class GovLcServiceImpl implements GovLcService {
 
         // 若指定表则走 Iceberg remove_orphan_files dry_run；否则对策略表逐表提交（取首表）或登记扫描投影
         List<GovLcPolicy> policies = policyMapper.selectList(new QueryWrapper<GovLcPolicy>().lambda()
-                .eq(GovLcPolicy::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLcPolicy::getWs, workspace)
                 .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE)
                 .eq(GovLcPolicy::getStatus, "active")
                 .orderByAsc(GovLcPolicy::getTableFqn));
@@ -464,7 +464,7 @@ public class GovLcServiceImpl implements GovLcService {
         String runId = IdUtil.getSnowflakeNextIdStr();
 
         List<GovLcPolicy> policies = policyMapper.selectList(new QueryWrapper<GovLcPolicy>().lambda()
-                .eq(GovLcPolicy::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovLcPolicy::getWs, workspace)
                 .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE)
                 .eq(GovLcPolicy::getStatus, "active"));
 
@@ -528,7 +528,7 @@ public class GovLcServiceImpl implements GovLcService {
     public Page<GovLcRunVo> pageRuns(GovLcRunPageParam param) {
         String workspace = wsOrDefault(param.getWs());
         QueryWrapper<GovLcRun> qw = new QueryWrapper<GovLcRun>().checkSqlInjection();
-        qw.lambda().eq(GovLcRun::getWs, workspace).eq(GovLcRun::getDeleteFlag, NOT_DELETE);
+        qw.lambda().eq(StrUtil.isNotBlank(workspace), GovLcRun::getWs, workspace).eq(GovLcRun::getDeleteFlag, NOT_DELETE);
         if (StrUtil.isNotBlank(param.getKind())) {
             qw.lambda().eq(GovLcRun::getKind, param.getKind().trim());
         }
@@ -1004,6 +1004,11 @@ public class GovLcServiceImpl implements GovLcService {
 
     private String wsOrDefault(String ws) {
         return StrUtil.blankToDefault(ws, WS_DEFAULT);
+    }
+
+    /** 列表：空=全局 */
+    private String listWs(String ws) {
+        return vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
     }
 
     private long nvl(Long v) {

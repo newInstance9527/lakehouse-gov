@@ -175,13 +175,14 @@ public class GovMetricServiceImpl implements GovMetricService {
                     .or().like(GovMetric::getName, kw)
                     .or().like(GovMetric::getOwner, kw));
         }
+        // 目录默认：非废弃在前，组内按创建时间倒序（新→旧）；已废弃(status=deprecated)置底
         if (StrUtil.isNotBlank(param.getSortField())) {
             String order = StrUtil.blankToDefault(param.getSortOrder(), CommonSortOrderEnum.DESC.getValue());
             CommonSortOrderEnum.validate(order);
             qw.orderBy(true, order.equalsIgnoreCase(CommonSortOrderEnum.ASC.getValue()),
                     StrUtil.toUnderlineCase(param.getSortField()));
         } else {
-            qw.lambda().orderByDesc(GovMetric::getUpdateTime).orderByDesc(GovMetric::getCreateTime);
+            qw.last("ORDER BY CASE WHEN `status` = 'deprecated' THEN 1 ELSE 0 END ASC, create_time DESC");
         }
         Page<GovMetric> raw = metricMapper.selectPage(CommonPageRequest.defaultPage(), qw);
         Page<GovMetricVo> out = new Page<>(raw.getCurrent(), raw.getSize(), raw.getTotal());
@@ -986,6 +987,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         vo.setOmFqn(head.getOmFqn());
         vo.setGravAssetId(head.getGravAssetId());
         vo.setRevision(head.getRevision());
+        vo.setCreateTime(head.getCreateTime());
         vo.setUpdateTime(head.getUpdateTime());
 
         GovMetricVer ver = StrUtil.isBlank(head.getCurrentVerId()) ? null : verMapper.selectById(head.getCurrentVerId());

@@ -127,11 +127,9 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     public Page<GovAssetVo> page(GovAssetPageParam param) {
         QueryWrapper<GovAsset> qw = new QueryWrapper<GovAsset>().checkSqlInjection();
         qw.lambda().eq(GovAsset::getDeleteFlag, NOT_DELETE);
-        // 软过滤：传 ws 则按归属筛；空则「查看全部」（非 Catalog 硬隔离）
+        // 空间优先：缺省 scope=workspace；enterprise=已发布共享层；all=特权巡检
+        applyListScope(qw, param);
         String ws = StrUtil.trim(param.getWs());
-        if (StrUtil.isNotBlank(ws)) {
-            qw.lambda().eq(GovAsset::getWs, ws);
-        }
 
         String layer = param.getLayer();
         if (StrUtil.isNotBlank(layer)) {
@@ -384,6 +382,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         asset.setRevision(1);
         asset.setStatus(GovAssetStatusEnum.ACTIVE.getValue());
         asset.setWs(ws);
+        asset.setVisibility("private_ws");
+        asset.setShareStatus("none");
         asset.setRemark(param.getRemark());
         asset.setAssetCode(assetCode);
         asset.setName(name);
@@ -746,6 +746,53 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     @Override
     public List<Map<String, Object>> listMetaDrifts(String ws, Integer limit) {
         return govAssetMetaDriftReconcile.listOpen(ws, limit);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovAssetVo publishShare(GovAssetIdParam param) {
+        GovAsset asset = requireAsset(param.getId());
+        asset.setVisibility("shared_enterprise");
+        asset.setShareStatus("published");
+        asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
+        asset.setUpdateTime(new Date());
+        this.updateById(asset);
+        return detail(param);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovAssetVo unpublishShare(GovAssetIdParam param) {
+        GovAsset asset = requireAsset(param.getId());
+        asset.setVisibility("private_ws");
+        asset.setShareStatus("none");
+        asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
+        asset.setUpdateTime(new Date());
+        this.updateById(asset);
+        return detail(param);
+    }
+
+    /**
+     * workspace（默认）：按 home_ws 筛；enterprise：已发布共享；all：不过滤归属。
+     * 兼容：未传 scope 但传了 ws → 按 workspace；二者皆空 → 回落 default 空间（禁止隐式全局）。
+     */
+    private void applyListScope(QueryWrapper<GovAsset> qw, GovAssetPageParam param) {
+        String scope = StrUtil.trim(param.getScope());
+        String ws = StrUtil.trim(param.getWs());
+        if (StrUtil.isBlank(scope)) {
+            scope = StrUtil.isNotBlank(ws) ? "workspace" : "workspace";
+        }
+        String s = scope.toLowerCase(Locale.ROOT);
+        if ("enterprise".equals(s)) {
+            qw.lambda().and(w -> w.in(GovAsset::getVisibility, "shared_enterprise", "listed_public")
+                    .or().eq(GovAsset::getShareStatus, "published"));
+            return;
+        }
+        if ("all".equals(s)) {
+            return;
+        }
+        String home = StrUtil.blankToDefault(ws, "default");
+        qw.lambda().eq(GovAsset::getWs, home);
     }
 
     private Map<String, Object> buildDriftExtra(GovAsset asset) {
@@ -1610,6 +1657,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         vo.setLastSyncAt(a.getLastSyncAt());
         vo.setLastSyncStatus(a.getLastSyncStatus());
         vo.setWs(a.getWs());
+        vo.setVisibility(StrUtil.blankToDefault(a.getVisibility(), "private_ws"));
+        vo.setShareStatus(StrUtil.blankToDefault(a.getShareStatus(), "none"));
         vo.setRevision(a.getRevision());
         vo.setUpdateTime(a.getUpdateTime());
 

@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -12,7 +13,9 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.knowledge.param.GovKbCiteAckParam;
@@ -38,8 +41,10 @@ public class GovKbController {
 
     @Operation(summary = "知识库 KPI")
     @GetMapping("/lh/knowledge/overview")
-    public CommonResult<Map<String, Object>> overview(@RequestParam(required = false) String ws) {
-        return CommonResult.data(govKbService.overview(ws));
+    public CommonResult<Map<String, Object>> overview(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String scope) {
+        return CommonResult.data(govKbService.overview(ws, scope));
     }
 
     @Operation(summary = "Milvus 向量探针（D2；未启用则关键词降级）")
@@ -59,6 +64,40 @@ public class GovKbController {
     @PostMapping("/lh/knowledge/entries")
     public CommonResult<GovKbEntryVo> create(@RequestBody GovKbUpsertParam param) {
         return CommonResult.data(govKbService.create(param));
+    }
+
+    @Operation(summary = "上传文档并解析入库（真实抽取正文 → 分片索引）")
+    @CommonLog("上传知识文档")
+    @PostMapping(value = "/lh/knowledge/entries/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public CommonResult<GovKbEntryVo> upload(
+            @RequestPart("file") MultipartFile file,
+            @RequestParam(required = false) String title,
+            @RequestParam(required = false) String cat,
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String scope,
+            @RequestParam(required = false) String strategy,
+            @RequestParam(required = false) Integer chunkSize,
+            @RequestParam(required = false) Integer overlap,
+            @RequestParam(required = false) String separator,
+            @RequestParam(required = false) String embedModelId,
+            @RequestParam(required = false) String refs,
+            @RequestParam(required = false) String refsJson,
+            @RequestParam(required = false) String remark,
+            @RequestParam(required = false) String entryId) {
+        GovKbUpsertParam meta = new GovKbUpsertParam();
+        meta.setTitle(title);
+        meta.setCat(cat);
+        meta.setWs(ws);
+        meta.setScope(scope);
+        meta.setStrategy(strategy);
+        meta.setChunkSize(chunkSize);
+        meta.setOverlap(overlap);
+        meta.setSeparator(separator);
+        meta.setEmbedModelId(embedModelId);
+        meta.setRefs(refs);
+        meta.setRefsJson(refsJson);
+        meta.setRemark(remark);
+        return CommonResult.data(govKbService.upload(file, meta, entryId));
     }
 
     @Operation(summary = "知识条目详情")

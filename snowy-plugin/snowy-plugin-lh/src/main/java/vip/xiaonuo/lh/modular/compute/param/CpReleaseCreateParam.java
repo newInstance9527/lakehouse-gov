@@ -10,4 +10,6 @@ public class CpReleaseCreateParam {
     private String ws;
     private String engine;
     private String env;
+    /** 幂等键；亦可放请求头 Idempotency-Key / X-Idempotency-Key */
+    private String idempotencyKey;
 }

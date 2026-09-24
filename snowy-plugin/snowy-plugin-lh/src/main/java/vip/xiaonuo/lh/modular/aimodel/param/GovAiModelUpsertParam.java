@@ -53,8 +53,14 @@ public class GovAiModelUpsertParam {
     @Schema(description = "角色备注")
     private String roleLabel;
 
-    @Schema(description = "chat|embed")
+    @Schema(description = "chat|embed|image")
     private String kind;
+
+    @Schema(description = "对话模型是否支持图片输入（视觉/多模态）；与 kind=image 无关")
+    private Boolean supportsVision;
+
+    @Schema(description = "是否支持图片输出（生图）；kind=image 时默认 true")
+    private Boolean supportsImageOutput;
 
     @Schema(description = "local|egress；空则按 baseUrl/vendor 推断")
     private String egressKind;
@@ -66,4 +72,10 @@ public class GovAiModelUpsertParam {
     private String ws;
 
     private String remark;
+
+    @Schema(description = "模型 Token 总限额；省略不改（更新）；传 0=不限")
+    private Long tokenQuota;
+
+    @Schema(description = "模型成本总限额；省略不改（更新）；传 0=不限")
+    private BigDecimal costQuota;
 }

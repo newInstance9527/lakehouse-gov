@@ -182,8 +182,9 @@ public class LhDatasourceController {
 
     @Operation(summary = "KPI统计")
     @GetMapping("/lh/datasource/kpi")
-    public CommonResult<Map<String, Object>> kpi() {
-        return CommonResult.data(datasourceService.kpi());
+    public CommonResult<Map<String, Object>> kpi(
+            @RequestParam(required = false) String ws) {
+        return CommonResult.data(datasourceService.kpi(ws));
     }
 
     @Operation(summary = "类型选项")

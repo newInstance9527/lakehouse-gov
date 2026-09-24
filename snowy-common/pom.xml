@@ -131,10 +131,16 @@
             <version>2.8.13</version>
         </dependency>
 
-        <!-- easy-poi -->
+        <!-- easy-poi（排除 POI4 schemas，避免与 Tika/POI5 的 ooxml-lite 冲突） -->
         <dependency>
             <groupId>cn.afterturn</groupId>
             <artifactId>easypoi-spring-boot-starter</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.poi</groupId>
+                    <artifactId>poi-ooxml-schemas</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- sm-crypto -->
@@ -143,10 +149,16 @@
             <artifactId>sm-crypto</artifactId>
         </dependency>
 
-        <!-- easyexcel -->
+        <!-- easyexcel（排除 POI4 schemas；版本由父 POM 对齐 Tika 的 POI 5.2.5） -->
         <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>easyexcel</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.poi</groupId>
+                    <artifactId>poi-ooxml-schemas</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- json-flattener -->

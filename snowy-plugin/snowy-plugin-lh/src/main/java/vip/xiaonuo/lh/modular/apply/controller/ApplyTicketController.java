@@ -46,8 +46,9 @@ public class ApplyTicketController {
 
     @Operation(summary = "看板 KPI（待我/我的/本月通过驳回）")
     @GetMapping("/lh/apply/kpi")
-    public CommonResult<Map<String, Object>> kpi() {
-        return CommonResult.data(applyTicketService.kpi());
+    public CommonResult<Map<String, Object>> kpi(
+            @RequestParam(required = false) String ws) {
+        return CommonResult.data(applyTicketService.kpi(ws));
     }
 
     @Operation(summary = "通过申请")

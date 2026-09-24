@@ -1,0 +1,12 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# IDEA historically defaults *.properties to ISO-8859-1; keep UTF-8 native
+# (no \uXXXX). Pair with File Encodings → properties UTF-8, native-to-ascii OFF.
+[*.properties]
+charset = utf-8

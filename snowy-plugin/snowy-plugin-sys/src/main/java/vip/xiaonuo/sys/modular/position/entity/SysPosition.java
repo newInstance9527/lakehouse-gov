@@ -39,6 +39,11 @@ public class SysPosition extends CommonEntity {
     @Schema(description = "组织id")
     private String orgId;
 
+    /** 组织名称（非表字段，列表含下级时回填） */
+    @Schema(description = "组织名称")
+    @TableField(exist = false)
+    private String orgName;
+
     /** 名称 */
     @Schema(description = "名称")
     private String name;

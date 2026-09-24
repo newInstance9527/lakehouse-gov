@@ -1,5 +1,6 @@
 package vip.xiaonuo.lh.modular.knowledge.entity;
 
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -22,6 +23,8 @@ public class GovKbEntry extends CommonEntity {
     /** indexing|ready|failed */
     private String status;
     private String ws;
+    /** workspace | platform */
+    private String scope;
     private String remark;
     /** term|dict|practice|faq|manual */
     private String cat;
@@ -33,6 +36,8 @@ public class GovKbEntry extends CommonEntity {
     private String strategy;
     private Integer chunkSize;
     private Integer overlap;
+    /** MySQL reserved word; must be backticked in generated SQL */
+    @TableField("`separator`")
     private String separator;
     private String embedModelId;
     private String refsJson;

@@ -19,9 +19,12 @@ class CpScriptSupportTest {
     @Test
     void lintBlocksProdAndWarnsFullScan() {
         assertTrue(CpScriptLint.hasError(CpScriptLint.check("INSERT INTO prod_dwd.t SELECT 1")));
-        assertFalse(CpScriptLint.hasError(CpScriptLint.check("SELECT * FROM dev_dwd.t")));
+        assertFalse(CpScriptLint.hasError(CpScriptLint.check("SELECT * FROM dev_dwd.t WHERE dt='x'")));
         assertEquals("warn", CpScriptLint.check("SELECT * FROM dev_dwd.t").get(0).get("tone"));
         assertEquals("ok", CpScriptLint.check("SELECT * FROM dev_dwd.t WHERE dt = '2026-01-01'").get(0).get("tone"));
+        assertTrue(CpScriptLint.hasError(CpScriptLint.check("INSERT INTO dwd_order SELECT 1", "TEST", true)));
+        assertFalse(CpScriptLint.hasError(CpScriptLint.check("INSERT INTO stg_dwd.order SELECT 1", "PRE", true)));
+        assertTrue(CpScriptLint.hasError(CpScriptLint.check("INSERT INTO t SELECT * FROM s3a://warehouse/x", "TEST", true)));
         assertThrows(IllegalArgumentException.class, () -> CpScriptLint.normalizeEnv("PROD"));
     }
 

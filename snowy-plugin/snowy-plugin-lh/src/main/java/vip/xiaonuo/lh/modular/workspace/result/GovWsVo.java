@@ -16,12 +16,14 @@ public class GovWsVo {
 
     private String id;
     private String wsCode;
+    private String wsKind;
     private String name;
     private String icon;
     private String domainCode;
     private String costCenter;
     private String trinoRg;
     private String preferredSchemas;
+    private String techNs;
     private String owners;
     private String detail;
     private String status;
@@ -42,4 +44,16 @@ public class GovWsVo {
 
     /** 共享 Catalog 提示（定型：非隔离） */
     private String sharedCatalog;
+    /**
+     * Git 远程展示（已去 userinfo，永不含 token）。
+     * 原始带凭证 URL 仅存库供服务端 push，不经本字段下发。
+     */
+    private String gitRemoteUrlDisplay;
+    /** true=手填自定义公网 remote（同步保留）；false/null=平台托管或未绑定 */
+    private Boolean gitRemoteCustom;
+    /**
+     * @deprecated 兼容旧前端；恒为脱敏展示或 null，勿当 raw。请用 {@link #gitRemoteUrlDisplay}。
+     */
+    @Deprecated
+    private String gitRemoteUrl;
 }

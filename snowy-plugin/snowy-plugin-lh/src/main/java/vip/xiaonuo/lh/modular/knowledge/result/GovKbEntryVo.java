@@ -30,7 +30,13 @@ public class GovKbEntryVo {
     private Integer citeCnt;
     private Integer chunkCount;
     private String status;
+    /** indexing|ready|failed 时的错误摘要（来自 remark indexError=） */
+    private String indexError;
+    /** keyword | hybrid | none — 最近一次索引是否写入向量 */
+    private String indexMode;
     private String ws;
+    /** workspace | platform */
+    private String scope;
     private Integer revision;
     private Date updateTime;
     private List<Map<String, Object>> chunks;

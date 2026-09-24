@@ -318,7 +318,18 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
                     .like(SysUser::getName, sysUserPageParam.getSearchKey()));
         }
         if (ObjectUtil.isNotEmpty(sysUserPageParam.getOrgId())) {
-            queryWrapper.lambda().eq(SysUser::getOrgId, sysUserPageParam.getOrgId());
+            if (Boolean.TRUE.equals(sysUserPageParam.getSearchIncludeChild())) {
+                List<String> childOrgIdList = CollStreamUtil.toList(sysOrgService.getChildListById(sysOrgService
+                        .getAllOrgList(), sysUserPageParam.getOrgId(), true), SysOrg::getId);
+                if (ObjectUtil.isNotEmpty(childOrgIdList)) {
+                    queryWrapper.lambda().in(SysUser::getOrgId, childOrgIdList);
+                } else {
+                    // 无匹配组织时返回空页
+                    queryWrapper.lambda().eq(SysUser::getId, "-1");
+                }
+            } else {
+                queryWrapper.lambda().eq(SysUser::getOrgId, sysUserPageParam.getOrgId());
+            }
         }
         if (ObjectUtil.isNotEmpty(sysUserPageParam.getUserStatus())) {
             queryWrapper.lambda().eq(SysUser::getUserStatus, sysUserPageParam.getUserStatus());
@@ -394,7 +405,12 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
         if(updateSuperAdminAccount) {
             throw new CommonException("不可修改系统内置超管用户账号");
         }
+        String keepPositionId = sysUser.getPositionId();
         BeanUtil.copyProperties(sysUserEditParam, sysUser);
+        // positionId 可空：挂主部门等场景未传时保留原职位
+        if (ObjectUtil.isEmpty(sysUserEditParam.getPositionId())) {
+            sysUser.setPositionId(keepPositionId);
+        }
         // 更新用户
         this.updateById(sysUser);
         // 发布更新事件

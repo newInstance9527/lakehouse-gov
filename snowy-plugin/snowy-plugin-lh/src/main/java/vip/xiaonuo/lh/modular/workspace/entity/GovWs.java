@@ -23,12 +23,16 @@ public class GovWs extends CommonEntity {
     private String ws;
     private String remark;
     private String wsCode;
+    /** team / enterprise / isolated */
+    private String wsKind;
     private String name;
     private String icon;
     private String domainCode;
     private String costCenter;
     private String trinoRg;
     private String preferredSchemas;
+    /** 隔离空间可选技术命名空间 */
+    private String techNs;
     private String owners;
     private String detail;
     private String tagsJson;

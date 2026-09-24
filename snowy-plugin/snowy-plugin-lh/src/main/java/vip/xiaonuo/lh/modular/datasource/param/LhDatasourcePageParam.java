@@ -62,6 +62,10 @@ public class LhDatasourcePageParam {
     @Schema(description = "DAG可用")
     private String usableInDag;
 
+    /** 工作空间；空=不过滤（全局） */
+    @Schema(description = "工作空间")
+    private String ws;
+
     /** 排序字段 */
     @Schema(description = "排序字段")
     private String sortField;

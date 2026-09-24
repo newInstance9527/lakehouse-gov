@@ -46,6 +46,7 @@ public class GovMetricVo {
     private String omFqn;
     private String gravAssetId;
     private Integer revision;
+    private Date createTime;
     private Date updateTime;
     private List<String> depCodes;
     private List<Map<String, Object>> history;

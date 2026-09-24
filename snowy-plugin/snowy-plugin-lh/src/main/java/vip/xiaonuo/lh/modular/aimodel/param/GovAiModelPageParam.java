@@ -14,8 +14,11 @@ public class GovAiModelPageParam {
     @Schema(description = "工作空间")
     private String ws;
 
-    @Schema(description = "chat|embed")
+    @Schema(description = "chat|embed|image；all 或不传则不过滤")
     private String kind;
+
+    @Schema(description = "仅返回支持视觉输入的模型（true/1）")
+    private Boolean supportsVision;
 
     @Schema(description = "排序字段")
     private String sortField;

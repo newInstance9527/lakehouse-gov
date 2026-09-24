@@ -13,8 +13,11 @@ import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.auth.LhOwnerGuard;
+import vip.xiaonuo.lh.modular.aimodel.entity.GovAiUsageDaily;
+import vip.xiaonuo.lh.modular.aimodel.mapper.GovAiUsageDailyMapper;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
+import vip.xiaonuo.lh.modular.compute.support.CpGiteaClient;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWsMember;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWsQuota;
@@ -27,6 +30,9 @@ import vip.xiaonuo.lh.modular.workspace.param.GovWsCreateParam;
 import vip.xiaonuo.lh.modular.workspace.param.GovWsCurrentParam;
 import vip.xiaonuo.lh.modular.workspace.param.GovWsMemberItemParam;
 import vip.xiaonuo.lh.modular.workspace.param.GovWsMembersReplaceParam;
+import vip.xiaonuo.lh.modular.workspace.param.GovWsQuotaUpdateParam;
+import vip.xiaonuo.lh.modular.workspace.param.GovWsTagAddParam;
+import vip.xiaonuo.lh.modular.workspace.param.GovWsTagsReplaceParam;
 import vip.xiaonuo.lh.modular.workspace.result.GovWsMemberVo;
 import vip.xiaonuo.lh.modular.workspace.result.GovWsQuotaVo;
 import vip.xiaonuo.lh.modular.workspace.result.GovWsVo;
@@ -35,6 +41,7 @@ import vip.xiaonuo.lh.modular.workspace.service.GovWsService;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -67,6 +74,10 @@ public class GovWsServiceImpl implements GovWsService {
     private GovWsUserPrefMapper prefMapper;
     @Resource
     private GovAssetMapper assetMapper;
+    @Resource
+    private GovAiUsageDailyMapper aiUsageMapper;
+    @Resource
+    private CpGiteaClient giteaClient;
 
     @Override
     public Map<String, Object> overview() {
@@ -118,6 +129,7 @@ public class GovWsServiceImpl implements GovWsService {
         row.setWs(code);
         row.setRemark(param.getRemark());
         row.setWsCode(code);
+        row.setWsKind("team");
         row.setName(param.getName().trim());
         row.setIcon(StrUtil.blankToDefault(param.getIcon(), "🗂️"));
         row.setDomainCode(StrUtil.blankToDefault(param.getDomainCode(), "自定义"));
@@ -126,8 +138,15 @@ public class GovWsServiceImpl implements GovWsService {
         row.setPreferredSchemas(StrUtil.blankToDefault(param.getPreferredSchemas(), "—"));
         row.setOwners(StrUtil.blankToDefault(user.getName(), user.getAccount()));
         row.setDetail(StrUtil.blankToDefault(param.getDetail(),
-                "已创建归属空间，不新建 Grav Catalog。读数请走申请中心。"));
-        row.setTagsJson("[{\"text\":\"新建\",\"cls\":\"tag-blue\"},{\"text\":\"共享 Catalog\",\"cls\":\"tag-gray\"}]");
+                "已创建团队空间；列表默认跟随本空间。跨团队发现请发布到企业共享层。读数请走申请中心。"));
+        row.setTagsJson("[{\"text\":\"新建\",\"cls\":\"tag-blue\"},{\"text\":\"空间优先\",\"cls\":\"tag-gray\"}]");
+        if (giteaClient != null && giteaClient.enabled()) {
+            String ensureErr = giteaClient.ensureRepo(code, row.getId());
+            if (StrUtil.isBlank(ensureErr)) {
+                row.setGitRemoteUrl(giteaClient.remoteUrlFor(code, row.getId()));
+            }
+            // Gitea 不可达时仍可建空间；git_remote_url 留空，Owner 稍后「同步 Gitea」
+        }
         row.setDeleteFlag(NOT_DELETE);
         row.setCreateTime(now);
         row.setCreateUser(user.getId());
@@ -180,17 +199,163 @@ public class GovWsServiceImpl implements GovWsService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public GovWsVo archive(String wsCode) {
+        return softDelete(wsCode, "默认空间不可归档");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovWsVo delete(String wsCode) {
+        return softDelete(wsCode, "默认空间不可删除");
+    }
+
+    /**
+     * 软删：status=archived；列表只展示 active。
+     * 成员/配额行保留（历史与 showback）；用户偏好回落 default。
+     */
+    private GovWsVo softDelete(String wsCode, String defaultBlockedMsg) {
         GovWs row = requireWs(wsCode);
         assertWsOwner(row);
         if (WS_DEFAULT.equals(row.getWsCode())) {
-            throw new CommonException("默认空间不可归档");
+            throw new CommonException(defaultBlockedMsg);
         }
+        if (STATUS_ARCHIVED.equals(row.getStatus())) {
+            throw new CommonException("空间已归档/删除: " + row.getWsCode());
+        }
+        long activeCount = wsMapper.selectCount(new QueryWrapper<GovWs>().lambda()
+                .eq(GovWs::getDeleteFlag, NOT_DELETE)
+                .eq(GovWs::getStatus, STATUS_ACTIVE));
+        if (activeCount <= 1) {
+            throw new CommonException("至少保留一个活跃工作空间，不可删除最后一个");
+        }
+        String code = row.getWsCode();
         row.setStatus(STATUS_ARCHIVED);
+        row.setRevision(row.getRevision() == null ? 2 : row.getRevision() + 1);
+        Date now = new Date();
+        row.setUpdateTime(now);
+        row.setUpdateUser(LhLoginUsers.requireUserId());
+        wsMapper.updateById(row);
+
+        // 偏好指向已删空间 → 回落平台 default
+        List<GovWsUserPref> prefs = prefMapper.selectList(new QueryWrapper<GovWsUserPref>().lambda()
+                .eq(GovWsUserPref::getCurrentWsCode, code));
+        for (GovWsUserPref pref : prefs) {
+            pref.setCurrentWsCode(WS_DEFAULT);
+            pref.setUpdateTime(now);
+            prefMapper.updateById(pref);
+        }
+        return toVo(row, resolveCurrentWsCode());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovWsVo syncGitRemote(String wsCode) {
+        GovWs row = requireWs(wsCode);
+        assertWsOwner(row);
+        if (giteaClient == null || !giteaClient.enabled()) {
+            throw new CommonException("未启用 lh.compute.gitea，无法同步远程");
+        }
+        String stored = StrUtil.trim(row.getGitRemoteUrl());
+        // 自定义公网 remote：保留，不覆盖为平台 Gitea（畸形 ws-- 等仍改写）
+        if (giteaClient.isCustomPublicRemote(stored)
+                && !CpGiteaClient.isMalformedWsRepoRemote(stored)) {
+            return toVo(row, resolveCurrentWsCode());
+        }
+        String ensureErr = giteaClient.ensureRepo(row.getWsCode(), row.getId());
+        if (StrUtil.isNotBlank(ensureErr)) {
+            throw new CommonException(ensureErr);
+        }
+        String url = giteaClient.remoteUrlFor(row.getWsCode(), row.getId());
+        if (StrUtil.isBlank(url)) {
+            throw new CommonException("无法拼装 Gitea remote URL（检查 lh.compute.gitea.base-url/token）");
+        }
+        row.setGitRemoteUrl(url);
         row.setRevision(row.getRevision() == null ? 2 : row.getRevision() + 1);
         row.setUpdateTime(new Date());
         row.setUpdateUser(LhLoginUsers.requireUserId());
         wsMapper.updateById(row);
         return toVo(row, resolveCurrentWsCode());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovWsVo addTag(String wsCode, GovWsTagAddParam param) {
+        GovWs row = requireWs(wsCode);
+        assertWsOwner(row);
+        if (param == null || StrUtil.isBlank(param.getText())) {
+            throw new CommonException("标签文案不能为空");
+        }
+        String text = param.getText().trim();
+        if (text.length() > 32) {
+            throw new CommonException("标签文案最多 32 字");
+        }
+        String cls = normalizeTagCls(param.getCls());
+        List<Map<String, String>> tags = new ArrayList<>(parseTags(row.getTagsJson()));
+        for (Map<String, String> t : tags) {
+            if (text.equalsIgnoreCase(StrUtil.blankToDefault(t.get("text"), ""))) {
+                throw new CommonException("标签已存在: " + text);
+            }
+        }
+        if (tags.size() >= 12) {
+            throw new CommonException("每个空间最多 12 个标签");
+        }
+        Map<String, String> item = new LinkedHashMap<>();
+        item.put("text", text);
+        item.put("cls", cls);
+        tags.add(item);
+        persistTags(row, tags);
+        return toVo(requireWs(wsCode), resolveCurrentWsCode());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovWsVo removeTag(String wsCode, String text) {
+        GovWs row = requireWs(wsCode);
+        assertWsOwner(row);
+        String target = StrUtil.trim(text);
+        if (StrUtil.isBlank(target)) {
+            throw new CommonException("请指定要移除的标签文案");
+        }
+        List<Map<String, String>> tags = new ArrayList<>(parseTags(row.getTagsJson()));
+        int before = tags.size();
+        tags.removeIf(t -> target.equalsIgnoreCase(StrUtil.blankToDefault(t.get("text"), "")));
+        if (tags.size() == before) {
+            throw new CommonException("标签不存在: " + target);
+        }
+        persistTags(row, tags);
+        return toVo(requireWs(wsCode), resolveCurrentWsCode());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovWsVo replaceTags(String wsCode, GovWsTagsReplaceParam param) {
+        GovWs row = requireWs(wsCode);
+        assertWsOwner(row);
+        List<Map<String, String>> tags = new ArrayList<>();
+        if (param != null && param.getTags() != null) {
+            Set<String> seen = new java.util.LinkedHashSet<>();
+            for (GovWsTagAddParam p : param.getTags()) {
+                if (p == null || StrUtil.isBlank(p.getText())) {
+                    continue;
+                }
+                String text = p.getText().trim();
+                if (text.length() > 32) {
+                    throw new CommonException("标签文案最多 32 字: " + text);
+                }
+                String key = text.toLowerCase(Locale.ROOT);
+                if (!seen.add(key)) {
+                    continue;
+                }
+                Map<String, String> item = new LinkedHashMap<>();
+                item.put("text", text);
+                item.put("cls", normalizeTagCls(p.getCls()));
+                tags.add(item);
+                if (tags.size() > 12) {
+                    throw new CommonException("每个空间最多 12 个标签");
+                }
+            }
+        }
+        persistTags(row, tags);
+        return toVo(requireWs(wsCode), resolveCurrentWsCode());
     }
 
     @Override
@@ -272,10 +437,90 @@ public class GovWsServiceImpl implements GovWsService {
 
     @Override
     public List<GovWsQuotaVo> listQuotas() {
+        Set<String> activeCodes = listActiveEntities().stream()
+                .map(GovWs::getWsCode)
+                .collect(Collectors.toSet());
         return quotaMapper.selectList(new QueryWrapper<GovWsQuota>().lambda()
                         .eq(GovWsQuota::getDeleteFlag, NOT_DELETE)
                         .orderByAsc(GovWsQuota::getWsCode))
-                .stream().map(this::toQuotaVo).collect(Collectors.toList());
+                .stream()
+                .filter(q -> activeCodes.contains(q.getWsCode()))
+                .map(this::toQuotaVo)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovWsQuotaVo updateQuota(String wsCode, GovWsQuotaUpdateParam param) {
+        GovWs ws = requireWs(wsCode);
+        assertWsOwner(ws);
+        if (param == null) {
+            throw new CommonException("配额更新参数不能为空");
+        }
+        GovWsQuota q = quotaMapper.selectOne(new QueryWrapper<GovWsQuota>().lambda()
+                .eq(GovWsQuota::getDeleteFlag, NOT_DELETE)
+                .eq(GovWsQuota::getWsCode, wsCode)
+                .last("LIMIT 1"));
+        if (q == null) {
+            throw new CommonException("配额未配置: " + wsCode);
+        }
+        boolean touched = false;
+        if (param.getStorageQuotaTb() != null) {
+            if (param.getStorageQuotaTb().compareTo(BigDecimal.ZERO) < 0) {
+                throw new CommonException("storageQuotaTb 不能为负");
+            }
+            q.setStorageQuotaTb(param.getStorageQuotaTb());
+            touched = true;
+        }
+        if (param.getCuQuota() != null) {
+            if (param.getCuQuota() < 0) {
+                throw new CommonException("cuQuota 不能为负");
+            }
+            q.setCuQuota(param.getCuQuota());
+            touched = true;
+        }
+        if (param.getTrinoQuota() != null) {
+            if (param.getTrinoQuota() < 0) {
+                throw new CommonException("trinoQuota 不能为负");
+            }
+            q.setTrinoQuota(param.getTrinoQuota());
+            touched = true;
+        }
+        if (param.getApiQpsQuota() != null) {
+            if (param.getApiQpsQuota() < 0) {
+                throw new CommonException("apiQpsQuota 不能为负");
+            }
+            q.setApiQpsQuota(param.getApiQpsQuota());
+            touched = true;
+        }
+        // AI：null = 不改；0 = 不限（写 NULL）；>0 = 上限
+        if (param.getAiTokenQuota() != null) {
+            if (param.getAiTokenQuota() < 0) {
+                throw new CommonException("aiTokenQuota 不能为负");
+            }
+            q.setAiTokenQuota(param.getAiTokenQuota() == 0L ? null : param.getAiTokenQuota());
+            touched = true;
+        }
+        if (param.getAiCostQuota() != null) {
+            if (param.getAiCostQuota().compareTo(BigDecimal.ZERO) < 0) {
+                throw new CommonException("aiCostQuota 不能为负");
+            }
+            q.setAiCostQuota(param.getAiCostQuota().compareTo(BigDecimal.ZERO) == 0
+                    ? null
+                    : param.getAiCostQuota());
+            touched = true;
+        }
+        if (!touched) {
+            throw new CommonException("未提供可更新的配额字段");
+        }
+        q.setUpdateTime(new Date());
+        try {
+            q.setUpdateUser(LhLoginUsers.requireUserId());
+        } catch (Exception ignored) {
+            // soft
+        }
+        quotaMapper.updateById(q);
+        return toQuotaVo(q);
     }
 
     @Override
@@ -288,6 +533,12 @@ public class GovWsServiceImpl implements GovWsService {
         if (w != null) {
             out.put("name", w.getName());
             out.put("domainCode", w.getDomainCode());
+            boolean member = isWsCollaborator(w);
+            out.put("member", member);
+            out.put("myRole", myRole(w.getWsCode()));
+        } else {
+            out.put("member", true);
+            out.put("myRole", null);
         }
         return out;
     }
@@ -299,6 +550,13 @@ public class GovWsServiceImpl implements GovWsService {
         GovWs w = requireWs(code);
         if (!STATUS_ACTIVE.equals(w.getStatus())) {
             throw new CommonException("已归档空间不可设为当前上下文");
+        }
+        boolean member = isWsCollaborator(w);
+        boolean force = Boolean.TRUE.equals(param.getConfirmNonMember());
+        // default 对全员开放；其它空间非成员须确认（登记默认归属可能误绑）
+        if (!member && !WS_DEFAULT.equals(code) && !force) {
+            throw new CommonException(
+                    "NON_MEMBER_CONFIRM: 你不是空间「" + code + "」成员，切换后新建资产将默认归属该空间。确认请传 confirmNonMember=true");
         }
         String userId = LhLoginUsers.requireUserId();
         Date now = new Date();
@@ -318,7 +576,67 @@ public class GovWsServiceImpl implements GovWsService {
             pref.setUpdateTime(now);
             prefMapper.updateById(pref);
         }
-        return getCurrent();
+        Map<String, Object> out = getCurrent();
+        out.put("nonMemberConfirmed", !member && force);
+        return out;
+    }
+
+    @Override
+    public List<Map<String, Object>> listQuotaAlerts() {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (GovWsQuotaVo vo : listQuotas()) {
+            int storagePct = vo.getStoragePct() == null ? 0 : vo.getStoragePct();
+            int cuPct = vo.getCuPct() == null ? 0 : vo.getCuPct();
+            int aiTokenPct = vo.getAiTokenPct() == null ? 0 : vo.getAiTokenPct();
+            int aiCostPct = vo.getAiCostPct() == null ? 0 : vo.getAiCostPct();
+            int maxPct = Math.max(Math.max(storagePct, cuPct), Math.max(aiTokenPct, aiCostPct));
+            if (maxPct < 60) {
+                continue;
+            }
+            String level = maxPct >= 80 ? "alert" : "warn";
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("wsCode", vo.getWsCode());
+            row.put("level", level);
+            row.put("maxPct", maxPct);
+            row.put("storagePct", storagePct);
+            row.put("cuPct", cuPct);
+            row.put("aiTokenPct", aiTokenPct);
+            row.put("aiCostPct", aiCostPct);
+            row.put("status", vo.getStatus());
+            row.put("storageLabel", vo.getStorageLabel());
+            row.put("cuLabel", vo.getCuLabel());
+            row.put("hint", maxPct >= 80
+                    ? "配额告警：建议限流或调高上限"
+                    : "配额提示：接近上限");
+            GovWs w = findByCode(vo.getWsCode());
+            if (w != null) {
+                row.put("name", w.getName());
+            }
+            out.add(row);
+        }
+        out.sort((a, b) -> Integer.compare(
+                ((Number) b.getOrDefault("maxPct", 0)).intValue(),
+                ((Number) a.getOrDefault("maxPct", 0)).intValue()));
+        return out;
+    }
+
+    /** 超管 / 成员 / 创建人视为协作方可无确认切换 */
+    private boolean isWsCollaborator(GovWs w) {
+        if (w == null) {
+            return false;
+        }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return true;
+        }
+        if (StrUtil.isNotBlank(myRole(w.getWsCode()))) {
+            return true;
+        }
+        try {
+            SaBaseLoginUser user = LhLoginUsers.requireUser();
+            return LhOwnerGuard.isOwner(user, w.getCreateUser());
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // ---------- helpers ----------
@@ -340,7 +658,36 @@ public class GovWsServiceImpl implements GovWsService {
         if (LhOwnerGuard.isOwner(user, ws.getCreateUser())) {
             return;
         }
-        throw new CommonException("仅空间 Owner 可管理成员/归档：" + LhOwnerGuard.MSG_NEED_APPLY);
+        throw new CommonException("仅空间 Owner 可管理成员/标签/删除：" + LhOwnerGuard.MSG_NEED_APPLY);
+    }
+
+    private static final Set<String> TAG_CLS_ALLOWED = Set.of(
+            "tag-blue", "tag-gray", "tag-green", "tag-orange", "tag-red", "tag-purple");
+
+    private String normalizeTagCls(String cls) {
+        String c = StrUtil.blankToDefault(StrUtil.trim(cls), "tag-blue");
+        if (!TAG_CLS_ALLOWED.contains(c)) {
+            throw new CommonException("不支持的标签样式: " + c);
+        }
+        return c;
+    }
+
+    /** 持久化 tags_json（列长 512）；空列表写 null */
+    private void persistTags(GovWs row, List<Map<String, String>> tags) {
+        String json;
+        if (tags == null || tags.isEmpty()) {
+            json = null;
+        } else {
+            json = JSONUtil.toJsonStr(tags);
+            if (json.length() > 512) {
+                throw new CommonException("标签合计过长（上限 512 字符），请删减后再试");
+            }
+        }
+        row.setTagsJson(json);
+        row.setRevision(row.getRevision() == null ? 2 : row.getRevision() + 1);
+        row.setUpdateTime(new Date());
+        row.setUpdateUser(LhLoginUsers.requireUserId());
+        wsMapper.updateById(row);
     }
 
     private List<GovWs> listActiveEntities() {
@@ -384,10 +731,7 @@ public class GovWsServiceImpl implements GovWsService {
         } catch (Exception ignored) {
             // 未登录时概览/列表仍可用默认
         }
-        // 演示默认：优先交易域，否则 default
-        if (findByCode("ws_trade") != null) {
-            return "ws_trade";
-        }
+        // 无用户偏好时软上下文为平台 default（不造演示域空间）
         return WS_DEFAULT;
     }
 
@@ -493,15 +837,25 @@ public class GovWsServiceImpl implements GovWsService {
     private String normalizeWsCode(String wsCode, String name) {
         if (StrUtil.isNotBlank(wsCode)) {
             String c = wsCode.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
-            if (!c.startsWith("ws_") && !WS_DEFAULT.equals(c)) {
-                c = "ws_" + c;
+            c = c.replaceAll("_+", "_").replaceAll("^_|_$", "");
+            if (c.startsWith("ws_")) {
+                c = c.substring(3).replaceAll("^_|_$", "");
             }
-            return c;
+            if (WS_DEFAULT.equals(c)) {
+                return WS_DEFAULT;
+            }
+            if (StrUtil.isBlank(c)) {
+                throw new CommonException("空间编码无效：需包含字母或数字（纯中文/符号不可用）");
+            }
+            return "ws_" + c;
         }
         String base = StrUtil.blankToDefault(name, "space")
                 .trim().toLowerCase(Locale.ROOT)
-                .replaceAll("[^a-z0-9]+", "_");
+                .replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("_+", "_")
+                .replaceAll("^_|_$", "");
         if (StrUtil.isBlank(base)) {
+            // 纯中文名等消毒后为空 → 雪花 id，避免落库 ws__ → Gitea ws--
             base = IdUtil.getSnowflakeNextIdStr();
         }
         return "ws_" + base;
@@ -511,12 +865,14 @@ public class GovWsServiceImpl implements GovWsService {
         GovWsVo vo = new GovWsVo();
         vo.setId(w.getId());
         vo.setWsCode(w.getWsCode());
+        vo.setWsKind(StrUtil.blankToDefault(w.getWsKind(), "team"));
         vo.setName(w.getName());
         vo.setIcon(w.getIcon());
         vo.setDomainCode(w.getDomainCode());
         vo.setCostCenter(w.getCostCenter());
         vo.setTrinoRg(w.getTrinoRg());
         vo.setPreferredSchemas(w.getPreferredSchemas());
+        vo.setTechNs(w.getTechNs());
         vo.setOwners(w.getOwners());
         vo.setDetail(w.getDetail());
         vo.setStatus(w.getStatus());
@@ -528,6 +884,12 @@ public class GovWsServiceImpl implements GovWsService {
         vo.setAssetCount(countAssets(w.getWsCode()));
         vo.setMyRole(myRole(w.getWsCode()));
         vo.setSharedCatalog(SHARED_CATALOG);
+        String display = CpGiteaClient.redactRemoteUrl(w.getGitRemoteUrl());
+        vo.setGitRemoteUrlDisplay(display);
+        // 兼容旧 FE：同脱敏值；永不下发带 token 的 raw
+        vo.setGitRemoteUrl(display);
+        boolean custom = giteaClient != null && giteaClient.isCustomPublicRemote(w.getGitRemoteUrl());
+        vo.setGitRemoteCustom(custom);
 
         GovWsQuota q = quotaMapper.selectOne(new QueryWrapper<GovWsQuota>().lambda()
                 .eq(GovWsQuota::getDeleteFlag, NOT_DELETE)
@@ -596,10 +958,62 @@ public class GovWsServiceImpl implements GovWsService {
         vo.setCuLabel(vo.getCuUsed() + "/" + vo.getCuQuota());
         vo.setTrinoLabel(vo.getTrinoUsed() + "/" + vo.getTrinoQuota());
         vo.setApiLabel(vo.getApiQpsUsed() + "/" + vo.getApiQpsQuota());
-        if (vo.getStoragePct() >= 80 || vo.getCuPct() >= 80) {
+
+        long aiTokenUsed = 0L;
+        BigDecimal aiCostUsed = BigDecimal.ZERO;
+        try {
+            Date day = truncateDay(new Date());
+            List<GovAiUsageDaily> rows = aiUsageMapper.selectList(new QueryWrapper<GovAiUsageDaily>().lambda()
+                    .eq(GovAiUsageDaily::getDay, day)
+                    .eq(GovAiUsageDaily::getWs, q.getWsCode()));
+            for (GovAiUsageDaily row : rows) {
+                aiTokenUsed += (row.getPromptTokens() == null ? 0L : row.getPromptTokens())
+                        + (row.getCompletionTokens() == null ? 0L : row.getCompletionTokens());
+                if (row.getCostAmount() != null) {
+                    aiCostUsed = aiCostUsed.add(row.getCostAmount());
+                }
+            }
+        } catch (Exception ignored) {
+            // soft：用量表未就绪时不阻断配额读
+        }
+        Long aiTokenQuota = q.getAiTokenQuota();
+        BigDecimal aiCostQuota = q.getAiCostQuota();
+        vo.setAiTokenQuota(aiTokenQuota);
+        vo.setAiTokenUsed(aiTokenUsed);
+        vo.setAiCostQuota(aiCostQuota);
+        vo.setAiCostUsed(aiCostUsed);
+        boolean limitTok = aiTokenQuota != null && aiTokenQuota > 0;
+        boolean limitCost = aiCostQuota != null && aiCostQuota.compareTo(BigDecimal.ZERO) > 0;
+        vo.setAiTokenPct(limitTok ? pctLong(aiTokenUsed, aiTokenQuota) : 0);
+        vo.setAiCostPct(limitCost ? pct(aiCostUsed, aiCostQuota) : 0);
+        vo.setAiTokenLabel(limitTok
+                ? (aiTokenUsed + "/" + aiTokenQuota)
+                : (aiTokenUsed + "/不限"));
+        vo.setAiCostLabel(limitCost
+                ? (aiCostUsed.stripTrailingZeros().toPlainString() + "/"
+                    + aiCostQuota.stripTrailingZeros().toPlainString())
+                : (aiCostUsed.stripTrailingZeros().toPlainString() + "/不限"));
+        vo.setAiTokenRemaining(limitTok ? Math.max(0L, aiTokenQuota - aiTokenUsed) : null);
+        vo.setAiCostRemaining(limitCost
+                ? aiCostQuota.subtract(aiCostUsed).max(BigDecimal.ZERO)
+                : null);
+        vo.setAiLimited(limitTok || limitCost);
+
+        if (vo.getStoragePct() >= 80 || vo.getCuPct() >= 80
+                || vo.getAiTokenPct() >= 80 || vo.getAiCostPct() >= 80) {
             vo.setStatus("warn");
         }
         return vo;
+    }
+
+    private static Date truncateDay(Date d) {
+        Calendar cal = Calendar.getInstance();
+        cal.setTime(d);
+        cal.set(Calendar.HOUR_OF_DAY, 0);
+        cal.set(Calendar.MINUTE, 0);
+        cal.set(Calendar.SECOND, 0);
+        cal.set(Calendar.MILLISECOND, 0);
+        return cal.getTime();
     }
 
     private BigDecimal nz(BigDecimal v) {
@@ -616,6 +1030,13 @@ public class GovWsServiceImpl implements GovWsService {
     }
 
     private int pctInt(int used, int quota) {
+        if (quota <= 0) {
+            return 0;
+        }
+        return (int) Math.round(used * 100.0 / quota);
+    }
+
+    private int pctLong(long used, long quota) {
         if (quota <= 0) {
             return 0;
         }

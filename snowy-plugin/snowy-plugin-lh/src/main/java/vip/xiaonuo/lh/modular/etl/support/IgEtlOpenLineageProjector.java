@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.MarquezClient;
+import vip.xiaonuo.lh.core.ws.ExternalName;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlNode;
 
@@ -49,7 +50,7 @@ public class IgEtlOpenLineageProjector {
         int fail = 0;
         int skipped = 0;
         List<String> notes = new ArrayList<>();
-        String ns = "lakehouse";
+        String ns = ExternalName.marquezNamespace(dag.getWs());
         String et = StrUtil.blankToDefault(eventType, "COMPLETE").toUpperCase(Locale.ROOT);
         String olRunId = StrUtil.blankToDefault(runId, IdUtil.fastSimpleUUID());
 
@@ -59,6 +60,7 @@ public class IgEtlOpenLineageProjector {
             out.put("olFail", 0);
             out.put("olSkipped", 0);
             out.put("olRunId", olRunId);
+            out.put("namespace", ns);
             return out;
         }
 
@@ -74,7 +76,7 @@ public class IgEtlOpenLineageProjector {
                 continue;
             }
             try {
-                Map<String, Object> event = buildEvent(dag, n, engine, olRunId, et, nativeOl);
+                Map<String, Object> event = buildEvent(dag, n, engine, olRunId, et, nativeOl, ns);
                 Map<String, Object> resp = marquezClient.postLineageEvent(event);
                 if (Boolean.TRUE.equals(resp.get("ok"))) {
                     ok++;
@@ -96,6 +98,7 @@ public class IgEtlOpenLineageProjector {
         out.put("olSkipped", skipped);
         out.put("olRunId", olRunId);
         out.put("namespace", ns);
+        out.put("extId", ExternalName.extId(ExternalName.KIND_MARQUEZ_NS, dag.getWs(), "lakehouse"));
         out.put("marquezUrl", lhProperties.getMarquez() == null ? null : lhProperties.getMarquez().getUrl());
         if (!notes.isEmpty()) {
             out.put("notes", notes.size() > 8 ? notes.subList(0, 8) : notes);
@@ -104,11 +107,11 @@ public class IgEtlOpenLineageProjector {
     }
 
     private Map<String, Object> buildEvent(
-            IgEtlDag dag, IgEtlNode n, String engine, String olRunId, String eventType, boolean nativeOl) {
+            IgEtlDag dag, IgEtlNode n, String engine, String olRunId, String eventType, boolean nativeOl, String ns) {
         String dagCode = StrUtil.blankToDefault(dag.getDagCode(), dag.getId());
-        String jobName = dagCode + "." + n.getNodeKey();
+        String jobName = ExternalName.marquezJob(dagCode, n.getNodeKey());
         Map<String, Object> job = new LinkedHashMap<>();
-        job.put("namespace", "lakehouse");
+        job.put("namespace", ns);
         job.put("name", jobName);
 
         Map<String, Object> run = new LinkedHashMap<>();
@@ -135,10 +138,10 @@ public class IgEtlOpenLineageProjector {
         String src = firstNonBlank(conf.getStr("table"), conf.getStr("src"), conf.getStr("topic"));
         String dst = firstNonBlank(conf.getStr("targetTable"), conf.getStr("destTable"), conf.getStr("sinkTable"));
         if (StrUtil.isNotBlank(src)) {
-            inputs.add(dataset("lakehouse", src));
+            inputs.add(dataset(ns, src));
         }
         if (StrUtil.isNotBlank(dst)) {
-            outputs.add(dataset("lakehouse", dst));
+            outputs.add(dataset(ns, dst));
         }
 
         Map<String, Object> event = new LinkedHashMap<>();

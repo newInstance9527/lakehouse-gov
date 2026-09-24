@@ -35,6 +35,8 @@ public class DataapiApiBinding extends CommonEntity {
     private String sqlrestDatasourceId;
     private String state;
     private String apisixRouteId;
+    /** 外部名绑定键 sqlrest_api:ws__code；全局唯一 */
+    private String extId;
     private String authMode;
     private Integer qpsLimit;
     private Integer burstLimit;

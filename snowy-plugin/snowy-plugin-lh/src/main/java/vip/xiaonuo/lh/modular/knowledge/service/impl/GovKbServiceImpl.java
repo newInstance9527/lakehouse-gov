@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
@@ -27,6 +28,7 @@ import vip.xiaonuo.lh.modular.knowledge.param.GovKbUpsertParam;
 import vip.xiaonuo.lh.modular.knowledge.result.GovKbEntryVo;
 import vip.xiaonuo.lh.modular.knowledge.service.GovKbService;
 import vip.xiaonuo.lh.modular.knowledge.support.KbChunker;
+import vip.xiaonuo.lh.modular.knowledge.support.KbDocumentParser;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -47,6 +49,10 @@ import java.util.stream.Collectors;
 public class GovKbServiceImpl implements GovKbService {
 
     private static final String WS_DEFAULT = "default";
+    /** 公用知识库在 ws 列的哨兵值（Milvus 过滤用） */
+    private static final String WS_PLATFORM = "_platform";
+    private static final String SCOPE_WORKSPACE = "workspace";
+    private static final String SCOPE_PLATFORM = "platform";
     private static final String NOT_DELETE = "NOT_DELETE";
 
     @Resource
@@ -64,10 +70,14 @@ public class GovKbServiceImpl implements GovKbService {
 
     @Override
     public Map<String, Object> overview(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        return overview(ws, null);
+    }
+
+    @Override
+    public Map<String, Object> overview(String ws, String scope) {
+        // 知识库全局：列表/KPI 不再按 workspace|platform 分库
         List<GovKbEntry> all = entryMapper.selectList(new QueryWrapper<GovKbEntry>().lambda()
-                .eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
-                .eq(GovKbEntry::getWs, workspace));
+                .eq(GovKbEntry::getDeleteFlag, NOT_DELETE));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("total", all.size());
         out.put("termCount", countCat(all, "term"));
@@ -76,7 +86,10 @@ public class GovKbServiceImpl implements GovKbService {
         out.put("faqCount", countCat(all, "faq"));
         out.put("manualCount", countCat(all, "manual"));
         out.put("citeCnt", all.stream().mapToInt(e -> e.getCiteCnt() == null ? 0 : e.getCiteCnt()).sum());
-        out.put("ws", workspace);
+        out.put("citeTotal", all.stream().mapToInt(e -> e.getCiteCnt() == null ? 0 : e.getCiteCnt()).sum());
+        out.put("ws", "*");
+        out.put("scope", "global");
+        out.put("canWritePlatform", true);
         Map<String, Object> probe = milvusClient.probe();
         out.put("milvusEnabled", probe.get("enabled"));
         out.put("milvusReachable", probe.get("reachable"));
@@ -108,19 +121,18 @@ public class GovKbServiceImpl implements GovKbService {
     public Page<GovKbEntryVo> page(GovKbPageParam param) {
         QueryWrapper<GovKbEntry> qw = new QueryWrapper<GovKbEntry>().checkSqlInjection();
         qw.lambda().eq(GovKbEntry::getDeleteFlag, NOT_DELETE);
-        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovKbEntry::getWs, ws);
-        if (StrUtil.isNotBlank(param.getCat()) && !"all".equalsIgnoreCase(param.getCat())) {
+        // 全局列表：忽略 ws / scope（历史 platform/workspace 列仅作痕迹）
+        if (param != null && StrUtil.isNotBlank(param.getCat()) && !"all".equalsIgnoreCase(param.getCat())) {
             qw.lambda().eq(GovKbEntry::getCat, param.getCat().trim().toLowerCase(Locale.ROOT));
         }
-        if (StrUtil.isNotBlank(param.getStatus()) && !"all".equalsIgnoreCase(param.getStatus())) {
+        if (param != null && StrUtil.isNotBlank(param.getStatus()) && !"all".equalsIgnoreCase(param.getStatus())) {
             qw.lambda().eq(GovKbEntry::getStatus, param.getStatus().trim().toLowerCase(Locale.ROOT));
         }
-        if (StrUtil.isNotBlank(param.getQ())) {
+        if (param != null && StrUtil.isNotBlank(param.getQ())) {
             String kw = param.getQ().trim();
             qw.lambda().and(w -> w.like(GovKbEntry::getTitle, kw).or().like(GovKbEntry::getBody, kw));
         }
-        if (StrUtil.isNotBlank(param.getSortField())) {
+        if (param != null && StrUtil.isNotBlank(param.getSortField())) {
             String order = StrUtil.blankToDefault(param.getSortOrder(), CommonSortOrderEnum.DESC.getValue());
             CommonSortOrderEnum.validate(order);
             qw.orderBy(true, order.equalsIgnoreCase(CommonSortOrderEnum.ASC.getValue()),
@@ -143,10 +155,13 @@ public class GovKbServiceImpl implements GovKbService {
         if (StrUtil.isBlank(param.getBody())) {
             throw new CommonException("body 不能为空");
         }
+        String sc = SCOPE_WORKSPACE;
+        // 全局知识库：不再区分公用/空间写权限
         GovKbEntry row = new GovKbEntry();
         row.setId(IdUtil.getSnowflakeNextIdStr());
         row.setRevision(1);
         row.setStatus("indexing");
+        row.setScope(sc);
         row.setWs(StrUtil.blankToDefault(param.getWs(), WS_DEFAULT));
         row.setRemark(param.getRemark());
         row.setCat(normalizeCat(param.getCat()));
@@ -168,6 +183,41 @@ public class GovKbServiceImpl implements GovKbService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovKbEntryVo upload(MultipartFile file, GovKbUpsertParam meta, String entryId) {
+        if (file == null || file.isEmpty()) {
+            throw new CommonException("请上传文档文件");
+        }
+        KbDocumentParser.ParseResult parsed;
+        try {
+            parsed = KbDocumentParser.parse(
+                    file.getOriginalFilename(),
+                    file.getSize(),
+                    file.getInputStream());
+        } catch (CommonException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CommonException("读取上传文件失败：{}",
+                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()), 120));
+        }
+
+        GovKbUpsertParam param = meta == null ? new GovKbUpsertParam() : meta;
+        param.setBody(parsed.text());
+        param.setSource("upload");
+        param.setFileName(parsed.fileName());
+        if (StrUtil.isBlank(param.getTitle())) {
+            String base = parsed.fileName();
+            int dot = base.lastIndexOf('.');
+            param.setTitle(dot > 0 ? base.substring(0, dot) : base);
+        }
+
+        if (StrUtil.isNotBlank(entryId)) {
+            return update(entryId.trim(), param);
+        }
+        return create(param);
+    }
+
+    @Override
     public GovKbEntryVo detail(String id) {
         return toVo(requireEntry(id), true);
     }
@@ -176,6 +226,15 @@ public class GovKbServiceImpl implements GovKbService {
     @Transactional(rollbackFor = Exception.class)
     public GovKbEntryVo update(String id, GovKbUpsertParam param) {
         GovKbEntry row = requireEntry(id);
+        if (StrUtil.isNotBlank(param.getScope())) {
+            // 兼容旧客户端：统一落到 workspace，不再切 platform
+            row.setScope(SCOPE_WORKSPACE);
+            if (StrUtil.isNotBlank(param.getWs()) && !WS_PLATFORM.equals(param.getWs().trim())) {
+                row.setWs(param.getWs().trim());
+            } else if (WS_PLATFORM.equals(row.getWs())) {
+                row.setWs(WS_DEFAULT);
+            }
+        }
         if (StrUtil.isNotBlank(param.getTitle())) {
             row.setTitle(param.getTitle().trim());
         }
@@ -217,6 +276,10 @@ public class GovKbServiceImpl implements GovKbService {
         }
         if (param.getRemark() != null) {
             row.setRemark(param.getRemark());
+        }
+        if (SCOPE_WORKSPACE.equals(effectiveScope(row)) && StrUtil.isNotBlank(param.getWs())
+                && !WS_PLATFORM.equals(param.getWs().trim())) {
+            row.setWs(param.getWs().trim());
         }
         row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
         if (reindex) {
@@ -275,7 +338,6 @@ public class GovKbServiceImpl implements GovKbService {
         if (param == null || StrUtil.isBlank(param.getQuery())) {
             return List.of();
         }
-        String ws = StrUtil.trim(param.getWs());
         String q = param.getQuery().trim();
         int topK = param.getTopK() == null ? 5 : Math.max(1, Math.min(param.getTopK(), 50));
 
@@ -283,14 +345,16 @@ public class GovKbServiceImpl implements GovKbService {
         entryQw.lambda()
                 .eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
                 .eq(GovKbEntry::getStatus, "ready");
-        // 软过滤：传 ws 则按归属筛；空则全空间（AI 偏好补全用）
-        if (StrUtil.isNotBlank(ws)) {
-            entryQw.lambda().eq(GovKbEntry::getWs, ws);
-        }
+        // 全局检索：不按 ws / scope 过滤
         if (param.getCats() != null && !param.getCats().isEmpty()) {
             entryQw.lambda().in(GovKbEntry::getCat, param.getCats());
         }
         List<GovKbEntry> entries = entryMapper.selectList(entryQw);
+        if (entries.isEmpty()) {
+            return List.of();
+        }
+        // 元数据过滤（filters.metricCode / assetId / domain …）先于打分
+        entries = applySearchFilters(entries, param.getFilters());
         if (entries.isEmpty()) {
             return List.of();
         }
@@ -328,6 +392,7 @@ public class GovKbServiceImpl implements GovKbService {
             m.put("title", e.getTitle());
             m.put("cat", e.getCat());
             m.put("ws", e.getWs());
+            m.put("scope", effectiveScope(e));
             m.put("text", c.getTextContent());
             m.put("score", kw);
             m.put("kwScore", kw);
@@ -337,9 +402,11 @@ public class GovKbServiceImpl implements GovKbService {
             byChunk.put(c.getId(), m);
         }
 
-        // 混合：Milvus 可用且 query embed 成功时合并向量分
+        // 混合：Milvus 可用且 query embed 成功时合并向量分（全局，不按 ws 过滤）
         double vectorWeight = 0.7;
         boolean usedVector = false;
+        List<String> milvusExtraWs = List.of();
+        String milvusWs = null;
         try {
             LhProperties.Ai ai = lhProperties.getAi();
             if (ai != null) {
@@ -350,7 +417,7 @@ public class GovKbServiceImpl implements GovKbService {
                         ai == null ? null : ai.getDefaultEmbedModel(), List.of(q));
                 if (qVecs != null && !qVecs.isEmpty() && qVecs.get(0) != null) {
                     List<Map<String, Object>> vecHits = milvusClient.search(
-                            ws, qVecs.get(0), topK * 3, param.getCats());
+                            milvusWs, milvusExtraWs, qVecs.get(0), topK * 3, param.getCats());
                     if (!vecHits.isEmpty()) {
                         usedVector = true;
                     }
@@ -375,6 +442,8 @@ public class GovKbServiceImpl implements GovKbService {
                             m.put("chunkId", c.getId());
                             m.put("title", e.getTitle());
                             m.put("cat", e.getCat());
+                            m.put("ws", e.getWs());
+                            m.put("scope", effectiveScope(e));
                             m.put("text", c.getTextContent());
                             m.put("kwScore", 0.0);
                             m.put("vecScore", vec);
@@ -419,10 +488,8 @@ public class GovKbServiceImpl implements GovKbService {
 
     @Override
     public Map<String, Object> stats(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
         List<GovKbEntry> entries = entryMapper.selectList(new QueryWrapper<GovKbEntry>().lambda()
                 .eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
-                .eq(GovKbEntry::getWs, workspace)
                 .orderByDesc(GovKbEntry::getCiteCnt)
                 .last("LIMIT 20"));
         List<Map<String, Object>> hot = entries.stream().map(e -> {
@@ -430,12 +497,13 @@ public class GovKbServiceImpl implements GovKbService {
             m.put("entryId", e.getId());
             m.put("title", e.getTitle());
             m.put("cat", e.getCat());
+            m.put("scope", "global");
             m.put("citeCnt", e.getCiteCnt() == null ? 0 : e.getCiteCnt());
             return m;
         }).toList();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("hot", hot);
-        out.put("ws", workspace);
+        out.put("ws", "*");
         return out;
     }
 
@@ -494,50 +562,166 @@ public class GovKbServiceImpl implements GovKbService {
         } catch (Exception ignored) {
             // soft-fail
         }
-        List<String> parts = KbChunker.splitFixed(row.getBody(),
-                row.getChunkSize() == null ? 500 : row.getChunkSize(),
-                row.getOverlap() == null ? 50 : row.getOverlap());
+        if (StrUtil.isBlank(row.getBody())) {
+            markIndex(row, "failed", "none", "body 为空，无法分片");
+            return 0;
+        }
+        List<String> parts;
+        try {
+            parts = KbChunker.split(
+                    row.getStrategy(),
+                    row.getBody(),
+                    row.getChunkSize() == null ? 500 : row.getChunkSize(),
+                    row.getOverlap() == null ? 50 : row.getOverlap(),
+                    row.getSeparator());
+        } catch (Exception ex) {
+            markIndex(row, "failed", "none", "分片失败: " + StrUtil.maxLength(ex.getMessage(), 200));
+            return 0;
+        }
+        if (parts.isEmpty()) {
+            markIndex(row, "failed", "none", "分片结果为空");
+            return 0;
+        }
         Date now = new Date();
         int ordinal = 0;
         List<GovKbChunk> inserted = new ArrayList<>();
-        for (String part : parts) {
-            GovKbChunk c = new GovKbChunk();
-            c.setId(IdUtil.getSnowflakeNextIdStr());
-            c.setEntryId(row.getId());
-            c.setOrdinal(ordinal++);
-            c.setTextContent(part);
-            c.setTokenEst(KbChunker.estimateTokens(part));
-            c.setCreateTime(now);
-            chunkMapper.insert(c);
-            inserted.add(c);
-        }
-        // 向量化：Milvus + embed 成功则 upsert；否则仅关键词，status 仍 ready
         try {
-            if (milvusClient.available() && liteLlmClient.available() && !inserted.isEmpty()) {
+            for (String part : parts) {
+                GovKbChunk c = new GovKbChunk();
+                c.setId(IdUtil.getSnowflakeNextIdStr());
+                c.setEntryId(row.getId());
+                c.setOrdinal(ordinal++);
+                c.setTextContent(part);
+                c.setTokenEst(KbChunker.estimateTokens(part));
+                c.setCreateTime(now);
+                chunkMapper.insert(c);
+                inserted.add(c);
+            }
+        } catch (Exception ex) {
+            markIndex(row, "failed", "none", "写入分片失败: " + StrUtil.maxLength(ex.getMessage(), 200));
+            return 0;
+        }
+        // 向量化：Milvus + embed 成功则 upsert；否则关键词可用，status=ready + indexMode=keyword
+        String indexMode = "keyword";
+        String indexError = null;
+        int upserted = 0;
+        try {
+            if (!milvusClient.available()) {
+                indexError = "Milvus 未启用或不可达；仅关键词检索";
+            } else if (!liteLlmClient.available()) {
+                indexError = "LiteLLM/embed 不可用；仅关键词检索";
+            } else if (!inserted.isEmpty()) {
                 List<String> texts = inserted.stream().map(GovKbChunk::getTextContent).toList();
                 String embedModel = StrUtil.blankToDefault(row.getEmbedModelId(),
                         lhProperties.getAi() == null ? null : lhProperties.getAi().getDefaultEmbedModel());
                 List<float[]> vectors = liteLlmClient.embed(embedModel, texts);
-                if (vectors != null && vectors.size() == inserted.size()) {
+                if (vectors == null || vectors.size() != inserted.size()) {
+                    indexError = "embed 返回条数不匹配；仅关键词检索";
+                } else {
                     int dim = vectors.get(0) == null ? 0 : vectors.get(0).length;
-                    if (dim > 0 && milvusClient.ensureCollection(dim)) {
+                    if (dim <= 0 || !milvusClient.ensureCollection(dim)) {
+                        indexError = "Milvus ensureCollection 失败；仅关键词检索";
+                    } else {
                         for (int i = 0; i < inserted.size(); i++) {
                             float[] vec = vectors.get(i);
                             if (vec == null || vec.length == 0) {
                                 continue;
                             }
                             GovKbChunk c = inserted.get(i);
-                            milvusClient.upsert(c.getId(), row.getId(), row.getWs(), row.getCat(), vec);
+                            if (milvusClient.upsert(c.getId(), row.getId(), row.getWs(), row.getCat(), vec)) {
+                                upserted++;
+                            }
+                        }
+                        if (upserted > 0) {
+                            indexMode = "hybrid";
+                            indexError = null;
+                        } else {
+                            indexError = "向量 upsert 全部失败；仅关键词检索";
                         }
                     }
                 }
             }
-        } catch (Exception ignored) {
-            // soft-fail → keyword-only
+        } catch (Exception ex) {
+            indexMode = "keyword";
+            indexError = "向量化异常: " + StrUtil.maxLength(ex.getMessage(), 180);
         }
-        row.setStatus("ready");
-        entryMapper.updateById(row);
+        markIndex(row, "ready", indexMode, indexError);
         return parts.size();
+    }
+
+    private void markIndex(GovKbEntry row, String status, String indexMode, String indexError) {
+        row.setStatus(status);
+        row.setRemark(mergeIndexRemark(row.getRemark(), indexMode, indexError));
+        entryMapper.updateById(row);
+    }
+
+    /** 保留业务 remark，覆盖 indexMode=/indexError= 标记 */
+    static String mergeIndexRemark(String remark, String indexMode, String indexError) {
+        String base = StrUtil.nullToEmpty(remark)
+                .replaceAll("(?i)\\s*indexMode=[^|;\\s]+", "")
+                .replaceAll("(?i)\\s*indexError=[^|]*", "")
+                .replaceAll("\\|\\|+", "|")
+                .trim();
+        if (base.startsWith("|")) {
+            base = base.substring(1).trim();
+        }
+        if (base.endsWith("|")) {
+            base = base.substring(0, base.length() - 1).trim();
+        }
+        StringBuilder sb = new StringBuilder();
+        if (StrUtil.isNotBlank(base)) {
+            sb.append(base);
+        }
+        if (StrUtil.isNotBlank(indexMode)) {
+            if (!sb.isEmpty()) {
+                sb.append(" | ");
+            }
+            sb.append("indexMode=").append(indexMode);
+        }
+        if (StrUtil.isNotBlank(indexError)) {
+            if (!sb.isEmpty()) {
+                sb.append(" | ");
+            }
+            sb.append("indexError=").append(indexError.replace('|', '/'));
+        }
+        return sb.isEmpty() ? null : sb.toString();
+    }
+
+    private static List<GovKbEntry> applySearchFilters(List<GovKbEntry> entries, Map<String, Object> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return entries;
+        }
+        List<GovKbEntry> out = new ArrayList<>();
+        for (GovKbEntry e : entries) {
+            if (matchFilters(e.getRefsJson(), filters)) {
+                out.add(e);
+            }
+        }
+        return out;
+    }
+
+    /** filters 键：metricCode / metric / assetId / asset / domain / label — 任一非空则须在 refs 中命中 */
+    private static boolean matchFilters(String refsJson, Map<String, Object> filters) {
+        String refs = StrUtil.nullToEmpty(refsJson).toLowerCase(Locale.ROOT);
+        for (Map.Entry<String, Object> fe : filters.entrySet()) {
+            if (fe.getValue() == null) {
+                continue;
+            }
+            String key = StrUtil.nullToEmpty(fe.getKey()).trim().toLowerCase(Locale.ROOT);
+            if (key.isEmpty()) {
+                continue;
+            }
+            String val = String.valueOf(fe.getValue()).trim();
+            if (StrUtil.isBlank(val)) {
+                continue;
+            }
+            String v = val.toLowerCase(Locale.ROOT);
+            // 值命中即可；同时允许 key 出现在 JSON 旁（宽松）
+            if (!(refs.contains(v) || refs.contains("\"" + key + "\""))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private GovKbEntry requireEntry(String id) {
@@ -566,7 +750,10 @@ public class GovKbServiceImpl implements GovKbService {
         vo.setRefs(parseRefs(e.getRefsJson()));
         vo.setCiteCnt(e.getCiteCnt());
         vo.setStatus(e.getStatus());
+        vo.setIndexMode(parseIndexTag(e.getRemark(), "indexMode"));
+        vo.setIndexError(parseIndexTag(e.getRemark(), "indexError"));
         vo.setWs(e.getWs());
+        vo.setScope(effectiveScope(e));
         vo.setRevision(e.getRevision());
         vo.setUpdateTime(e.getUpdateTime());
         Long cnt = chunkMapper.selectCount(new QueryWrapper<GovKbChunk>().lambda()
@@ -600,6 +787,27 @@ public class GovKbServiceImpl implements GovKbService {
         };
     }
 
+    /** scope=platform → 公用库；其余（含空）→ workspace。 */
+    private static String normalizeScope(String scope) {
+        if (StrUtil.isNotBlank(scope) && SCOPE_PLATFORM.equalsIgnoreCase(scope.trim())) {
+            return SCOPE_PLATFORM;
+        }
+        return SCOPE_WORKSPACE;
+    }
+
+    private static String effectiveScope(GovKbEntry entry) {
+        if (entry == null) {
+            return SCOPE_WORKSPACE;
+        }
+        if (StrUtil.isNotBlank(entry.getScope())) {
+            return normalizeScope(entry.getScope());
+        }
+        if (WS_PLATFORM.equals(entry.getWs())) {
+            return SCOPE_PLATFORM;
+        }
+        return SCOPE_WORKSPACE;
+    }
+
     private static String resolveRefsJson(GovKbUpsertParam param) {
         if (param.getRefsJson() != null) {
             return param.getRefsJson();
@@ -622,6 +830,24 @@ public class GovKbServiceImpl implements GovKbService {
         } catch (Exception e) {
             return refsJson;
         }
+    }
+
+    private static String parseIndexTag(String remark, String key) {
+        if (StrUtil.isBlank(remark) || StrUtil.isBlank(key)) {
+            return null;
+        }
+        String needle = key + "=";
+        int i = remark.toLowerCase(Locale.ROOT).indexOf(needle.toLowerCase(Locale.ROOT));
+        if (i < 0) {
+            return null;
+        }
+        int start = i + needle.length();
+        int end = remark.indexOf(" | ", start);
+        if (end < 0) {
+            end = remark.length();
+        }
+        String v = remark.substring(start, end).trim();
+        return v.isEmpty() ? null : v;
     }
 
     private static double scoreKeyword(String q, String text, String title) {

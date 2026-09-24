@@ -33,4 +33,8 @@ public class GovWsQuota extends CommonEntity {
     private Integer trinoUsed;
     private Integer apiQpsQuota;
     private Integer apiQpsUsed;
+    /** AI Token 日上限；null/0 = 不限 */
+    private Long aiTokenQuota;
+    /** AI 成本日上限；null/0 = 不限 */
+    private BigDecimal aiCostQuota;
 }

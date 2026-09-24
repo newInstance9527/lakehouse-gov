@@ -95,6 +95,15 @@ public class CpDevelopController {
         return CommonResult.data(cpDevelopService.releases(ws));
     }
 
+    @Operation(summary = "提交上版前门禁预检（不生成发布单）")
+    @GetMapping({"/lh/compute/scripts/release-precheck", "/api/compute/scripts/release-precheck"})
+    public CommonResult<Map<String, Object>> releasePrecheck(
+            @RequestParam String scriptId,
+            @RequestParam(required = false) String engine,
+            @RequestParam(required = false) String env) {
+        return CommonResult.data(cpDevelopService.releasePrecheck(scriptId, engine, env));
+    }
+
     @Operation(summary = "提交上版")
     @CommonLog("提交脚本发布单")
     @PostMapping({"/lh/compute/releases", "/api/compute/releases"})

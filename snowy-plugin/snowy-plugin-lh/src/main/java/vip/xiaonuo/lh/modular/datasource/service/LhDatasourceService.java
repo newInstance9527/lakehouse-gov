@@ -82,7 +82,8 @@ public interface LhDatasourceService extends IService<LhDatasource> {
 
     Map<String, Object> toggleStatus(LhDatasourceToggleParam param);
 
-    Map<String, Object> kpi();
+    /** 看板 KPI；ws 空则全局 */
+    Map<String, Object> kpi(String ws);
 
     List<Map<String, Object>> typeOptions();
 

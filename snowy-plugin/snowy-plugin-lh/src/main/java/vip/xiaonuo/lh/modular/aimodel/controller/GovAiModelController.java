@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
 import jakarta.validation.Valid;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -50,6 +51,12 @@ public class GovAiModelController {
         return CommonResult.data(govAiModelService.page(param));
     }
 
+    @Operation(summary = "模型详情（Key 仅脱敏）")
+    @GetMapping("/lh/ai/models/{id}")
+    public CommonResult<GovAiModelVo> detail(@PathVariable("id") String id) {
+        return CommonResult.data(govAiModelService.detail(id));
+    }
+
     @Operation(summary = "接入模型")
     @CommonLog("接入AI模型")
     @PostMapping("/lh/ai/models")
@@ -64,6 +71,22 @@ public class GovAiModelController {
             @PathVariable("id") String id,
             @RequestBody GovAiModelUpsertParam param) {
         return CommonResult.data(govAiModelService.update(id, param));
+    }
+
+    @Operation(summary = "删除模型（软删）")
+    @CommonLog("删除AI模型")
+    @DeleteMapping("/lh/ai/models/{id}")
+    public CommonResult<String> delete(@PathVariable("id") String id) {
+        govAiModelService.delete(id);
+        return CommonResult.ok();
+    }
+
+    @Operation(summary = "删除模型（软删，前端 POST 兼容）")
+    @CommonLog("删除AI模型")
+    @PostMapping("/lh/ai/models/{id}/delete")
+    public CommonResult<String> deletePost(@PathVariable("id") String id) {
+        govAiModelService.delete(id);
+        return CommonResult.ok();
     }
 
     @Operation(summary = "轮换 API Key（写入 Vault，响应仅脱敏）")

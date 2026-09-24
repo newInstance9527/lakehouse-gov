@@ -27,8 +27,12 @@ public class GovAiModel extends CommonEntity {
     private String remark;
     private String name;
     private String vendor;
-    /** chat | embed */
+    /** chat | embed | image */
     private String kind;
+    /** 对话模型是否支持图片输入（视觉/多模态）；与 kind=image 无关 */
+    private Boolean supportsVision;
+    /** 是否支持图片输出（生图） */
+    private Boolean supportsImageOutput;
     private String modelName;
     private String baseUrl;
     private String vaultPath;
@@ -51,4 +55,8 @@ public class GovAiModel extends CommonEntity {
     private Long callsTotal;
     /** 累计成本 */
     private BigDecimal costTotal;
+    /** 模型 Token 总限额；null/0 = 不限 */
+    private Long tokenQuota;
+    /** 模型成本总限额；null/0 = 不限 */
+    private BigDecimal costQuota;
 }

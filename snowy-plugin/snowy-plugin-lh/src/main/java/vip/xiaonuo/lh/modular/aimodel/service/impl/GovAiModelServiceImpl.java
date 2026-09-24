@@ -12,6 +12,7 @@ import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.ai.LhLiteLlmClient;
+import vip.xiaonuo.lh.core.ai.LhOpenAiCompatClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 import vip.xiaonuo.lh.modular.aimodel.entity.GovAiModel;
@@ -29,6 +30,9 @@ import vip.xiaonuo.lh.modular.aimodel.result.GovAiModelVo;
 import vip.xiaonuo.lh.modular.aimodel.result.GovAiRouteVo;
 import vip.xiaonuo.lh.modular.ai.support.AiEgressPolicy;
 import vip.xiaonuo.lh.modular.aimodel.service.GovAiModelService;
+import vip.xiaonuo.lh.modular.ai.mapper.GovAiTurnMapper;
+import vip.xiaonuo.lh.modular.workspace.entity.GovWsQuota;
+import vip.xiaonuo.lh.modular.workspace.mapper.GovWsQuotaMapper;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -57,9 +61,16 @@ public class GovAiModelServiceImpl implements GovAiModelService {
     @Resource
     private GovAiUsageDailyMapper usageMapper;
     @Resource
+    private GovAiTurnMapper turnMapper;
+    @Resource
+    private GovWsQuotaMapper wsQuotaMapper;
+    @Resource
     private LhVaultClient vaultClient;
     @Resource
     private LhLiteLlmClient liteLlmClient;
+
+    @Resource
+    private LhOpenAiCompatClient openAiCompatClient;
     @Resource
     private LhProperties lhProperties;
 
@@ -71,13 +82,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
                 .and(w -> w.eq(GovAiModel::getWs, workspace).or().eq(GovAiModel::getWs, "*")));
         long enabled = all.stream().filter(m -> Boolean.TRUE.equals(m.getEnabled())).count();
         long ok = all.stream().filter(m -> "ok".equalsIgnoreCase(m.getStatus())).count();
-        double avgLatency = all.stream()
-                .filter(m -> m.getLatencyMs() != null && m.getLatencyMs() > 0)
-                .mapToInt(GovAiModel::getLatencyMs)
-                .average()
-                .orElse(0);
 
-        Date from = daysAgo(30);
+        Date from = monthStart();
         List<GovAiUsageDaily> usage = usageMapper.selectList(new QueryWrapper<GovAiUsageDaily>().lambda()
                 .ge(GovAiUsageDaily::getDay, from)
                 .and(w -> w.eq(GovAiUsageDaily::getWs, workspace).or().eq(GovAiUsageDaily::getWs, "*")));
@@ -86,6 +92,11 @@ public class GovAiModelServiceImpl implements GovAiModelService {
                 .map(u -> u.getCostAmount() == null ? BigDecimal.ZERO : u.getCostAmount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        Long avgLatencyMs = avgLatencyFromUsage(usage);
+        if (avgLatencyMs == null) {
+            avgLatencyMs = avgLatencyFromTurns(workspace, from);
+        }
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("modelCount", all.size());
         out.put("enabledCount", enabled);
@@ -93,7 +104,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         out.put("connectivity", ok + "/" + Math.max(all.size(), 1));
         out.put("monthCalls", calls);
         out.put("monthCost", cost.setScale(2, RoundingMode.HALF_UP));
-        out.put("avgLatencyMs", Math.round(avgLatency));
+        out.put("avgLatencyMs", avgLatencyMs);
         out.put("ws", workspace);
         Map<String, Object> gw = liteLlmClient.probeSync();
         out.put("litellmEnabled", Boolean.TRUE.equals(gw.get("enabled")));
@@ -105,6 +116,56 @@ public class GovAiModelServiceImpl implements GovAiModelService {
     }
 
     @Override
+    public GovAiModelVo detail(String id) {
+        GovAiModelVo vo = toVo(requireModel(id));
+        fillTotalUsage(vo);
+        return vo;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void delete(String id) {
+        GovAiModel row = requireModel(id);
+        // 被路由引用时级联停用，避免静默残留可选模型
+        cascadeDisableRoutesForModel(id);
+        row.setEnabled(false);
+        row.setStatus("off");
+        modelMapper.updateById(row);
+        // CommonEntity.deleteFlag 带 @TableLogic：updateById 不会写 delete_flag，须 deleteById 软删
+        modelMapper.deleteById(id);
+        try {
+            liteLlmClient.setAliasEnabled(
+                    row.getId(), false, row.getVendor(), row.getModelName(), row.getBaseUrl(), row.getKind());
+        } catch (Exception ignored) {
+            // soft-fail：门户已软删，网关不可达不阻断
+        }
+    }
+
+    /** 主模型被删 → 路由停用；备模型被删 → 清空备选 */
+    private void cascadeDisableRoutesForModel(String modelId) {
+        List<GovAiRoute> refs = routeMapper.selectList(new QueryWrapper<GovAiRoute>().lambda()
+                .eq(GovAiRoute::getDeleteFlag, NOT_DELETE)
+                .and(w -> w.eq(GovAiRoute::getPrimaryModelId, modelId)
+                        .or().eq(GovAiRoute::getFallbackModelId, modelId)));
+        for (GovAiRoute r : refs) {
+            boolean touched = false;
+            if (modelId.equals(r.getPrimaryModelId())) {
+                r.setEnabled(false);
+                r.setStatus("off");
+                touched = true;
+            }
+            if (modelId.equals(r.getFallbackModelId())) {
+                r.setFallbackModelId(null);
+                touched = true;
+            }
+            if (touched) {
+                r.setRevision(r.getRevision() == null ? 1 : r.getRevision() + 1);
+                routeMapper.updateById(r);
+            }
+        }
+    }
+
+    @Override
     public Page<GovAiModelVo> page(GovAiModelPageParam param) {
         QueryWrapper<GovAiModel> qw = new QueryWrapper<GovAiModel>().checkSqlInjection();
         qw.lambda().eq(GovAiModel::getDeleteFlag, NOT_DELETE);
@@ -112,6 +173,9 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         qw.lambda().and(w -> w.eq(GovAiModel::getWs, ws).or().eq(GovAiModel::getWs, "*"));
         if (StrUtil.isNotBlank(param.getKind()) && !"all".equalsIgnoreCase(param.getKind())) {
             qw.lambda().eq(GovAiModel::getKind, param.getKind().trim().toLowerCase(Locale.ROOT));
+        }
+        if (Boolean.TRUE.equals(param.getSupportsVision())) {
+            qw.lambda().eq(GovAiModel::getSupportsVision, true);
         }
         if (StrUtil.isNotBlank(param.getQ())) {
             String kw = param.getQ().trim();
@@ -161,6 +225,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         row.setName(name.trim());
         row.setVendor(StrUtil.blankToDefault(param.getVendor(), "custom"));
         row.setKind(normalizeKind(param.getKind()));
+        applyCapabilityFlags(row, param, true);
         row.setModelName(modelName.trim());
         row.setBaseUrl(param.getBaseUrl().trim());
         row.setVaultPath(vaultPath);
@@ -175,9 +240,11 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         row.setRoleLabel(firstNonBlank(param.getRoleLabel(), param.getRole(), param.getUse(), ""));
         row.setKeyMask(maskKey(param.getKey()));
         row.setKeyExpiresAt(param.getKeyExpiresAt());
+        applyTotalQuotaFields(row, param, true);
         row.setDeleteFlag(NOT_DELETE);
         modelMapper.insert(row);
         GovAiModelVo vo = toVo(row);
+        fillTotalUsage(vo);
         attachSync(vo, syncToLiteLlm(row, true));
         return vo;
     }
@@ -202,6 +269,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         if (StrUtil.isNotBlank(param.getKind())) {
             row.setKind(normalizeKind(param.getKind()));
         }
+        applyCapabilityFlags(row, param, false);
         String ctx = firstNonBlank(param.getContextTokens(), param.getContext(), null);
         if (ctx != null) {
             row.setContextTokens(normalizeContextLabel(ctx));
@@ -234,9 +302,11 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             row.setKeyMask(maskKey(param.getKey()));
         }
         applyEgressFields(row, param, false);
+        applyTotalQuotaFields(row, param, false);
         row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
         modelMapper.updateById(row);
         GovAiModelVo vo = toVo(row);
+        fillTotalUsage(vo);
         attachSync(vo, syncToLiteLlm(row, Boolean.TRUE.equals(row.getEnabled())));
         return vo;
     }
@@ -277,46 +347,113 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         long start = System.currentTimeMillis();
 
         String vaultPath = row.getVaultPath();
+        String apiKey = StrUtil.isNotBlank(vaultPath) ? vaultClient.getString(vaultPath, "apiKey") : null;
         boolean vaultOk = StrUtil.isNotBlank(vaultPath) && vaultClient.exists(vaultPath)
-                && StrUtil.isNotBlank(vaultClient.getString(vaultPath, "apiKey"));
+                && StrUtil.isNotBlank(apiKey);
         out.put("vaultPath", vaultPath);
         out.put("vaultOk", vaultOk);
 
         if (!liteLlmClient.available()) {
-            // 未配网关：仅验收 Vault；不伪造成功连通
-            String status = vaultOk ? "ok" : "warn";
-            row.setLatencyMs((int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start));
-            row.setStatus(Boolean.TRUE.equals(row.getEnabled()) ? status : "off");
+            // 无 LiteLLM：仅 chat 类且有 baseUrl 时直连探测；禁止仅凭 Vault Key 假成功
+            if (vaultOk && StrUtil.isNotBlank(row.getBaseUrl()) && isChatKind(row.getKind())) {
+                Map<String, Object> probe = openAiCompatClient.chatSimpleProbe(
+                        row.getBaseUrl(), apiKey, row.getModelName(), "ping", "reply ok");
+                boolean ok = Boolean.TRUE.equals(probe.get("ok"));
+                int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
+                row.setLatencyMs(latency);
+                String status = !Boolean.TRUE.equals(row.getEnabled()) ? "off" : (ok ? "ok" : "warn");
+                row.setStatus(status);
+                modelMapper.updateById(row);
+                out.put("ok", ok);
+                out.put("mock", false);
+                out.put("direct", true);
+                out.put("status", row.getStatus());
+                out.put("latencyMs", latency);
+                out.put("httpStatus", probe.get("httpStatus"));
+                out.put("message", ok
+                        ? "直连 OpenAI 兼容端点成功"
+                        : probeErrorMsg(probe, "直连调用失败"));
+                return out;
+            }
+            int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
+            row.setLatencyMs(latency);
+            row.setStatus(Boolean.TRUE.equals(row.getEnabled()) ? "warn" : "off");
             modelMapper.updateById(row);
-            out.put("ok", vaultOk);
-            out.put("mock", true);
+            out.put("ok", false);
+            out.put("mock", false);
             out.put("status", row.getStatus());
-            out.put("latencyMs", row.getLatencyMs());
-            out.put("message", vaultOk
-                    ? "LiteLLM 未启用；Vault Key 已存在"
-                    : "LiteLLM 未启用且 Vault 无可用 Key");
+            out.put("latencyMs", latency);
+            if (!vaultOk) {
+                out.put("message", "LiteLLM 未启用且 Vault 无可用 Key，无法探测");
+            } else if (!isChatKind(row.getKind())) {
+                out.put("message", "LiteLLM 未启用；embed 类需经网关探测，请配置 litellm-url");
+            } else {
+                out.put("message", "LiteLLM 未启用且未配置 baseUrl，无法直连探测");
+            }
+            return out;
+        }
+
+        // 已登记 baseUrl + Vault Key 的 chat：优先直连探测（与用户 curl 一致），避免走 LiteLLM 错 Key/错模型
+        if (vaultOk && StrUtil.isNotBlank(row.getBaseUrl()) && isChatKind(row.getKind())) {
+            Map<String, Object> probe = openAiCompatClient.chatSimpleProbe(
+                    row.getBaseUrl(), apiKey, row.getModelName(), "ping", "reply ok");
+            boolean ok = Boolean.TRUE.equals(probe.get("ok"));
+            int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
+            row.setLatencyMs(latency);
+            String status = !Boolean.TRUE.equals(row.getEnabled()) ? "off" : (ok ? "ok" : "warn");
+            if (ok && isKeyExpiringSoon(row)) {
+                status = "warn";
+            }
+            row.setStatus(status);
+            modelMapper.updateById(row);
+            out.put("ok", ok);
+            out.put("mock", false);
+            out.put("direct", true);
+            out.put("status", row.getStatus());
+            out.put("latencyMs", latency);
+            out.put("httpStatus", probe.get("httpStatus"));
+            String message = ok
+                    ? "直连 OpenAI 兼容端点成功（" + row.getModelName() + "）"
+                    : probeErrorMsg(probe, "直连调用失败");
+            if (ok && isKeyExpiringSoon(row)) {
+                message = message + "；Key 即将过期";
+            }
+            out.put("message", message);
             return out;
         }
 
         boolean ok;
         String message;
         String callModel = LhLiteLlmClient.aliasOf(row.getId());
+        Integer httpStatus = null;
         if ("embed".equalsIgnoreCase(row.getKind())) {
-            List<float[]> vecs = liteLlmClient.embed(callModel, List.of("ping"));
-            if (vecs == null || vecs.isEmpty()) {
-                vecs = liteLlmClient.embed(row.getModelName(), List.of("ping"));
-                callModel = row.getModelName();
+            Map<String, Object> probe = liteLlmClient.embedProbe(callModel, List.of("ping"));
+            if (!Boolean.TRUE.equals(probe.get("ok"))) {
+                Map<String, Object> fallback = liteLlmClient.embedProbe(row.getModelName(), List.of("ping"));
+                probe = preferProbe(probe, fallback);
+                if (probe == fallback) {
+                    callModel = row.getModelName();
+                }
             }
-            ok = vecs != null && !vecs.isEmpty();
-            message = ok ? "Embedding 连通成功（" + callModel + "）" : "Embedding 调用失败或空响应";
+            ok = Boolean.TRUE.equals(probe.get("ok"));
+            httpStatus = probe.get("httpStatus") instanceof Number n ? n.intValue() : null;
+            message = ok
+                    ? "Embedding 连通成功（" + callModel + "）"
+                    : probeErrorMsg(probe, "Embedding 调用失败");
         } else {
-            String reply = liteLlmClient.chatSimple(callModel, "ping", "reply ok");
-            if (StrUtil.isBlank(reply)) {
-                reply = liteLlmClient.chatSimple(row.getModelName(), "ping", "reply ok");
-                callModel = row.getModelName();
+            Map<String, Object> probe = liteLlmClient.chatSimpleProbe(callModel, "ping", "reply ok");
+            if (!Boolean.TRUE.equals(probe.get("ok"))) {
+                Map<String, Object> fallback = liteLlmClient.chatSimpleProbe(row.getModelName(), "ping", "reply ok");
+                probe = preferProbe(probe, fallback);
+                if (probe == fallback) {
+                    callModel = row.getModelName();
+                }
             }
-            ok = StrUtil.isNotBlank(reply);
-            message = ok ? "连通成功（" + callModel + "）" : "调用失败或空响应";
+            ok = Boolean.TRUE.equals(probe.get("ok"));
+            httpStatus = probe.get("httpStatus") instanceof Number n ? n.intValue() : null;
+            message = ok
+                    ? "连通成功（" + callModel + "）"
+                    : probeErrorMsg(probe, "调用失败");
         }
         if (!vaultOk) {
             ok = false;
@@ -335,6 +472,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         out.put("mock", false);
         out.put("status", row.getStatus());
         out.put("latencyMs", latency);
+        out.put("httpStatus", httpStatus);
         out.put("message", message);
         return out;
     }
@@ -372,7 +510,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
                 warn++;
             }
         }
-        // 网关不可达：已启用模型统一标 warn（test 可能因 mock 路径不同）
+        // 网关不可达：已启用模型统一标 warn
         if (!Boolean.TRUE.equals(litellm.get("ok")) && Boolean.TRUE.equals(litellm.get("available"))) {
             for (GovAiModel m : models) {
                 if ("ok".equalsIgnoreCase(m.getStatus())) {
@@ -554,10 +692,178 @@ public class GovAiModelServiceImpl implements GovAiModelService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void recordUsage(String ws, String modelId, long promptTokens, long completionTokens) {
+    public void assertDailyQuota(String ws, String modelId) {
+        assertWsDailyQuota(ws);
+        assertModelTotalQuota(modelId);
+    }
+
+    /** ① 工作空间日配额 */
+    private void assertWsDailyQuota(String ws) {
         String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
-        String mid = StrUtil.blankToDefault(modelId, "unknown");
+        GovWsQuota quota = wsQuotaMapper.selectOne(new QueryWrapper<GovWsQuota>().lambda()
+                .eq(GovWsQuota::getDeleteFlag, NOT_DELETE)
+                .eq(GovWsQuota::getWsCode, workspace)
+                .last("LIMIT 1"));
+        if (quota == null) {
+            return;
+        }
+        Long tokenQuota = quota.getAiTokenQuota();
+        BigDecimal costQuota = quota.getAiCostQuota();
+        boolean limitTokens = tokenQuota != null && tokenQuota > 0;
+        boolean limitCost = costQuota != null && costQuota.compareTo(BigDecimal.ZERO) > 0;
+        if (!limitTokens && !limitCost) {
+            return;
+        }
+        long usedTokens = sumUsageTokens(null, workspace, true);
+        BigDecimal usedCost = sumUsageCost(null, workspace, true);
+        if (limitTokens && usedTokens >= tokenQuota) {
+            throw new CommonException("工作空间「" + workspace + "」今日 AI Token 配额已用尽（"
+                    + usedTokens + "/" + tokenQuota + "），请前往申请中心申请或联系管理员");
+        }
+        if (limitCost && usedCost.compareTo(costQuota) >= 0) {
+            throw new CommonException("工作空间「" + workspace + "」今日 AI 成本配额已用尽（"
+                    + usedCost.stripTrailingZeros().toPlainString() + "/"
+                    + costQuota.stripTrailingZeros().toPlainString()
+                    + "），请前往申请中心申请或联系管理员");
+        }
+    }
+
+    /** ② 所选模型总限额（按 modelId 跨日/跨空间汇总累计用量） */
+    private void assertModelTotalQuota(String modelId) {
+        String mid = normalizeModelId(modelId);
+        if (StrUtil.isBlank(mid) || "unknown".equals(mid)) {
+            return;
+        }
+        GovAiModel model = modelMapper.selectById(mid);
+        if (model == null || !NOT_DELETE.equals(model.getDeleteFlag())) {
+            return;
+        }
+        Long tokenQuota = model.getTokenQuota();
+        BigDecimal costQuota = model.getCostQuota();
+        boolean limitTokens = tokenQuota != null && tokenQuota > 0;
+        boolean limitCost = costQuota != null && costQuota.compareTo(BigDecimal.ZERO) > 0;
+        if (!limitTokens && !limitCost) {
+            return;
+        }
+        long usedTokens = sumUsageTokens(mid, null, false);
+        BigDecimal usedCost = sumUsageCost(mid, null, false);
+        String label = StrUtil.blankToDefault(model.getName(), mid);
+        if (limitTokens && usedTokens >= tokenQuota) {
+            throw new CommonException("模型「" + label + "」总 Token 配额已用尽（"
+                    + usedTokens + "/" + tokenQuota
+                    + "），请切换其它模型、调高模型总限额，或联系管理员");
+        }
+        if (limitCost && usedCost.compareTo(costQuota) >= 0) {
+            throw new CommonException("模型「" + label + "」总成本配额已用尽（"
+                    + usedCost.stripTrailingZeros().toPlainString() + "/"
+                    + costQuota.stripTrailingZeros().toPlainString()
+                    + "），请切换其它模型、调高模型总限额，或联系管理员");
+        }
+    }
+
+    /**
+     * @param todayOnly true=仅今日（工作空间日配额）；false=全量累计（模型总限额）
+     */
+    private List<GovAiUsageDaily> listUsage(String modelId, String ws, boolean todayOnly) {
+        var q = new QueryWrapper<GovAiUsageDaily>().lambda();
+        if (todayOnly) {
+            q.eq(GovAiUsageDaily::getDay, truncateDay(new Date()));
+        }
+        if (StrUtil.isNotBlank(modelId)) {
+            q.eq(GovAiUsageDaily::getModelId, modelId);
+        }
+        if (StrUtil.isNotBlank(ws)) {
+            q.eq(GovAiUsageDaily::getWs, ws);
+        }
+        return usageMapper.selectList(q);
+    }
+
+    private long sumUsageTokens(String modelId, String ws, boolean todayOnly) {
+        long tokens = 0L;
+        for (GovAiUsageDaily row : listUsage(modelId, ws, todayOnly)) {
+            tokens += (row.getPromptTokens() == null ? 0L : row.getPromptTokens())
+                    + (row.getCompletionTokens() == null ? 0L : row.getCompletionTokens());
+        }
+        return tokens;
+    }
+
+    private BigDecimal sumUsageCost(String modelId, String ws, boolean todayOnly) {
+        BigDecimal cost = BigDecimal.ZERO;
+        for (GovAiUsageDaily row : listUsage(modelId, ws, todayOnly)) {
+            if (row.getCostAmount() != null) {
+                cost = cost.add(row.getCostAmount());
+            }
+        }
+        return cost;
+    }
+
+    private static String normalizeModelId(String modelId) {
+        if (StrUtil.isBlank(modelId)) {
+            return null;
+        }
+        String id = modelId.trim();
+        if (id.startsWith(LhLiteLlmClient.ALIAS_PREFIX)) {
+            return id.substring(LhLiteLlmClient.ALIAS_PREFIX.length());
+        }
+        return id;
+    }
+
+    /** create: 空/0→null；update: null=不改，0→null，&gt;0=总限额 */
+    private static void applyTotalQuotaFields(GovAiModel row, GovAiModelUpsertParam param, boolean creating) {
+        if (param == null) {
+            return;
+        }
+        if (param.getTokenQuota() != null) {
+            if (param.getTokenQuota() < 0) {
+                throw new CommonException("tokenQuota 不能为负");
+            }
+            row.setTokenQuota(param.getTokenQuota() == 0L ? null : param.getTokenQuota());
+        } else if (creating) {
+            row.setTokenQuota(null);
+        }
+        if (param.getCostQuota() != null) {
+            if (param.getCostQuota().compareTo(BigDecimal.ZERO) < 0) {
+                throw new CommonException("costQuota 不能为负");
+            }
+            row.setCostQuota(param.getCostQuota().compareTo(BigDecimal.ZERO) == 0
+                    ? null
+                    : param.getCostQuota());
+        } else if (creating) {
+            row.setCostQuota(null);
+        }
+    }
+
+    private void fillTotalUsage(GovAiModelVo vo) {
+        if (vo == null || StrUtil.isBlank(vo.getId())) {
+            return;
+        }
+        long tokenUsed = sumUsageTokens(vo.getId(), null, false);
+        BigDecimal costUsed = sumUsageCost(vo.getId(), null, false);
+        vo.setTokenUsed(tokenUsed);
+        vo.setCostUsed(costUsed);
+        Long tokenQuota = vo.getTokenQuota();
+        BigDecimal costQuota = vo.getCostQuota();
+        boolean limitTok = tokenQuota != null && tokenQuota > 0;
+        boolean limitCost = costQuota != null && costQuota.compareTo(BigDecimal.ZERO) > 0;
+        vo.setQuotaLimited(limitTok || limitCost);
+        vo.setTokenPct(limitTok
+                ? (int) Math.min(100, Math.round(tokenUsed * 100.0 / tokenQuota))
+                : 0);
+        vo.setCostPct(limitCost
+                ? costUsed.multiply(BigDecimal.valueOf(100))
+                    .divide(costQuota, 0, RoundingMode.HALF_UP).intValue()
+                : 0);
+        vo.setTokenRemaining(limitTok ? Math.max(0L, tokenQuota - tokenUsed) : null);
+        vo.setCostRemaining(limitCost
+                ? costQuota.subtract(costUsed).max(BigDecimal.ZERO)
+                : null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void recordUsage(String ws, String modelId, long promptTokens, long completionTokens, Integer latencyMs) {
+        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String mid = StrUtil.blankToDefault(normalizeModelId(modelId), "unknown");
         Date day = truncateDay(new Date());
         GovAiUsageDaily row = usageMapper.selectOne(new QueryWrapper<GovAiUsageDaily>().lambda()
                 .eq(GovAiUsageDaily::getDay, day)
@@ -565,6 +871,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
                 .eq(GovAiUsageDaily::getModelId, mid)
                 .last("LIMIT 1"));
         BigDecimal cost = estimateCost(mid, promptTokens, completionTokens);
+        long lat = latencyMs != null && latencyMs > 0 ? latencyMs.longValue() : 0L;
+        long latSample = lat > 0 ? 1L : 0L;
         if (row == null) {
             row = new GovAiUsageDaily();
             row.setId(IdUtil.getSnowflakeNextIdStr());
@@ -574,6 +882,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             row.setCalls(1L);
             row.setPromptTokens(Math.max(0, promptTokens));
             row.setCompletionTokens(Math.max(0, completionTokens));
+            row.setLatencySumMs(lat);
+            row.setLatencySamples(latSample);
             row.setCostAmount(cost);
             row.setCurrency("CNY");
             usageMapper.insert(row);
@@ -582,6 +892,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             row.setPromptTokens((row.getPromptTokens() == null ? 0L : row.getPromptTokens()) + Math.max(0, promptTokens));
             row.setCompletionTokens((row.getCompletionTokens() == null ? 0L : row.getCompletionTokens())
                     + Math.max(0, completionTokens));
+            row.setLatencySumMs((row.getLatencySumMs() == null ? 0L : row.getLatencySumMs()) + lat);
+            row.setLatencySamples((row.getLatencySamples() == null ? 0L : row.getLatencySamples()) + latSample);
             row.setCostAmount((row.getCostAmount() == null ? BigDecimal.ZERO : row.getCostAmount()).add(cost));
             usageMapper.updateById(row);
         }
@@ -659,6 +971,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         vo.setName(row.getName());
         vo.setVendor(row.getVendor());
         vo.setKind(row.getKind());
+        vo.setSupportsVision(Boolean.TRUE.equals(row.getSupportsVision()));
+        vo.setSupportsImageOutput(Boolean.TRUE.equals(row.getSupportsImageOutput()));
         vo.setModelName(row.getModelName());
         vo.setBaseUrl(row.getBaseUrl());
         vo.setEndpoint(row.getBaseUrl());
@@ -689,12 +1003,23 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         vo.setRevision(row.getRevision());
         vo.setUpdateTime(row.getUpdateTime());
         vo.setLitellmAlias(LhLiteLlmClient.aliasOf(row.getId()));
+        vo.setTokenQuota(row.getTokenQuota());
+        vo.setCostQuota(row.getCostQuota());
+        boolean limitTok = row.getTokenQuota() != null && row.getTokenQuota() > 0;
+        boolean limitCost = row.getCostQuota() != null
+                && row.getCostQuota().compareTo(BigDecimal.ZERO) > 0;
+        vo.setQuotaLimited(limitTok || limitCost);
         return vo;
     }
 
     private Map<String, Object> syncToLiteLlm(GovAiModel row, boolean enabled) {
+        String apiKey = null;
+        if (StrUtil.isNotBlank(row.getVaultPath())) {
+            apiKey = vaultClient.getString(row.getVaultPath(), "apiKey");
+        }
         return liteLlmClient.upsertAlias(
-                row.getId(), row.getVendor(), row.getModelName(), row.getBaseUrl(), row.getKind(), enabled);
+                row.getId(), row.getVendor(), row.getModelName(), row.getBaseUrl(),
+                row.getKind(), enabled, apiKey);
     }
 
     private static void attachSync(GovAiModelVo vo, Map<String, Object> sync) {
@@ -782,7 +1107,39 @@ public class GovAiModelServiceImpl implements GovAiModelService {
 
     private static String normalizeKind(String kind) {
         String k = StrUtil.blankToDefault(kind, "chat").trim().toLowerCase(Locale.ROOT);
-        return "embed".equals(k) ? "embed" : "chat";
+        if ("embed".equals(k) || "embedding".equals(k)) {
+            return "embed";
+        }
+        if ("image".equals(k) || "img".equals(k) || "vision-gen".equals(k)) {
+            return "image";
+        }
+        return "chat";
+    }
+
+    private static boolean isChatKind(String kind) {
+        return "chat".equalsIgnoreCase(StrUtil.blankToDefault(kind, "chat"));
+    }
+
+    /**
+     * 能力位：supports_vision 仅对对话有意义；image 类默认 supports_image_output=true。
+     */
+    private static void applyCapabilityFlags(GovAiModel row, GovAiModelUpsertParam param, boolean creating) {
+        String kind = StrUtil.blankToDefault(row.getKind(), "chat");
+        if (param.getSupportsVision() != null) {
+            row.setSupportsVision(Boolean.TRUE.equals(param.getSupportsVision()) && isChatKind(kind));
+        } else if (creating) {
+            row.setSupportsVision(false);
+        } else if (!isChatKind(kind)) {
+            row.setSupportsVision(false);
+        }
+        if (param.getSupportsImageOutput() != null) {
+            row.setSupportsImageOutput(
+                    Boolean.TRUE.equals(param.getSupportsImageOutput()) && "image".equalsIgnoreCase(kind));
+        } else if (creating) {
+            row.setSupportsImageOutput("image".equalsIgnoreCase(kind));
+        } else if (!"image".equalsIgnoreCase(kind)) {
+            row.setSupportsImageOutput(false);
+        }
     }
 
     /** 库字段为展示串（128K）；兼容纯数字入参 */
@@ -814,6 +1171,35 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         return vals.length > 0 ? vals[vals.length - 1] : null;
     }
 
+    /** 优先选成功探测；否则选带可读 error 的结果 */
+    private static Map<String, Object> preferProbe(Map<String, Object> primary, Map<String, Object> fallback) {
+        if (fallback == null) {
+            return primary;
+        }
+        if (Boolean.TRUE.equals(fallback.get("ok"))) {
+            return fallback;
+        }
+        if (StrUtil.isNotBlank(probeErrorMsg(fallback, null))) {
+            return fallback;
+        }
+        return primary;
+    }
+
+    private static String probeErrorMsg(Map<String, Object> probe, String fallback) {
+        if (probe == null) {
+            return fallback;
+        }
+        Object err = probe.get("error");
+        if (err == null) {
+            return fallback;
+        }
+        String s = String.valueOf(err).trim();
+        if (StrUtil.isBlank(s) || "null".equalsIgnoreCase(s)) {
+            return fallback;
+        }
+        return s;
+    }
+
     private static int parseRangeDays(String range) {
         if (StrUtil.isBlank(range)) {
             return 30;
@@ -841,5 +1227,47 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         c.set(Calendar.SECOND, 0);
         c.set(Calendar.MILLISECOND, 0);
         return c.getTime();
+    }
+
+    /** 本月 1 日 00:00:00（本地时区） */
+    private static Date monthStart() {
+        Calendar c = Calendar.getInstance();
+        c.set(Calendar.DAY_OF_MONTH, 1);
+        c.set(Calendar.HOUR_OF_DAY, 0);
+        c.set(Calendar.MINUTE, 0);
+        c.set(Calendar.SECOND, 0);
+        c.set(Calendar.MILLISECOND, 0);
+        return c.getTime();
+    }
+
+    /** SUM(latency_sum_ms) / SUM(latency_samples)；无样本返回 null */
+    private static Long avgLatencyFromUsage(List<GovAiUsageDaily> usage) {
+        long sum = 0L;
+        long samples = 0L;
+        for (GovAiUsageDaily u : usage) {
+            long s = u.getLatencySamples() == null ? 0L : u.getLatencySamples();
+            if (s <= 0) {
+                continue;
+            }
+            sum += u.getLatencySumMs() == null ? 0L : u.getLatencySumMs();
+            samples += s;
+        }
+        if (samples <= 0) {
+            return null;
+        }
+        return Math.round((double) sum / (double) samples);
+    }
+
+    /** 回退：本月 chat assistant 轮次 AVG(latency_ms)，按 session.ws 软过滤 */
+    private Long avgLatencyFromTurns(String workspace, Date from) {
+        try {
+            Double avg = turnMapper.avgLatencyMsSince(workspace, from);
+            if (avg == null || avg.isNaN() || avg <= 0) {
+                return null;
+            }
+            return Math.round(avg);
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

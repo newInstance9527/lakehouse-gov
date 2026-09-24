@@ -100,8 +100,14 @@ public class GovAssetVo {
     @Schema(description = "同步状态")
     private String lastSyncStatus;
 
-    @Schema(description = "工作空间")
+    @Schema(description = "归属工作空间（home_ws）")
     private String ws;
+
+    @Schema(description = "门户可见性")
+    private String visibility;
+
+    @Schema(description = "企业共享状态")
+    private String shareStatus;
 
     @Schema(description = "乐观锁")
     private Integer revision;

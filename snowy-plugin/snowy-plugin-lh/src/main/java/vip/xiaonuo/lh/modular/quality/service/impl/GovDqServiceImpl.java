@@ -88,16 +88,16 @@ public class GovDqServiceImpl implements GovDqService {
 
     @Override
     public Map<String, Object> overview(String ws, String range) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         Date since = sinceByRange(range);
         List<GovDqRule> rules = ruleMapper.selectList(new QueryWrapper<GovDqRule>().lambda()
-                .eq(GovDqRule::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovDqRule::getWs, workspace)
                 .eq(GovDqRule::getDeleteFlag, NOT_DELETE)
                 .eq(GovDqRule::getEnabled, 1));
         List<String> ruleIds = rules.stream().map(GovDqRule::getId).collect(Collectors.toList());
         List<GovDqRuleRun> runs = ruleIds.isEmpty() ? List.of() : runMapper.selectList(
                 new QueryWrapper<GovDqRuleRun>().lambda()
-                        .eq(GovDqRuleRun::getWs, workspace)
+                        .eq(StrUtil.isNotBlank(workspace), GovDqRuleRun::getWs, workspace)
                         .in(GovDqRuleRun::getRuleId, ruleIds)
                         .ge(since != null, GovDqRuleRun::getRanAt, since));
 
@@ -127,11 +127,11 @@ public class GovDqServiceImpl implements GovDqService {
 
     @Override
     public List<Map<String, Object>> trend(String ws, String range) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         int days = parseRangeDays(range);
         Date since = daysAgo(days);
         List<GovDqRuleRun> runs = runMapper.selectList(new QueryWrapper<GovDqRuleRun>().lambda()
-                .eq(GovDqRuleRun::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovDqRuleRun::getWs, workspace)
                 .ge(GovDqRuleRun::getRanAt, since));
         Map<String, List<GovDqRuleRun>> byDay = new LinkedHashMap<>();
         for (int i = days - 1; i >= 0; i--) {
@@ -161,9 +161,9 @@ public class GovDqServiceImpl implements GovDqService {
 
     @Override
     public List<Map<String, Object>> typeDist(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<GovDqRule> rules = ruleMapper.selectList(new QueryWrapper<GovDqRule>().lambda()
-                .eq(GovDqRule::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovDqRule::getWs, workspace)
                 .eq(GovDqRule::getDeleteFlag, NOT_DELETE));
         Map<String, Long> cnt = rules.stream().collect(Collectors.groupingBy(
                 r -> StrUtil.blankToDefault(r.getRuleLevel(), "其他"), Collectors.counting()));
@@ -181,11 +181,11 @@ public class GovDqServiceImpl implements GovDqService {
 
     @Override
     public List<Map<String, Object>> gold(String ws, Integer limit) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         int lim = limit == null ? 5 : Math.max(1, Math.min(limit, 50));
         // P0：按最近运行 ok_pct 聚合表级分数 Top
         List<GovDqRule> rules = ruleMapper.selectList(new QueryWrapper<GovDqRule>().lambda()
-                .eq(GovDqRule::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovDqRule::getWs, workspace)
                 .eq(GovDqRule::getDeleteFlag, NOT_DELETE));
         Map<String, List<Double>> byTable = new LinkedHashMap<>();
         for (GovDqRule rule : rules) {
@@ -212,8 +212,8 @@ public class GovDqServiceImpl implements GovDqService {
     @Override
     public Page<GovDqRuleVo> pageRules(GovDqPageParam param) {
         QueryWrapper<GovDqRule> qw = new QueryWrapper<>();
-        String workspace = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
-        qw.lambda().eq(GovDqRule::getWs, workspace).eq(GovDqRule::getDeleteFlag, NOT_DELETE);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
+        qw.lambda().eq(StrUtil.isNotBlank(workspace), GovDqRule::getWs, workspace).eq(GovDqRule::getDeleteFlag, NOT_DELETE);
         if (StrUtil.isNotBlank(param.getLayer())) {
             qw.lambda().eq(GovDqRule::getLayer, param.getLayer());
         }
@@ -525,9 +525,9 @@ public class GovDqServiceImpl implements GovDqService {
 
     @Override
     public Map<String, Object> assessPublishGate(String ws, String tableHint, String layerHint) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<GovDqGate> gates = gateMapper.selectList(new QueryWrapper<GovDqGate>().lambda()
-                .eq(GovDqGate::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), GovDqGate::getWs, workspace)
                 .eq(GovDqGate::getDeleteFlag, NOT_DELETE));
         if (gates.isEmpty()) {
             Map<String, Object> skip = new LinkedHashMap<>();
@@ -552,8 +552,8 @@ public class GovDqServiceImpl implements GovDqService {
         for (GovDqGate g : matched) {
             Double score = tableScore(workspace, g.getTableName(), g.getLayer());
             BigDecimal min = g.getMinScore() == null ? new BigDecimal("95.00") : g.getMinScore();
-            boolean below = score != null && score < min.doubleValue();
             boolean block = Integer.valueOf(1).equals(g.getBlockOnFail());
+            boolean below = score == null || score < min.doubleValue();
             if (below && block) {
                 Map<String, Object> fail = new LinkedHashMap<>();
                 fail.put("status", "fail");
@@ -569,8 +569,8 @@ public class GovDqServiceImpl implements GovDqService {
             if (below) {
                 Map<String, Object> warn = new LinkedHashMap<>();
                 warn.put("status", "pass");
-                warn.put("detail", "质量分低于阈值但不阻断（blockOnFail=false）score="
-                        + round1(score) + " min=" + min);
+                warn.put("detail", "质量分低于阈值或不存在但不阻断（blockOnFail=false）score="
+                        + (score == null ? "无近跑" : round1(score)) + " min=" + min);
                 warn.put("blocked", false);
                 return warn;
             }
@@ -584,9 +584,9 @@ public class GovDqServiceImpl implements GovDqService {
 
     @Override
     public List<Map<String, Object>> listGates(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         return gateMapper.selectList(new QueryWrapper<GovDqGate>().lambda()
-                        .eq(GovDqGate::getWs, workspace)
+                        .eq(StrUtil.isNotBlank(workspace), GovDqGate::getWs, workspace)
                         .eq(GovDqGate::getDeleteFlag, NOT_DELETE))
                 .stream().map(g -> {
                     Map<String, Object> m = new LinkedHashMap<>();
@@ -670,7 +670,7 @@ public class GovDqServiceImpl implements GovDqService {
 
     @Override
     public Map<String, Object> syncOm(String ws) {
-        String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         String markValue = String.valueOf(System.currentTimeMillis());
         CbDqSyncWatermark row = watermarkMapper.selectOne(new QueryWrapper<CbDqSyncWatermark>()
                 .eq("source_system", "om_dq").eq("mark_key", "ws:" + workspace).last("LIMIT 1"));

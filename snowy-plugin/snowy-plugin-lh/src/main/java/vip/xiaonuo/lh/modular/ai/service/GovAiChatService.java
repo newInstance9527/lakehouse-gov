@@ -17,6 +17,9 @@ public interface GovAiChatService {
 
     List<Map<String, Object>> listSessions(String ws);
 
+    /** 会话轮次（按时间升序） */
+    List<Map<String, Object>> listTurns(String sessionId);
+
     Map<String, Object> createSession(GovAiSessionCreateParam param);
 
     SseEmitter chat(GovAiChatParam param);

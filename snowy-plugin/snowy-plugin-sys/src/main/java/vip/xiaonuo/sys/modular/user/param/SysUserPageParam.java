@@ -53,4 +53,11 @@ public class SysUserPageParam {
     /** 所属组织 */
     @Schema(description = "所属组织")
     private String orgId;
+
+    /**
+     * 是否包含下级组织成员（默认 false，仅本部门）。
+     * 部门管理选父节点查挂接人员时应传 true。
+     */
+    @Schema(description = "是否包含下级组织，true=本部门及所有子部门")
+    private Boolean searchIncludeChild;
 }

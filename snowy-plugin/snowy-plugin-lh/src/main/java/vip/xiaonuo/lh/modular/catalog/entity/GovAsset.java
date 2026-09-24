@@ -43,8 +43,14 @@ public class GovAsset extends CommonEntity {
     @Schema(description = "状态")
     private String status;
 
-    @Schema(description = "工作空间")
+    @Schema(description = "归属工作空间（home_ws）")
     private String ws;
+
+    @Schema(description = "门户可见性 private_ws/shared_enterprise/listed_public")
+    private String visibility;
+
+    @Schema(description = "企业共享状态 none/pending/published")
+    private String shareStatus;
 
     @Schema(description = "备注")
     private String remark;

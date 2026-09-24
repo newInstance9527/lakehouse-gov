@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
+import vip.xiaonuo.lh.core.idempotency.LhIdempotencyGuard;
 import vip.xiaonuo.lh.modular.apply.entity.ApplyTicket;
 import vip.xiaonuo.lh.modular.apply.entity.ApplyTicketItem;
 import vip.xiaonuo.lh.modular.apply.mapper.ApplyTicketItemMapper;
@@ -61,6 +62,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public static final String TYPE_SCAN_ELEVATE = "scan_elevate";
     /** 质量规则失败修复工单 */
     public static final String TYPE_QUALITY_FIX = "quality_fix";
+    /** 脚本/发布包审批（环境与发布 §22） */
+    public static final String TYPE_SCRIPT_PUBLISH = "script_publish";
 
     @Resource
     private ApplyTicketMapper ticketMapper;
@@ -89,10 +92,23 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     @Resource
     @Lazy
     private ExportAuditService exportAuditService;
+    @Resource
+    private LhIdempotencyGuard idempotencyGuard;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ApplyTicket create(ApplyTicketCreateParam param) {
+        return idempotencyGuard.run(
+                LhIdempotencyGuard.SCOPE_APPLY_TICKET,
+                param.getIdempotencyKey(),
+                LhIdempotencyGuard.hashPayload(param),
+                () -> createOnce(param),
+                "apply_ticket",
+                ApplyTicket::getId,
+                ApplyTicket.class);
+    }
+
+    private ApplyTicket createOnce(ApplyTicketCreateParam param) {
         String userId = LhLoginUsers.requireUserId();
         String type = normalizeTicketType(param.getTicketType());
         if (TYPE_LAKE_EXPORT.equals(type)) {
@@ -106,6 +122,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
         if (TYPE_API_PUBLISH.equals(type)) {
             return createApiPublish(param, userId);
+        }
+        if (TYPE_SCRIPT_PUBLISH.equals(type)) {
+            return createScriptPublish(param, userId);
         }
         if (TYPE_API_SUBSCRIBE.equals(type)) {
             return createApiSubscribe(param, userId);
@@ -311,6 +330,35 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     }
 
     /**
+     * 脚本发布包审批：挂 releaseId，审批通过后由发布页 publish 门禁校验 SCR- 单号。
+     */
+    private ApplyTicket createScriptPublish(ApplyTicketCreateParam param, String userId) {
+        String releaseId = StrUtil.trim(param.getResourceId());
+        ApplyTicket t = newTicketShell(userId, TYPE_SCRIPT_PUBLISH, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("SCR-"));
+        JSONObject payload = new JSONObject();
+        payload.set("releaseId", releaseId);
+        payload.set("scriptId", param.getScriptId());
+        payload.set("publishEnv", StrUtil.blankToDefault(param.getPublishEnv(), "stg"));
+        payload.set("rollbackPlan", param.getRollbackPlan());
+        payload.set("expireLabel", param.getExpireLabel());
+        payload.set("resourceType", StrUtil.blankToDefault(param.getResourceType(), "cp_release"));
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            t.setTitle("脚本发布 · " + StrUtil.blankToDefault(releaseId, t.getTicketNo()));
+        }
+        if (StrUtil.isBlank(t.getReason())) {
+            t.setReason(StrUtil.blankToDefault(param.getReason(), "脚本发布审批"));
+        }
+        ticketMapper.insert(t);
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAction("SCRIPT_PUBLISH");
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
+    }
+
+    /**
      * 合规删除审批单（doc/合规删除.md）：只承载审批意图与痕迹，
      * 请求/计划/执行/证据仍在 {@code gov_del_*}；审批通过不写任何 grant。
      */
@@ -480,9 +528,11 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         String userId = LhLoginUsers.requireUserId();
         long current = param.getCurrent() == null ? 1L : param.getCurrent();
         long size = param.getSize() == null ? 20L : param.getSize();
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
         QueryWrapper<ApplyTicket> qw = new QueryWrapper<>();
         qw.lambda().eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
                 .eq(ApplyTicket::getApplicant, userId)
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .eq(StrUtil.isNotBlank(param.getStatus()), ApplyTicket::getStatus, param.getStatus())
                 .eq(StrUtil.isNotBlank(normalizeFilterType(param.getTicketType())),
                         ApplyTicket::getTicketType, normalizeFilterType(param.getTicketType()))
@@ -496,6 +546,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         long current = param.getCurrent() == null ? 1L : param.getCurrent();
         long size = param.getSize() == null ? 20L : param.getSize();
         String typeFilter = normalizeFilterType(param.getTicketType());
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
         // 超管：DB 分页；Owner/安全岗：先拉开单再按候选人过滤后内存分页（一期量级可接受）
         // J2：含 pending_security（待安全加签）
         if (LhLoginUsers.isSuperAdmin()) {
@@ -504,6 +555,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
                     .in(ApplyTicket::getStatus, List.of(
                             ApplyApprovalChain.STATUS_PENDING,
                             ApplyApprovalChain.STATUS_PENDING_SECURITY))
+                    .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                     .eq(StrUtil.isNotBlank(typeFilter), ApplyTicket::getTicketType, typeFilter)
                     .orderByAsc(ApplyTicket::getCreateTime);
             return ticketMapper.selectPage(new Page<>(current, size), qw);
@@ -513,6 +565,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
                 .in(ApplyTicket::getStatus, List.of(
                         ApplyApprovalChain.STATUS_PENDING,
                         ApplyApprovalChain.STATUS_PENDING_SECURITY))
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .eq(StrUtil.isNotBlank(typeFilter), ApplyTicket::getTicketType, typeFilter)
                 .orderByAsc(ApplyTicket::getCreateTime));
         List<ApplyTicket> decidable = approvalCandidateService.filterDecidable(all);
@@ -520,31 +573,37 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     }
 
     @Override
-    public Map<String, Object> kpi() {
+    public Map<String, Object> kpi(String ws) {
         String userId = LhLoginUsers.requireUserId();
         Date monthStart = startOfMonth();
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<ApplyTicket> allPending = ticketMapper.selectList(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .in(ApplyTicket::getStatus, List.of(
                         ApplyApprovalChain.STATUS_PENDING,
                         ApplyApprovalChain.STATUS_PENDING_SECURITY)));
         long pending = approvalCandidateService.countDecidablePending(allPending);
         long mine = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .eq(ApplyTicket::getApplicant, userId));
         long minePending = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .eq(ApplyTicket::getApplicant, userId)
                 .in(ApplyTicket::getStatus, List.of(
                         ApplyApprovalChain.STATUS_PENDING,
                         ApplyApprovalChain.STATUS_PENDING_SECURITY)));
         long monthApproved = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .eq(ApplyTicket::getApplicant, userId)
                 .eq(ApplyTicket::getStatus, "approved")
                 .ge(ApplyTicket::getApprovedAt, monthStart));
         long monthRejected = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .eq(ApplyTicket::getApplicant, userId)
                 .eq(ApplyTicket::getStatus, "rejected")
                 .ge(ApplyTicket::getApprovedAt, monthStart));
@@ -554,6 +613,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         long metricPending = approvalCandidateService.countDecidablePending(metricPendingAll);
         long metricMine = ticketMapper.selectCount(new QueryWrapper<ApplyTicket>().lambda()
                 .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), ApplyTicket::getWs, workspace)
                 .eq(ApplyTicket::getTicketType, TYPE_METRIC)
                 .eq(ApplyTicket::getApplicant, userId));
 
@@ -617,9 +677,10 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
             return r;
         }
         stampSecurityCosignIfNeeded(t, param);
-        // 出湖 / 合规删除：仅改状态；API 发布：审批通过后自动 publish+deploy；指标发布：自动启用
+        // 出湖 / 合规删除 / 脚本发布：仅改状态；API 发布：审批通过后自动 publish+deploy；指标发布：自动启用
         if (TYPE_LAKE_EXPORT.equals(t.getTicketType())
                 || TYPE_COMPLIANCE_DELETE.equals(t.getTicketType())
+                || TYPE_SCRIPT_PUBLISH.equals(t.getTicketType())
                 || TYPE_API_PUBLISH.equals(t.getTicketType())
                 || TYPE_METRIC.equals(t.getTicketType())) {
             t.setStatus("approved");
@@ -937,6 +998,60 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     }
 
     @Override
+    public void assertApprovedScriptPublishTicket(String ticketNo, String releaseId) {
+        String no = StrUtil.trim(ticketNo);
+        if (StrUtil.isBlank(no)) {
+            throw new CommonException("脚本发布须先有已审批的 script_publish 单号（SCR-）：提交发布申请 → 审批通过后再「发布」");
+        }
+        ApplyTicket t = ticketMapper.selectOne(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getTicketNo, no)
+                .last("LIMIT 1"));
+        if (t == null) {
+            throw new CommonException("脚本发布申请单不存在: " + no);
+        }
+        if (!TYPE_SCRIPT_PUBLISH.equals(t.getTicketType())) {
+            throw new CommonException("单号 " + no + " 不是脚本发布申请（ticket_type=" + t.getTicketType() + "）");
+        }
+        if (!"approved".equals(t.getStatus())) {
+            throw new CommonException("脚本发布申请尚未通过审批: " + no + "（status=" + t.getStatus() + "）");
+        }
+        if (StrUtil.isNotBlank(releaseId) && StrUtil.isNotBlank(t.getPayload())) {
+            try {
+                String bound = JSONUtil.parseObj(t.getPayload()).getStr("releaseId");
+                if (StrUtil.isNotBlank(bound) && !bound.equals(releaseId)) {
+                    throw new CommonException("发布单 " + no + " 与当前发布包 id 不匹配");
+                }
+            } catch (CommonException e) {
+                throw e;
+            } catch (Exception ignored) {
+                /* soft */
+            }
+        }
+    }
+
+    @Override
+    public Map<String, Object> findTicketMeta(String ticketNo) {
+        String no = StrUtil.trim(ticketNo);
+        if (StrUtil.isBlank(no)) {
+            return null;
+        }
+        ApplyTicket t = ticketMapper.selectOne(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .eq(ApplyTicket::getTicketNo, no)
+                .last("LIMIT 1"));
+        if (t == null) {
+            return null;
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ticketNo", t.getTicketNo());
+        m.put("status", t.getStatus());
+        m.put("ticketType", t.getTicketType());
+        m.put("id", t.getId());
+        return m;
+    }
+
+    @Override
     public String findLatestApprovedApiPublishTicketNo(String apiBindingId) {
         Map<String, Object> hit = findLatestApiPublishTicket(apiBindingId);
         if (hit == null) {
@@ -1169,8 +1284,12 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if ("compliance".equals(t) || "compliance_delete".equals(t) || "erase".equals(t)) {
             return TYPE_COMPLIANCE_DELETE;
         }
-        if ("api_publish".equals(t) || "publish".equals(t) || "publish_api".equals(t) || "dataapi_publish".equals(t)) {
+        if ("api_publish".equals(t) || "publish_api".equals(t) || "dataapi_publish".equals(t)) {
             return TYPE_API_PUBLISH;
+        }
+        if ("script_publish".equals(t) || "publish".equals(t) || "package_publish".equals(t)
+                || "release_publish".equals(t)) {
+            return TYPE_SCRIPT_PUBLISH;
         }
         if ("api".equals(t) || "api_subscribe".equals(t) || "subscribe".equals(t) || "dataapi_subscribe".equals(t)) {
             return TYPE_API_SUBSCRIBE;

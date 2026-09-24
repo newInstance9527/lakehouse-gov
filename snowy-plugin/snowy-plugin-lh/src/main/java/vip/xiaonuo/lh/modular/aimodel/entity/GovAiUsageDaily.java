@@ -26,6 +26,10 @@ public class GovAiUsageDaily {
     private Long calls;
     private Long promptTokens;
     private Long completionTokens;
+    /** 当日累计响应毫秒（各次调用之和） */
+    private Long latencySumMs;
+    /** 计入时延的调用次数 */
+    private Long latencySamples;
     private BigDecimal costAmount;
     private String currency;
 }

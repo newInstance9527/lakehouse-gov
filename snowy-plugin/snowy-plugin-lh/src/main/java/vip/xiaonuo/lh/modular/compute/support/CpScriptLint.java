@@ -17,6 +17,12 @@ public final class CpScriptLint {
     private static final Pattern PROD_WRITE = Pattern.compile(
             "(?i)\\b(insert|update|delete|merge|create|drop|alter|truncate)\\b[\\s\\S]{0,160}\\bprod_[a-z0-9_]*");
     private static final Pattern PROD_REF = Pattern.compile("(?i)\\bprod_[a-z0-9_]+\\.");
+    /** 无环境前缀的生产层写：INSERT INTO dwd_xxx / ods. / ads_ */
+    private static final Pattern PROD_LAYER_WRITE = Pattern.compile(
+            "(?i)\\b(insert\\s+into|merge\\s+into|create\\s+table|drop\\s+table|alter\\s+table|truncate\\s+table)\\s+"
+                    + "(?!dev_|stg_|test_|pre_)(ods_|dwd_|dws_|ads_|ods\\.|dwd\\.|dws\\.|ads\\.)");
+    private static final Pattern PROD_BUCKET = Pattern.compile(
+            "(?i)s3a?://[^\\s'\"]*(warehouse|iceberg-prod|prod-warehouse)");
     private static final Pattern SELECT = Pattern.compile("(?i)\\bselect\\b");
     private static final Pattern FROM = Pattern.compile("(?i)\\bfrom\\b");
     private static final Pattern WHERE = Pattern.compile("(?i)\\bwhere\\b");
@@ -25,6 +31,14 @@ public final class CpScriptLint {
     }
 
     public static List<Map<String, String>> check(String sql) {
+        return check(sql, "TEST", true);
+    }
+
+    /**
+     * @param env TEST/PRE（开发态）；发布流水线勿用本方法拦 prod 写入
+     * @param forbidProdLayer 禁止无环境前缀的生产层（ods_/dwd_/dws_/ads_）写入
+     */
+    public static List<Map<String, String>> check(String sql, String env, boolean forbidProdLayer) {
         List<Map<String, String>> out = new ArrayList<>();
         String text = sql == null ? "" : sql;
         if (StrUtil.isBlank(text)) {
@@ -33,6 +47,15 @@ public final class CpScriptLint {
         }
         if (PROD_WRITE.matcher(text).find() || PROD_REF.matcher(text).find()) {
             out.add(item("禁止引用或写入 prod Catalog", "error"));
+        }
+        if (forbidProdLayer && PROD_LAYER_WRITE.matcher(text).find()) {
+            out.add(item("开发态禁止写生产层（请用 dev_* / stg_* Catalog，生产只经发布门禁）", "error"));
+        }
+        if (PROD_BUCKET.matcher(text).find()) {
+            String e = StrUtil.blankToDefault(env, "TEST").toUpperCase(Locale.ROOT);
+            if (!"PROD".equals(e)) {
+                out.add(item("开发/试跑禁止直写生产对象存储桶（warehouse/iceberg-prod）", "error"));
+            }
         }
         if (SELECT.matcher(text).find() && FROM.matcher(text).find() && !WHERE.matcher(text).find()) {
             out.add(item("SELECT 缺少 WHERE，可能全表扫描", "warn"));

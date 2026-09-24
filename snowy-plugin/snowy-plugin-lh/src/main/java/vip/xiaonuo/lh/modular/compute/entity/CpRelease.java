@@ -28,6 +28,14 @@ public class CpRelease {
     private String gatesJson;
     private String dsWorkflowCode;
     private String rolledToTag;
+    /** script_publish 申请单号 SCR-xxx */
+    private String applyTicketNo;
+    private Integer prNumber;
+    private String prUrl;
+    /** open / merged / closed */
+    private String prState;
+    /** 评审分支 review/{id} */
+    private String reviewBranch;
     private String deleteFlag;
     private Date createTime;
     private String createUser;

@@ -55,6 +55,10 @@ public class LhConsumerBinding extends CommonEntity {
     @Schema(description = "消费方实例ID")
     private String consumerId;
 
+    /** 外部名绑定键 kind:ws__code；全局唯一 */
+    @Schema(description = "外部名extId")
+    private String extId;
+
     /** 投影配置 JSON */
     @Schema(description = "投影配置JSON")
     private String projection;

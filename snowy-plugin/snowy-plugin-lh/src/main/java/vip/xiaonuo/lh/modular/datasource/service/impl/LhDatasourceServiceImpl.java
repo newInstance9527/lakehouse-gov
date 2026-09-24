@@ -120,6 +120,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public Page<LhDatasourceVo> page(LhDatasourcePageParam param) {
         QueryWrapper<LhDatasource> qw = new QueryWrapper<LhDatasource>().checkSqlInjection();
         qw.lambda().ne(LhDatasource::getStatus, LhDatasourceStatusEnum.REVOKED.getValue());
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(param.getWs());
+        if (StrUtil.isNotBlank(workspace)) {
+            qw.lambda().eq(LhDatasource::getWs, workspace);
+        }
         if (StrUtil.isNotBlank(param.getName())) {
             qw.lambda().like(LhDatasource::getName, param.getName());
         }
@@ -776,9 +780,14 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     }
 
     @Override
-    public Map<String, Object> kpi() {
-        List<LhDatasource> all = this.list(new QueryWrapper<LhDatasource>().lambda()
-                .ne(LhDatasource::getStatus, LhDatasourceStatusEnum.REVOKED.getValue()));
+    public Map<String, Object> kpi(String ws) {
+        QueryWrapper<LhDatasource> qw = new QueryWrapper<LhDatasource>().checkSqlInjection();
+        qw.lambda().ne(LhDatasource::getStatus, LhDatasourceStatusEnum.REVOKED.getValue());
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
+        if (StrUtil.isNotBlank(workspace)) {
+            qw.lambda().eq(LhDatasource::getWs, workspace);
+        }
+        List<LhDatasource> all = this.list(qw);
         long online = all.stream().filter(d -> LhDatasourceStatusEnum.ONLINE.getValue().equals(d.getStatus())).count();
         long warn = all.stream().filter(d -> LhDatasourceStatusEnum.WARN.getValue().equals(d.getStatus())).count();
         long paused = all.stream().filter(d -> LhDatasourceStatusEnum.PAUSED.getValue().equals(d.getStatus())).count();

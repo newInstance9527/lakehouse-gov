@@ -47,9 +47,8 @@ public class SysUserEditParam {
     @NotBlank(message = "orgId不能为空")
     private String orgId;
 
-    /** 职位id */
-    @Schema(description = "职位id")
-    @NotBlank(message = "positionId不能为空")
+    /** 职位id（可选：挂主部门时可不改岗；空则保留原职位） */
+    @Schema(description = "职位id，可空")
     private String positionId;
 
     /** 职级 */

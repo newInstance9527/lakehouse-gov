@@ -7,6 +7,9 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
+import org.springframework.context.annotation.Lazy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
@@ -14,6 +17,11 @@ import vip.xiaonuo.auth.core.util.StpLoginUserUtil;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.DsClient;
+import vip.xiaonuo.lh.core.idempotency.LhIdempotencyGuard;
+import vip.xiaonuo.lh.modular.apply.entity.ApplyTicket;
+import vip.xiaonuo.lh.modular.apply.param.ApplyTicketCreateParam;
+import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.apply.service.impl.ApplyTicketServiceImpl;
 import vip.xiaonuo.lh.modular.compute.entity.CpRelease;
 import vip.xiaonuo.lh.modular.compute.entity.CpScriptIndex;
 import vip.xiaonuo.lh.modular.compute.entity.CpScriptRun;
@@ -26,6 +34,8 @@ import vip.xiaonuo.lh.modular.compute.param.CpReleaseCreateParam;
 import vip.xiaonuo.lh.modular.compute.param.CpScriptCreateParam;
 import vip.xiaonuo.lh.modular.compute.param.CpScriptRunParam;
 import vip.xiaonuo.lh.modular.compute.param.CpScriptSaveParam;
+import vip.xiaonuo.lh.modular.compute.support.CpEnvIsolationSupport;
+import vip.xiaonuo.lh.modular.compute.support.CpGiteaClient;
 import vip.xiaonuo.lh.modular.compute.support.CpScriptGitStore;
 import vip.xiaonuo.lh.modular.compute.support.CpScriptLint;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
@@ -52,6 +62,8 @@ import java.util.regex.Pattern;
 @Service
 public class CpDevelopService {
 
+    private static final Logger log = LoggerFactory.getLogger(CpDevelopService.class);
+
     private static final int TRIAL_MAX_ROWS = 200;
     private static final int TRIAL_CELL_CHARS = 400;
     private static final int TRIAL_LOG_CHARS = 8000;
@@ -72,6 +84,13 @@ public class CpDevelopService {
     @Resource
     private CpScriptGitStore gitStore;
     @Resource
+    private CpGiteaClient giteaClient;
+    @Resource
+    private CpEnvIsolationSupport envIsolation;
+    @Resource
+    @Lazy
+    private ApplyTicketService applyTicketService;
+    @Resource
     private DsClient dsClient;
     @Resource
     private LhProperties lhProperties;
@@ -81,11 +100,13 @@ public class CpDevelopService {
     private GovDqService govDqService;
     @Resource
     private GovLineageService govLineageService;
+    @Resource
+    private LhIdempotencyGuard idempotencyGuard;
 
     public Map<String, Object> tree(String ws) {
-        String workspace = ws(ws);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<CpScriptIndex> rows = scriptMapper.selectList(new QueryWrapper<CpScriptIndex>().lambda()
-                .eq(CpScriptIndex::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), CpScriptIndex::getWs, workspace)
                 .eq(CpScriptIndex::getDeleteFlag, "NOT_DELETE")
                 .orderByAsc(CpScriptIndex::getPath));
         List<Map<String, Object>> nodes = new ArrayList<>();
@@ -135,6 +156,7 @@ public class CpDevelopService {
             throw new CommonException("脚本已存在: {}", path);
         }
         String sql = StrUtil.blankToDefault(param.getSql(), "-- " + CpScriptLint.nameOf(path) + "\nSELECT 1;\n");
+        List<Map<String, String>> lint = fullLint(sql, env);
         String sha = gitStore.commit(workspace, path, sql, "create " + path, user.name, user.email);
         Date now = new Date();
         CpScriptIndex row = new CpScriptIndex();
@@ -145,10 +167,10 @@ public class CpDevelopService {
         row.setFolder(CpScriptLint.folderOf(path));
         row.setEngine(engine);
         row.setEnv(env);
-        row.setStatus(CpScriptLint.hasError(CpScriptLint.check(sql)) ? "FAILED" : "DRAFT");
+        row.setStatus(CpScriptLint.hasError(lint) ? "FAILED" : "DRAFT");
         row.setGitSha(sha);
         row.setAuthorName(user.name);
-        row.setLintJson(JSONUtil.toJsonStr(CpScriptLint.check(sql)));
+        row.setLintJson(JSONUtil.toJsonStr(lint));
         row.setDeleteFlag("NOT_DELETE");
         row.setCreateTime(now);
         row.setCreateUser(user.id);
@@ -173,7 +195,7 @@ public class CpDevelopService {
             throw new CommonException(e.getMessage());
         }
         String sql = param.getSql() == null ? gitStore.read(row.getWs(), row.getPath()) : param.getSql();
-        List<Map<String, String>> lint = CpScriptLint.check(sql);
+        List<Map<String, String>> lint = fullLint(sql, env);
         String sha = gitStore.commit(row.getWs(), row.getPath(), sql, "save " + row.getPath(), user.name, user.email);
         row.setEngine(engine);
         row.setEnv(env);
@@ -204,7 +226,9 @@ public class CpDevelopService {
             commit(save);
             row = requireScript(row.getId());
         }
-        List<Map<String, String>> lint = CpScriptLint.check(gitStore.read(row.getWs(), row.getPath()));
+        List<Map<String, String>> lint = fullLint(
+                gitStore.read(row.getWs(), row.getPath()),
+                row.getEnv());
         if (CpScriptLint.hasError(lint)) {
             throw new CommonException("静态检查未通过，不能试跑");
         }
@@ -270,9 +294,9 @@ public class CpDevelopService {
     }
 
     public List<Map<String, Object>> kpis(String ws) {
-        String workspace = ws(ws);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         long scripts = scriptMapper.selectCount(new QueryWrapper<CpScriptIndex>().lambda()
-                .eq(CpScriptIndex::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), CpScriptIndex::getWs, workspace)
                 .eq(CpScriptIndex::getDeleteFlag, "NOT_DELETE"));
         Calendar cal = Calendar.getInstance();
         cal.set(Calendar.DAY_OF_WEEK, cal.getFirstDayOfWeek());
@@ -280,10 +304,10 @@ public class CpDevelopService {
         cal.set(Calendar.MINUTE, 0);
         cal.set(Calendar.SECOND, 0);
         long weekRuns = runMapper.selectCount(new QueryWrapper<CpScriptRun>().lambda()
-                .eq(CpScriptRun::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), CpScriptRun::getWs, workspace)
                 .ge(CpScriptRun::getCreateTime, cal.getTime()));
         long review = releaseMapper.selectCount(new QueryWrapper<CpRelease>().lambda()
-                .eq(CpRelease::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), CpRelease::getWs, workspace)
                 .eq(CpRelease::getStatus, "IN_REVIEW")
                 .eq(CpRelease::getDeleteFlag, "NOT_DELETE"));
         long udfs = udfMapper.selectCount(new QueryWrapper<CpUdf>().lambda()
@@ -322,9 +346,9 @@ public class CpDevelopService {
     }
 
     public List<Map<String, Object>> releases(String ws) {
-        String workspace = ws(ws);
+        String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         List<CpRelease> rows = releaseMapper.selectList(new QueryWrapper<CpRelease>().lambda()
-                .eq(CpRelease::getWs, workspace)
+                .eq(StrUtil.isNotBlank(workspace), CpRelease::getWs, workspace)
                 .eq(CpRelease::getDeleteFlag, "NOT_DELETE")
                 .orderByDesc(CpRelease::getCreateTime)
                 .last("LIMIT 50"));
@@ -335,12 +359,77 @@ public class CpDevelopService {
         return out;
     }
 
+    /**
+     * 提交上版前预检：跑与 createRelease 相同的硬门禁，不落库。
+     */
+    public Map<String, Object> releasePrecheck(String scriptId, String engine, String env) {
+        CpScriptIndex script = requireScript(scriptId);
+        String sql = gitStore.read(script.getWs(), script.getPath());
+        List<Map<String, String>> lint = fullLint(sql, script.getEnv());
+        try {
+            if (StrUtil.isNotBlank(engine)) {
+                CpScriptLint.normalizeEngine(engine);
+            }
+            if (StrUtil.isNotBlank(env)) {
+                CpScriptLint.releaseEnv(env);
+            }
+        } catch (IllegalArgumentException e) {
+            throw new CommonException(e.getMessage());
+        }
+        boolean trialOk = hasSuccessfulRun(script.getId());
+        List<Map<String, Object>> gates = buildGates(script, lint, trialOk, null, null, null);
+        List<Map<String, Object>> blocked = gates.stream()
+                .filter(g -> "fail".equalsIgnoreCase(String.valueOf(g.get("status")))
+                        || Boolean.TRUE.equals(g.get("blocked")))
+                .toList();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", blocked.isEmpty());
+        out.put("gates", gates);
+        out.put("blocked", blocked);
+        out.put("hint", blocked.isEmpty()
+                ? "门禁预检通过，可提交上版（MR/审批仍在发布单中继续）"
+                : guideBlocked(blocked));
+        out.put("scriptId", script.getId());
+        out.put("scriptName", script.getName());
+        return out;
+    }
+
     @Transactional(rollbackFor = Exception.class)
+    @SuppressWarnings("unchecked")
     public Map<String, Object> createRelease(CpReleaseCreateParam param) {
+        return idempotencyGuard.run(
+                LhIdempotencyGuard.SCOPE_RELEASE_CREATE,
+                param.getIdempotencyKey(),
+                LhIdempotencyGuard.hashPayload(param),
+                () -> createReleaseOnce(param),
+                "cp_release",
+                m -> m == null ? null : String.valueOf(m.get("id")),
+                (Class<Map<String, Object>>) (Class<?>) Map.class);
+    }
+
+    private Map<String, Object> createReleaseOnce(CpReleaseCreateParam param) {
         UserSnap user = currentUser();
         CpScriptIndex script = requireScript(param.getScriptId());
+
+        // 同一脚本已有进行中的发布单：复用，避免重复开 review/* 分支与 PR
+        CpRelease existing = releaseMapper.selectOne(new QueryWrapper<CpRelease>().lambda()
+                .eq(CpRelease::getScriptId, script.getId())
+                .eq(CpRelease::getDeleteFlag, "NOT_DELETE")
+                .eq(CpRelease::getStatus, "IN_REVIEW")
+                .orderByDesc(CpRelease::getCreateTime)
+                .last("LIMIT 1"));
+        if (existing != null) {
+            refreshReleaseGates(existing);
+            ensurePrMergedAfterTicketApproved(existing);
+            refreshReleaseGates(existing);
+            Map<String, Object> view = releaseView(existing);
+            view.put("reused", true);
+            view.put("hint", "该脚本已有进行中的发布单 " + existing.getPkg() + "，已复用（不再新建 Git 分支）");
+            return view;
+        }
+
         String sql = gitStore.read(script.getWs(), script.getPath());
-        List<Map<String, String>> lint = CpScriptLint.check(sql);
+        List<Map<String, String>> lint = fullLint(sql, script.getEnv());
         String engine;
         String relEnv;
         try {
@@ -350,7 +439,13 @@ public class CpDevelopService {
             throw new CommonException(e.getMessage());
         }
         boolean trialOk = hasSuccessfulRun(script.getId());
-        List<Map<String, Object>> gates = buildGates(script, lint, trialOk);
+        List<Map<String, Object>> gates = buildGates(script, lint, trialOk, null, null, null);
+        if (blocking(gates)) {
+            throw new CommonException(guideBlocked(gates.stream()
+                    .filter(g -> "fail".equalsIgnoreCase(String.valueOf(g.get("status")))
+                            || Boolean.TRUE.equals(g.get("blocked")))
+                    .toList()));
+        }
         Date now = new Date();
         CpRelease row = new CpRelease();
         row.setId(IdUtil.getSnowflakeNextIdStr());
@@ -363,10 +458,7 @@ public class CpDevelopService {
         row.setEnv(relEnv);
         row.setGitSha(script.getGitSha());
         row.setStatus("IN_REVIEW");
-        row.setResultLabel(blocking(gates) ? "未通过" : "门禁中");
-        if (blocking(gates)) {
-            row.setStatus("REJECTED");
-        }
+        row.setResultLabel("门禁中");
         row.setGatesJson(JSONUtil.toJsonStr(gates));
         row.setDeleteFlag("NOT_DELETE");
         row.setCreateTime(now);
@@ -374,7 +466,23 @@ public class CpDevelopService {
         row.setUpdateTime(now);
         row.setUpdateUser(user.id);
         releaseMapper.insert(row);
-        script.setStatus(blocking(gates) ? "FAILED" : "IN_REVIEW");
+
+        openMrAndTicket(row, script, user);
+        if (row.getPrNumber() == null && giteaClient.enabled()) {
+            throw new CommonException("Gitea 开 PR 失败（分支已创建但无合并请求）。请检查 Gitea 权限/prod 分支后重试，或打开发布单查看详情。"
+                    + (StrUtil.isNotBlank(row.getPrUrl()) ? "" : ""));
+        }
+        gates = buildGates(script, lint, trialOk, row.getPrState(), row.getApplyTicketNo(), ticketStatus(row.getApplyTicketNo()));
+        row.setGatesJson(JSONUtil.toJsonStr(gates));
+        row.setUpdateTime(new Date());
+        releaseMapper.updateById(row);
+        try {
+            envIsolation.ensurePhysical();
+        } catch (Exception e) {
+            // soft
+        }
+
+        script.setStatus("IN_REVIEW");
         script.setEngine(engine);
         script.setUpdateTime(now);
         scriptMapper.updateById(script);
@@ -382,13 +490,31 @@ public class CpDevelopService {
     }
 
     public Map<String, Object> gates(String id) {
-        return releaseView(requireRelease(id));
+        CpRelease row = requireRelease(id);
+        refreshReleaseGates(row);
+        return releaseView(row);
     }
 
     @Transactional(rollbackFor = Exception.class)
+    @SuppressWarnings("unchecked")
     public Map<String, Object> publish(String id) {
+        return idempotencyGuard.run(
+                LhIdempotencyGuard.SCOPE_RELEASE_PUBLISH,
+                null,
+                LhIdempotencyGuard.hashPayload(Map.of("id", StrUtil.blankToDefault(id, ""))),
+                () -> publishOnce(id),
+                "cp_release",
+                m -> m == null ? null : String.valueOf(m.get("id")),
+                (Class<Map<String, Object>>) (Class<?>) Map.class);
+    }
+
+    private Map<String, Object> publishOnce(String id) {
         UserSnap user = currentUser();
         CpRelease row = requireRelease(id);
+        refreshReleaseGates(row);
+        // 申请已通过但 PR 未合并：自动合并 review → prod
+        ensurePrMergedAfterTicketApproved(row);
+        refreshReleaseGates(row);
         List<Map<String, Object>> gates = readGates(row.getGatesJson());
         if (blocking(gates)) {
             throw new CommonException("门禁未通过，不能标为已发布");
@@ -396,6 +522,7 @@ public class CpDevelopService {
         if ("PUBLISHED".equals(row.getStatus())) {
             return releaseView(row);
         }
+        assertPublishPrerequisites(row);
         CpScriptIndex script = requireScript(row.getScriptId());
         String sql = gitStore.read(script.getWs(), script.getPath());
         String tag = gitStore.tag(script.getWs(), "rel-" + row.getId(), "publish " + row.getPkg());
@@ -426,7 +553,12 @@ public class CpDevelopService {
         script.setStatus("PUBLISHED");
         script.setUpdateTime(new Date());
         scriptMapper.updateById(script);
-        return releaseView(row);
+        Map<String, Object> out = releaseView(row);
+        String remoteWarn = pushRemote(script.getWs(), true);
+        if (StrUtil.isNotBlank(remoteWarn)) {
+            out.put("remoteWarning", remoteWarn);
+        }
+        return out;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -464,6 +596,10 @@ public class CpDevelopService {
         scriptMapper.updateById(script);
         Map<String, Object> out = releaseView(row);
         out.put("rolledSqlSha", previous);
+        String remoteWarn = pushRemote(script.getWs(), true);
+        if (StrUtil.isNotBlank(remoteWarn)) {
+            out.put("remoteWarning", remoteWarn);
+        }
         return out;
     }
 
@@ -808,12 +944,15 @@ public class CpDevelopService {
         }
     }
 
-    private List<Map<String, Object>> buildGates(CpScriptIndex script, List<Map<String, String>> lint, boolean trialOk) {
+    private List<Map<String, Object>> buildGates(CpScriptIndex script, List<Map<String, String>> lint, boolean trialOk,
+                                                 String prState, String ticketNo, String ticketStatus) {
         boolean lintFail = CpScriptLint.hasError(lint);
         String lintDetail = lint.isEmpty() ? "无检查项" : lint.get(0).get("label");
         Map<String, Object> qualityGate = assessQualityGate(script);
         Map<String, Object> lineageIngest = assessLineageIngestGate(script);
         Map<String, Object> lineageImpact = assessLineageImpactGate(script);
+        Map<String, Object> mrGate = assessMrGate(prState);
+        Map<String, Object> ticketGate = assessTicketGate(ticketNo, ticketStatus);
         List<Map<String, Object>> gates = new ArrayList<>();
         gates.add(gate(1, "静态检查", lintDetail, lintFail ? "fail" : "pass"));
         gates.add(gate(2, "血缘解析入库",
@@ -822,12 +961,268 @@ public class CpDevelopService {
         gates.add(gate(3, "质量规则绑定",
                 String.valueOf(qualityGate.getOrDefault("detail", "未接线")),
                 String.valueOf(qualityGate.getOrDefault("status", "skip"))));
-        gates.add(gate(4, "stg 试跑", trialOk ? "已有成功或运行中的试跑" : "尚无成功试跑", trialOk ? "pass" : "fail"));
+        gates.add(gate(4, "stg 试跑", trialOk ? "已有成功或调度中的试跑" : "尚无成功试跑（请先在数据开发页试跑）", trialOk ? "pass" : "fail"));
         gates.add(gate(5, "变更影响",
                 String.valueOf(lineageImpact.getOrDefault("detail", "未接线，不阻断")),
                 String.valueOf(lineageImpact.getOrDefault("status", "skip"))));
-        gates.add(gate(6, "生产发布", "等待门禁通过后发布 " + script.getName(), "wait"));
+        gates.add(gate(6, "MR 评审",
+                String.valueOf(mrGate.getOrDefault("detail", "等待开 PR")),
+                String.valueOf(mrGate.getOrDefault("status", "wait"))));
+        gates.add(gate(7, "申请审批",
+                String.valueOf(ticketGate.getOrDefault("detail", "等待申请单")),
+                String.valueOf(ticketGate.getOrDefault("status", "wait"))));
+        gates.add(gate(8, "生产发布", "等待门禁通过后发布 " + script.getName(), "wait"));
         return gates;
+    }
+
+    private Map<String, Object> assessMrGate(String prState) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        boolean require = lhProperties.getCompute() == null || lhProperties.getCompute().isRequireMrMerge();
+        if (!require) {
+            m.put("status", "skip");
+            m.put("detail", "未启用 require-mr-merge");
+            return m;
+        }
+        if (!giteaClient.enabled()) {
+            m.put("status", "skip");
+            m.put("detail", "Gitea 未启用，跳过 MR");
+            return m;
+        }
+        String st = StrUtil.blankToDefault(prState, "").toLowerCase(Locale.ROOT);
+        if ("merged".equals(st)) {
+            m.put("status", "pass");
+            m.put("detail", "PR 已合并到 prod");
+            return m;
+        }
+        if ("closed".equals(st)) {
+            m.put("status", "fail");
+            m.put("detail", "PR 已关闭未合并");
+            return m;
+        }
+        if ("open".equals(st)) {
+            m.put("status", "wait");
+            m.put("detail", "PR 待评审合并");
+            return m;
+        }
+        m.put("status", "wait");
+        m.put("detail", "尚未创建 PR");
+        return m;
+    }
+
+    private Map<String, Object> assessTicketGate(String ticketNo, String ticketStatus) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        boolean require = lhProperties.getCompute() == null || lhProperties.getCompute().isRequireScriptPublishTicket();
+        if (!require) {
+            m.put("status", "skip");
+            m.put("detail", "未启用 require-script-publish-ticket");
+            return m;
+        }
+        if (StrUtil.isBlank(ticketNo)) {
+            m.put("status", "wait");
+            m.put("detail", "尚未创建 SCR- 申请单");
+            return m;
+        }
+        String st = StrUtil.blankToDefault(ticketStatus, "").toLowerCase(Locale.ROOT);
+        if ("approved".equals(st)) {
+            m.put("status", "pass");
+            m.put("detail", "申请单 " + ticketNo + " 已通过");
+            return m;
+        }
+        if ("rejected".equals(st)) {
+            m.put("status", "fail");
+            m.put("detail", "申请单 " + ticketNo + " 已驳回");
+            return m;
+        }
+        m.put("status", "wait");
+        m.put("detail", "申请单 " + ticketNo + " 待审批（" + StrUtil.blankToDefault(ticketStatus, "pending") + "）");
+        return m;
+    }
+
+    private void openMrAndTicket(CpRelease row, CpScriptIndex script, UserSnap user) {
+        String reviewBranch = "review/" + row.getId();
+        row.setReviewBranch(reviewBranch);
+        String prodBranch = "prod";
+        if (lhProperties.getCompute() != null && lhProperties.getCompute().getGitea() != null
+                && StrUtil.isNotBlank(lhProperties.getCompute().getGitea().getProdBranch())) {
+            prodBranch = lhProperties.getCompute().getGitea().getProdBranch().trim();
+        }
+        pushRemote(script.getWs(), false);
+        String baseWarn = gitStore.ensureBaseBranch(script.getWs(), prodBranch);
+        String branchWarn = gitStore.createAndPushBranch(script.getWs(), reviewBranch);
+        if (giteaClient.enabled()) {
+            Map<String, Object> pr = giteaClient.openPullRequest(
+                    script.getWs(),
+                    reviewBranch,
+                    prodBranch,
+                    "release " + row.getPkg(),
+                    "脚本发布评审 · " + row.getScriptPath() + " · releaseId=" + row.getId());
+            if (pr.get("number") != null) {
+                row.setPrNumber(((Number) pr.get("number")).intValue());
+                row.setPrUrl(String.valueOf(pr.getOrDefault("htmlUrl", "")));
+                row.setPrState(String.valueOf(pr.getOrDefault("state", "open")));
+            } else if (pr.get("error") != null) {
+                row.setPrState("open");
+                row.setPrUrl(null);
+                log.warn("openPullRequest failed for release {}: {}", row.getId(), pr.get("error"));
+            }
+        }
+        try {
+            ApplyTicketCreateParam tp = new ApplyTicketCreateParam();
+            tp.setTicketType(ApplyTicketServiceImpl.TYPE_SCRIPT_PUBLISH);
+            tp.setTitle("脚本发布 · " + row.getPkg());
+            tp.setReason("发布包 " + row.getPkg() + " · 环境 " + row.getEnv()
+                    + (StrUtil.isNotBlank(branchWarn) ? " · " + branchWarn : "")
+                    + (StrUtil.isNotBlank(baseWarn) ? " · " + baseWarn : ""));
+            tp.setResourceId(row.getId());
+            tp.setResourceType("cp_release");
+            tp.setScriptId(script.getId());
+            tp.setPublishEnv(row.getEnv());
+            tp.setExpireLabel("30天");
+            ApplyTicket ticket = applyTicketService.create(tp);
+            row.setApplyTicketNo(ticket.getTicketNo());
+        } catch (Exception e) {
+            // soft — 门禁会显示待申请
+        }
+        releaseMapper.updateById(row);
+    }
+
+    /**
+     * 申请单已通过、PR 仍 open 时自动合并（解决「审批过了却没有合并请求/未合并」）。
+     */
+    private void ensurePrMergedAfterTicketApproved(CpRelease row) {
+        if (row == null || !giteaClient.enabled()) {
+            return;
+        }
+        if (lhProperties.getCompute() != null && !lhProperties.getCompute().isRequireMrMerge()) {
+            return;
+        }
+        String tStatus = StrUtil.blankToDefault(ticketStatus(row.getApplyTicketNo()), "").toLowerCase(Locale.ROOT);
+        if (!"approved".equals(tStatus)) {
+            return;
+        }
+        String st = StrUtil.blankToDefault(row.getPrState(), "").toLowerCase(Locale.ROOT);
+        if ("merged".equals(st)) {
+            return;
+        }
+        if (row.getPrNumber() == null || row.getPrNumber() <= 0) {
+            // 尝试按 review 分支找回 PR
+            if (StrUtil.isNotBlank(row.getReviewBranch())) {
+                String prodBranch = "prod";
+                if (lhProperties.getCompute() != null && lhProperties.getCompute().getGitea() != null
+                        && StrUtil.isNotBlank(lhProperties.getCompute().getGitea().getProdBranch())) {
+                    prodBranch = lhProperties.getCompute().getGitea().getProdBranch().trim();
+                }
+                Map<String, Object> found = giteaClient.openPullRequest(
+                        row.getWs(), row.getReviewBranch(), prodBranch,
+                        "release " + row.getPkg(),
+                        "脚本发布评审 · 补开 PR · releaseId=" + row.getId());
+                if (found.get("number") != null) {
+                    row.setPrNumber(((Number) found.get("number")).intValue());
+                    row.setPrUrl(String.valueOf(found.getOrDefault("htmlUrl", "")));
+                    row.setPrState(String.valueOf(found.getOrDefault("state", "open")));
+                    releaseMapper.updateById(row);
+                }
+            }
+            if (row.getPrNumber() == null || row.getPrNumber() <= 0) {
+                return;
+            }
+        }
+        Map<String, Object> merged = giteaClient.mergePullRequest(
+                row.getWs(), row.getPrNumber(), "approve ticket " + row.getApplyTicketNo());
+        if (Boolean.TRUE.equals(merged.get("ok"))
+                || "merged".equalsIgnoreCase(String.valueOf(merged.get("state")))
+                || Boolean.TRUE.equals(merged.get("merged"))) {
+            row.setPrState("merged");
+            if (merged.get("htmlUrl") != null) {
+                row.setPrUrl(String.valueOf(merged.get("htmlUrl")));
+            }
+            releaseMapper.updateById(row);
+        } else if (merged.get("error") != null) {
+            log.warn("auto-merge PR #{} failed: {}", row.getPrNumber(), merged.get("error"));
+        }
+    }
+
+    private void refreshReleaseGates(CpRelease row) {
+        if (row == null || "PUBLISHED".equals(row.getStatus()) || "ROLLED_BACK".equals(row.getStatus())) {
+            return;
+        }
+        ensurePrMergedAfterTicketApproved(row);
+        if (row.getPrNumber() != null && row.getPrNumber() > 0 && giteaClient.enabled()) {
+            Map<String, Object> pr = giteaClient.getPullRequest(row.getWs(), row.getPrNumber());
+            if (pr.get("state") != null) {
+                row.setPrState(String.valueOf(pr.get("state")));
+            }
+            if (pr.get("htmlUrl") != null) {
+                row.setPrUrl(String.valueOf(pr.get("htmlUrl")));
+            }
+        }
+        CpScriptIndex script = requireScript(row.getScriptId());
+        String sql = gitStore.read(script.getWs(), script.getPath());
+        List<Map<String, String>> lint = fullLint(sql, script.getEnv());
+        boolean trialOk = hasSuccessfulRun(script.getId());
+        String tStatus = ticketStatus(row.getApplyTicketNo());
+        List<Map<String, Object>> gates = buildGates(script, lint, trialOk, row.getPrState(), row.getApplyTicketNo(), tStatus);
+        // 保留已通过的「生产发布」
+        for (Map<String, Object> old : readGates(row.getGatesJson())) {
+            if ("生产发布".equals(String.valueOf(old.get("name"))) && "pass".equalsIgnoreCase(String.valueOf(old.get("status")))) {
+                for (Map<String, Object> g : gates) {
+                    if ("生产发布".equals(String.valueOf(g.get("name")))) {
+                        g.put("status", "pass");
+                        g.put("detail", old.get("detail"));
+                    }
+                }
+            }
+        }
+        row.setGatesJson(JSONUtil.toJsonStr(gates));
+        if (blocking(gates) && "IN_REVIEW".equals(row.getStatus())) {
+            // 仅 ticket reject / pr closed 标未通过；wait 保持门禁中
+            boolean hardFail = gates.stream().anyMatch(g -> "fail".equalsIgnoreCase(String.valueOf(g.get("status"))));
+            if (hardFail) {
+                row.setStatus("REJECTED");
+                row.setResultLabel("未通过");
+            }
+        } else if (!blocking(gates) && "REJECTED".equals(row.getStatus())) {
+            row.setStatus("IN_REVIEW");
+            row.setResultLabel("门禁中");
+        }
+        row.setUpdateTime(new Date());
+        releaseMapper.updateById(row);
+    }
+
+    private void assertPublishPrerequisites(CpRelease row) {
+        if (lhProperties.getCompute() != null && lhProperties.getCompute().isRequireMrMerge()
+                && giteaClient.enabled()) {
+            String st = StrUtil.blankToDefault(row.getPrState(), "").toLowerCase(Locale.ROOT);
+            if (!"merged".equals(st)) {
+                throw new CommonException("须先合并 Gitea PR（review → prod）后再发布；当前 prState="
+                        + StrUtil.blankToDefault(row.getPrState(), "无"));
+            }
+        }
+        if (lhProperties.getCompute() != null && lhProperties.getCompute().isRequireScriptPublishTicket()) {
+            applyTicketService.assertApprovedScriptPublishTicket(row.getApplyTicketNo(), row.getId());
+        }
+    }
+
+    private String ticketStatus(String ticketNo) {
+        if (StrUtil.isBlank(ticketNo)) {
+            return null;
+        }
+        try {
+            Map<String, Object> meta = applyTicketService.findTicketMeta(ticketNo);
+            return meta == null ? null : String.valueOf(meta.get("status"));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private List<Map<String, String>> fullLint(String sql, String env) {
+        boolean forbidLayer = lhProperties.getCompute() == null || lhProperties.getCompute().isForbidProdLayerWrite();
+        List<Map<String, String>> lint = new ArrayList<>(CpScriptLint.check(sql, env, forbidLayer));
+        lint.addAll(envIsolation.lintWrites(sql, env));
+        if (CpScriptLint.hasError(lint)) {
+            lint.removeIf(i -> "ok".equalsIgnoreCase(i.get("tone")) && "静态检查通过".equals(i.get("label")));
+        }
+        return lint;
     }
 
     /** 发布门禁：读 gov_dq_gate，对照脚本路径/层猜测。 */
@@ -838,10 +1233,11 @@ public class CpDevelopService {
             String tableHint = guessTableFromPath(path);
             return govDqService.assessPublishGate(script.getWs(), tableHint, layer);
         } catch (Exception e) {
+            boolean hard = lhProperties.getCompute() == null || lhProperties.getCompute().isPublishGateHardFail();
             Map<String, Object> soft = new LinkedHashMap<>();
-            soft.put("status", "skip");
-            soft.put("detail", "质量门禁 soft-fail: " + e.getMessage());
-            soft.put("blocked", false);
+            soft.put("status", hard ? "fail" : "skip");
+            soft.put("detail", "质量门禁异常: " + e.getMessage());
+            soft.put("blocked", hard);
             return soft;
         }
     }
@@ -852,10 +1248,11 @@ public class CpDevelopService {
             String tableHint = guessTableFromPath(path);
             return govLineageService.assessLineageIngestGate(script.getWs(), tableHint);
         } catch (Exception e) {
+            boolean hard = lhProperties.getCompute() == null || lhProperties.getCompute().isPublishGateHardFail();
             Map<String, Object> soft = new LinkedHashMap<>();
-            soft.put("status", "skip");
-            soft.put("detail", "血缘入库门禁 soft-fail: " + e.getMessage());
-            soft.put("blocked", false);
+            soft.put("status", hard ? "fail" : "skip");
+            soft.put("detail", "血缘入库门禁异常: " + e.getMessage());
+            soft.put("blocked", hard);
             return soft;
         }
     }
@@ -866,10 +1263,11 @@ public class CpDevelopService {
             String tableHint = guessTableFromPath(path);
             return govLineageService.assessPublishGate(script.getWs(), tableHint);
         } catch (Exception e) {
+            boolean hard = lhProperties.getCompute() == null || lhProperties.getCompute().isPublishGateHardFail();
             Map<String, Object> soft = new LinkedHashMap<>();
-            soft.put("status", "skip");
-            soft.put("detail", "变更影响门禁 soft-fail: " + e.getMessage());
-            soft.put("blocked", false);
+            soft.put("status", hard ? "fail" : "skip");
+            soft.put("detail", "变更影响门禁异常: " + e.getMessage());
+            soft.put("blocked", hard);
             return soft;
         }
     }
@@ -910,9 +1308,37 @@ public class CpDevelopService {
         return m;
     }
 
+    /** 硬失败门禁 → 引导文案 */
+    private static String guideBlocked(List<Map<String, Object>> blocked) {
+        if (blocked == null || blocked.isEmpty()) {
+            return "门禁未通过";
+        }
+        StringBuilder sb = new StringBuilder("提交上版前未通过：");
+        for (int i = 0; i < blocked.size(); i++) {
+            Map<String, Object> g = blocked.get(i);
+            if (i > 0) {
+                sb.append("；");
+            }
+            String name = String.valueOf(g.getOrDefault("name", "门禁"));
+            String detail = String.valueOf(g.getOrDefault("detail", ""));
+            sb.append(name);
+            if (StrUtil.isNotBlank(detail) && !"null".equals(detail)) {
+                sb.append("（").append(detail).append("）");
+            }
+        }
+        String joined = sb.toString();
+        if (joined.contains("试跑")) {
+            sb.append("。请先点「试跑」并等到成功后再提交");
+        } else if (joined.contains("静态检查")) {
+            sb.append("。请先修正 SQL / 点「格式化」后按检查项修复");
+        }
+        return sb.toString();
+    }
+
     private static boolean blocking(List<Map<String, Object>> gates) {
         for (Map<String, Object> gate : gates) {
-            if ("fail".equals(String.valueOf(gate.get("status")))) {
+            if ("fail".equalsIgnoreCase(String.valueOf(gate.get("status")))
+                    || Boolean.TRUE.equals(gate.get("blocked"))) {
                 return true;
             }
         }
@@ -922,11 +1348,36 @@ public class CpDevelopService {
     private boolean hasSuccessfulRun(String scriptId) {
         Long n = runMapper.selectCount(new QueryWrapper<CpScriptRun>().lambda()
                 .eq(CpScriptRun::getScriptId, scriptId)
-                .in(CpScriptRun::getStatus, List.of("ok", "running")));
+                .eq(CpScriptRun::getDeleteFlag, "NOT_DELETE")
+                .in(CpScriptRun::getStatus, List.of("ok", "running", "submitted")));
         return n != null && n > 0;
     }
 
     private String pushRemote(String ws) {
+        return pushRemote(ws, false);
+    }
+
+    private String pushRemote(String ws, boolean pushTags) {
+        String remote = resolveRemoteUrl(ws);
+        if (StrUtil.isBlank(remote)) {
+            return giteaClient.enabled() ? null : null;
+        }
+        String ensure = giteaClient.ensureRepo(ws);
+        String push = gitStore.bindRemote(ws, remote, pushTags);
+        if (StrUtil.isNotBlank(ensure) && StrUtil.isBlank(push)) {
+            return ensure;
+        }
+        return push;
+    }
+
+    /**
+     * 解析推送用 remote（库内可含 token，仅服务端使用）。
+     * <ul>
+     *   <li>自定义公网 → 原样保留</li>
+     *   <li>空 / 内网 / 平台 Gitea 托管 → 按当前配置拼装 per-ws 并回写</li>
+     * </ul>
+     */
+    private String resolveRemoteUrl(String ws) {
         GovWs space = govWsMapper.selectOne(new QueryWrapper<GovWs>().lambda()
                 .eq(GovWs::getWsCode, ws)
                 .last("LIMIT 1"));
@@ -935,10 +1386,29 @@ public class CpDevelopService {
                     .eq(GovWs::getWs, ws)
                     .last("LIMIT 1"));
         }
-        if (space == null || StrUtil.isBlank(space.getGitRemoteUrl())) {
+        if (space != null && StrUtil.isNotBlank(space.getGitRemoteUrl())) {
+            String stored = space.getGitRemoteUrl().trim();
+            if (giteaClient.isCustomPublicRemote(stored)) {
+                return stored;
+            }
+            if (!giteaClient.shouldRewriteRemote(stored)) {
+                return stored;
+            }
+            // 空已排除；内网或平台托管：继续拼装
+        }
+        if (!giteaClient.enabled()) {
             return null;
         }
-        return gitStore.bindRemote(ws, space.getGitRemoteUrl());
+        String built = giteaClient.remoteUrlFor(ws);
+        if (StrUtil.isBlank(built)) {
+            return null;
+        }
+        if (space != null) {
+            space.setGitRemoteUrl(built);
+            space.setUpdateTime(new Date());
+            govWsMapper.updateById(space);
+        }
+        return built;
     }
 
     private CpScriptIndex requireScript(String id) {
@@ -1036,6 +1506,11 @@ public class CpDevelopService {
         m.put("time", row.getCreateTime());
         m.put("gates", readGates(row.getGatesJson()));
         m.put("dsWorkflowCode", row.getDsWorkflowCode());
+        m.put("applyTicketNo", row.getApplyTicketNo());
+        m.put("prNumber", row.getPrNumber());
+        m.put("prUrl", row.getPrUrl());
+        m.put("prState", row.getPrState());
+        m.put("reviewBranch", row.getReviewBranch());
         return m;
     }
 

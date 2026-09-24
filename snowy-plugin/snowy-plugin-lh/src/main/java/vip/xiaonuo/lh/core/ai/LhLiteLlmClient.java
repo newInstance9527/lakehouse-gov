@@ -57,33 +57,8 @@ public class LhLiteLlmClient {
      * @return assistant 文本；不可用或失败返回 null
      */
     public String chat(String model, List<Map<String, String>> messages) {
-        if (!available()) {
-            return null;
-        }
-        LhProperties.Ai ai = lhProperties.getAi();
-        String useModel = StrUtil.blankToDefault(model, ai.getDefaultChatModel());
-        if (StrUtil.isBlank(useModel) || messages == null || messages.isEmpty()) {
-            return null;
-        }
-        try {
-            JSONObject body = new JSONObject();
-            body.set("model", useModel);
-            body.set("messages", messages);
-            body.set("temperature", 0.2);
-            String resp = postJson("/v1/chat/completions", body.toString());
-            if (StrUtil.isBlank(resp)) {
-                return null;
-            }
-            JSONObject root = JSONUtil.parseObj(resp);
-            JSONArray choices = root.getJSONArray("choices");
-            if (choices == null || choices.isEmpty()) {
-                return null;
-            }
-            JSONObject msg = choices.getJSONObject(0).getJSONObject("message");
-            return msg == null ? null : msg.getStr("content");
-        } catch (Exception e) {
-            return null;
-        }
+        Map<String, Object> probe = chatProbe(model, messages);
+        return Boolean.TRUE.equals(probe.get("ok")) ? (String) probe.get("content") : null;
     }
 
     /**
@@ -94,46 +69,23 @@ public class LhLiteLlmClient {
      * @return 向量列表；不可用返回 null
      */
     public List<float[]> embed(String model, List<String> inputs) {
-        if (!available() || inputs == null || inputs.isEmpty()) {
-            return null;
-        }
-        LhProperties.Ai ai = lhProperties.getAi();
-        String useModel = StrUtil.blankToDefault(model, ai.getDefaultEmbedModel());
-        if (StrUtil.isBlank(useModel)) {
-            return null;
-        }
-        try {
-            JSONObject body = new JSONObject();
-            body.set("model", useModel);
-            body.set("input", inputs);
-            String resp = postJson("/v1/embeddings", body.toString());
-            if (StrUtil.isBlank(resp)) {
-                return null;
-            }
-            JSONArray data = JSONUtil.parseObj(resp).getJSONArray("data");
-            if (data == null || data.isEmpty()) {
-                return null;
-            }
-            List<float[]> out = new ArrayList<>(data.size());
-            for (int i = 0; i < data.size(); i++) {
-                JSONArray emb = data.getJSONObject(i).getJSONArray("embedding");
-                if (emb == null) {
-                    continue;
-                }
-                float[] vec = new float[emb.size()];
-                for (int j = 0; j < emb.size(); j++) {
-                    vec[j] = emb.getFloat(j);
-                }
-                out.add(vec);
-            }
-            return out;
-        } catch (Exception e) {
-            return null;
-        }
+        Map<String, Object> probe = embedProbe(model, inputs);
+        @SuppressWarnings("unchecked")
+        List<float[]> vecs = (List<float[]>) probe.get("vectors");
+        return Boolean.TRUE.equals(probe.get("ok")) ? vecs : null;
     }
 
     /** 便捷：单轮 user 消息 */
     public String chatSimple(String model, String system, String user) {
+        Map<String, Object> probe = chatSimpleProbe(model, system, user);
+        return Boolean.TRUE.equals(probe.get("ok")) ? (String) probe.get("content") : null;
+    }
+
+    /**
+     * 连通探测：Chat Completions。
+     * <p>ok=true 仅当 HTTP 2xx 且解析到非空 assistant content；上游 error JSON 写入 error 字段。</p>
+     */
+    public Map<String, Object> chatSimpleProbe(String model, String system, String user) {
         List<Map<String, String>> msgs = new ArrayList<>();
         if (StrUtil.isNotBlank(system)) {
             Map<String, String> s = new LinkedHashMap<>();
@@ -145,7 +97,164 @@ public class LhLiteLlmClient {
         u.put("role", "user");
         u.put("content", StrUtil.nullToEmpty(user));
         msgs.add(u);
-        return chat(model, msgs);
+        return chatProbe(model, msgs);
+    }
+
+    public Map<String, Object> chatProbe(String model, List<Map<String, String>> messages) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", false);
+        if (!available()) {
+            out.put("error", "LiteLLM 未启用或 litellm-url 为空");
+            return out;
+        }
+        LhProperties.Ai ai = lhProperties.getAi();
+        String useModel = StrUtil.blankToDefault(model, ai.getDefaultChatModel());
+        if (StrUtil.isBlank(useModel) || messages == null || messages.isEmpty()) {
+            out.put("error", "模型或消息为空");
+            return out;
+        }
+        try {
+            JSONObject body = new JSONObject();
+            body.set("model", useModel);
+            body.set("messages", messages);
+            body.set("temperature", 0.2);
+            Map<String, Object> http = postJsonResult("/v1/chat/completions", body.toString());
+            out.put("httpStatus", http.get("httpStatus"));
+            out.put("model", useModel);
+            if (!Boolean.TRUE.equals(http.get("ok"))) {
+                out.put("error", http.get("error"));
+                return out;
+            }
+            String resp = (String) http.get("body");
+            if (StrUtil.isBlank(resp)) {
+                out.put("error", "上游返回空响应");
+                return out;
+            }
+            JSONObject root = JSONUtil.parseObj(resp);
+            String upstreamErr = extractUpstreamError(root);
+            if (StrUtil.isNotBlank(upstreamErr)) {
+                out.put("error", upstreamErr);
+                return out;
+            }
+            JSONArray choices = root.getJSONArray("choices");
+            if (choices == null || choices.isEmpty()) {
+                out.put("error", "上游响应无 choices");
+                return out;
+            }
+            JSONObject msg = choices.getJSONObject(0).getJSONObject("message");
+            String content = msg == null ? null : msg.getStr("content");
+            if (StrUtil.isBlank(content)) {
+                out.put("error", "上游返回空 completion");
+                return out;
+            }
+            out.put("ok", true);
+            out.put("content", content);
+            return out;
+        } catch (Exception e) {
+            out.put("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return out;
+        }
+    }
+
+    /**
+     * 连通探测：Embeddings。
+     * <p>ok=true 仅当 HTTP 2xx 且至少一条非空向量。</p>
+     */
+    public Map<String, Object> embedProbe(String model, List<String> inputs) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", false);
+        if (!available()) {
+            out.put("error", "LiteLLM 未启用或 litellm-url 为空");
+            return out;
+        }
+        if (inputs == null || inputs.isEmpty()) {
+            out.put("error", "embedding 输入为空");
+            return out;
+        }
+        LhProperties.Ai ai = lhProperties.getAi();
+        String useModel = StrUtil.blankToDefault(model, ai.getDefaultEmbedModel());
+        if (StrUtil.isBlank(useModel)) {
+            out.put("error", "embedding 模型未配置");
+            return out;
+        }
+        try {
+            JSONObject body = new JSONObject();
+            body.set("model", useModel);
+            body.set("input", inputs);
+            Map<String, Object> http = postJsonResult("/v1/embeddings", body.toString());
+            out.put("httpStatus", http.get("httpStatus"));
+            out.put("model", useModel);
+            if (!Boolean.TRUE.equals(http.get("ok"))) {
+                out.put("error", http.get("error"));
+                return out;
+            }
+            String resp = (String) http.get("body");
+            if (StrUtil.isBlank(resp)) {
+                out.put("error", "上游返回空响应");
+                return out;
+            }
+            JSONObject root = JSONUtil.parseObj(resp);
+            String upstreamErr = extractUpstreamError(root);
+            if (StrUtil.isNotBlank(upstreamErr)) {
+                out.put("error", upstreamErr);
+                return out;
+            }
+            JSONArray data = root.getJSONArray("data");
+            if (data == null || data.isEmpty()) {
+                out.put("error", "上游响应无 embedding data");
+                return out;
+            }
+            List<float[]> vectors = new ArrayList<>(data.size());
+            for (int i = 0; i < data.size(); i++) {
+                JSONArray emb = data.getJSONObject(i).getJSONArray("embedding");
+                if (emb == null || emb.isEmpty()) {
+                    continue;
+                }
+                float[] vec = new float[emb.size()];
+                for (int j = 0; j < emb.size(); j++) {
+                    vec[j] = emb.getFloat(j);
+                }
+                vectors.add(vec);
+            }
+            if (vectors.isEmpty()) {
+                out.put("error", "上游返回空向量");
+                return out;
+            }
+            out.put("ok", true);
+            out.put("vectors", vectors);
+            return out;
+        } catch (Exception e) {
+            out.put("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return out;
+        }
+    }
+
+    /**
+     * 从 OpenAI / LiteLLM 错误 JSON 提取可读文案。
+     * 兼容 {@code error.message}、{@code error} 字符串、{@code detail}、{@code message}。
+     */
+    static String extractUpstreamError(JSONObject root) {
+        if (root == null) {
+            return null;
+        }
+        Object err = root.get("error");
+        if (err instanceof JSONObject errObj) {
+            String msg = firstStr(errObj, "message", "msg", "detail", "type");
+            if (StrUtil.isNotBlank(msg)) {
+                String code = firstStr(errObj, "code", "type");
+                return StrUtil.isNotBlank(code) && !code.equals(msg) ? (msg + " (" + code + ")") : msg;
+            }
+            return StrUtil.maxLength(errObj.toString(), 240);
+        }
+        if (err instanceof CharSequence && StrUtil.isNotBlank(err.toString())) {
+            return err.toString().trim();
+        }
+        String detail = firstStr(root, "detail", "message", "msg");
+        // 有 choices/data 的成功体里也可能带 message 元数据，勿误判
+        if (StrUtil.isNotBlank(detail) && root.getJSONArray("choices") == null && root.getJSONArray("data") == null) {
+            return detail;
+        }
+        return null;
     }
 
     /**
@@ -250,6 +359,11 @@ public class LhLiteLlmClient {
      */
     public Map<String, Object> upsertAlias(String modelId, String vendor, String upstreamModel,
                                            String apiBase, String kind, boolean enabled) {
+        return upsertAlias(modelId, vendor, upstreamModel, apiBase, kind, enabled, null);
+    }
+
+    public Map<String, Object> upsertAlias(String modelId, String vendor, String upstreamModel,
+                                           String apiBase, String kind, boolean enabled, String apiKey) {
         Map<String, Object> out = new LinkedHashMap<>();
         String alias = aliasOf(modelId);
         out.put("alias", alias);
@@ -271,7 +385,7 @@ public class LhLiteLlmClient {
             if (!enabled) {
                 return disableAlias(alias, existingId);
             }
-            JSONObject body = buildDeploymentBody(alias, vendor, upstreamModel, apiBase, kind);
+            JSONObject body = buildDeploymentBody(alias, vendor, upstreamModel, apiBase, kind, apiKey);
             if (StrUtil.isNotBlank(existingId)) {
                 body.set("id", existingId);
                 HttpResponse resp = request("POST", "/model/update", body.toString());
@@ -442,15 +556,23 @@ public class LhLiteLlmClient {
     }
 
     private JSONObject buildDeploymentBody(String alias, String vendor, String upstreamModel,
-                                           String apiBase, String kind) {
+                                           String apiBase, String kind, String apiKey) {
         JSONObject litellmParams = new JSONObject();
-        litellmParams.set("model", toLitellmModel(vendor, upstreamModel));
+        // 自定义 api_base（含 OpenAI 兼容网关）一律走 openai/ 前缀
         if (StrUtil.isNotBlank(apiBase)) {
+            String m = StrUtil.blankToDefault(upstreamModel, "").trim();
+            litellmParams.set("model", m.contains("/") ? m : "openai/" + m);
             litellmParams.set("api_base", apiBase.trim());
+        } else {
+            litellmParams.set("model", toLitellmModel(vendor, upstreamModel));
         }
-        String envKey = envKeyHint(vendor);
-        if (StrUtil.isNotBlank(envKey)) {
-            litellmParams.set("api_key", "os.environ/" + envKey);
+        if (StrUtil.isNotBlank(apiKey)) {
+            litellmParams.set("api_key", apiKey.trim());
+        } else {
+            String envKey = envKeyHint(vendor);
+            if (StrUtil.isNotBlank(envKey)) {
+                litellmParams.set("api_key", "os.environ/" + envKey);
+            }
         }
         JSONObject modelInfo = new JSONObject();
         modelInfo.set("lh_kind", StrUtil.blankToDefault(kind, "chat"));
@@ -605,8 +727,51 @@ public class LhLiteLlmClient {
                 + "；门户登记已保存，请检查 store_model_in_db / master key";
     }
 
-    private String postJson(String path, String jsonBody) {
-        return request("POST", path, jsonBody).body();
+    /**
+     * POST JSON；仅 HTTP 2xx 且 body 非上游 error 信封时 ok=true。
+     * 非 2xx 时仍解析 body 提取 error.message，避免把错误 JSON 当 completion。
+     */
+    private Map<String, Object> postJsonResult(String path, String jsonBody) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        try {
+            HttpResponse resp = request("POST", path, jsonBody);
+            int code = resp.getStatus();
+            String body = resp.body();
+            out.put("httpStatus", code);
+            out.put("body", body);
+            if (!isSuccess(resp)) {
+                out.put("ok", false);
+                String fromBody = null;
+                try {
+                    if (StrUtil.isNotBlank(body) && JSONUtil.isTypeJSON(body)) {
+                        fromBody = extractUpstreamError(JSONUtil.parseObj(body));
+                    }
+                } catch (Exception ignored) {
+                    // keep raw
+                }
+                if (StrUtil.isBlank(fromBody)) {
+                    fromBody = StrUtil.maxLength(StrUtil.blankToDefault(body, ""), 240);
+                }
+                out.put("error", "HTTP " + code
+                        + (StrUtil.isBlank(fromBody) ? "" : (" · " + fromBody)));
+                return out;
+            }
+            // 少数网关用 200 + error 信封
+            if (StrUtil.isNotBlank(body) && JSONUtil.isTypeJSONObject(body)) {
+                String err = extractUpstreamError(JSONUtil.parseObj(body));
+                if (StrUtil.isNotBlank(err)) {
+                    out.put("ok", false);
+                    out.put("error", err);
+                    return out;
+                }
+            }
+            out.put("ok", true);
+            return out;
+        } catch (Exception e) {
+            out.put("ok", false);
+            out.put("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return out;
+        }
     }
 
     private HttpResponse request(String method, String path, String jsonBody) {

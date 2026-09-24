@@ -24,5 +24,7 @@ public class GovKbUpsertParam {
     private String refs;
     private String refsJson;
     private String ws;
+    /** workspace | platform */
+    private String scope;
     private String remark;
 }

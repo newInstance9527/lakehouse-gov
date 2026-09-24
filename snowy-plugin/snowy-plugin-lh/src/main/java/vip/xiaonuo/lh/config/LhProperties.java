@@ -340,6 +340,57 @@ public class LhProperties {
     public static class Compute {
         /** 每工作空间一个本地 Git 工作区，脚本正文只写这里 */
         private String gitRoot = "./data/lh-git";
+        /** 远程 Gitea（环境与发布 SoT）；空 token 则仅本地仓库 */
+        private Gitea gitea = new Gitea();
+        /**
+         * 发布门禁：质量/血缘评估异常时是否按 fail 阻断（默认 true）。
+         * false 时退回 skip（演示环境可关）。
+         */
+        private boolean publishGateHardFail = true;
+        /** 开发脚本是否禁止写生产层（ods_/dwd_/dws_/ads_ 无环境前缀） */
+        private boolean forbidProdLayerWrite = true;
+        /** 发布须等 Gitea PR（review→prod）合并；Gitea 未启用时门禁 skip */
+        private boolean requireMrMerge = true;
+        /** 发布须有已审批 script_publish（SCR-）单 */
+        private boolean requireScriptPublishTicket = true;
+        /** 物理独立的 dev_ / stg_ Catalog 与桶 */
+        private EnvIsolation envIsolation = new EnvIsolation();
+    }
+
+    @Getter
+    @Setter
+    public static class Gitea {
+        /** 是否启用远程推送；需 baseUrl+token */
+        private boolean enabled = true;
+        /** 公网可达主机，例 http://127.0.0.1:3000（勿用 10.x，外网客户端不可达） */
+        private String baseUrl = "http://127.0.0.1:3000";
+        private String username = "lakehouse";
+        private String token = "";
+        private String org = "lakehouse";
+        /** 空=每空间独立仓 ws-{code}；非空则强制共用该仓（运维逃生，勿默认填） */
+        private String defaultRepo = "";
+        /** 创建空间时是否经 API 确保远程仓库存在 */
+        private boolean autoCreateRepo = true;
+        /** PR 目标分支（生产 SoT） */
+        private String prodBranch = "prod";
+    }
+
+    /**
+     * §22 环境隔离：物理独立 Catalog 名与 MinIO 桶；开发态只写 env 前缀。
+     */
+    @Getter
+    @Setter
+    public static class EnvIsolation {
+        private boolean enabled = true;
+        /** 启动/首次发布时 soft 确保 Grav Catalog + MinIO 桶 */
+        private boolean autoEnsure = true;
+        private String devCatalog = "dev_iceberg";
+        private String stgCatalog = "stg_iceberg";
+        /** 空则回退 lh.gravitino.catalog */
+        private String prodCatalog = "";
+        private String devBucket = "lh-dev-warehouse";
+        private String stgBucket = "lh-stg-warehouse";
+        private String prodBucket = "warehouse";
     }
 
     /**

@@ -56,8 +56,11 @@ public class GovAssetPageParam {
     @Schema(description = "状态")
     private String status;
 
-    @Schema(description = "工作空间")
+    @Schema(description = "归属工作空间（scope=workspace 时使用）")
     private String ws;
+
+    @Schema(description = "列表范围：workspace（默认）/ enterprise / all")
+    private String scope;
 
     @Schema(description = "排序字段")
     private String sortField;

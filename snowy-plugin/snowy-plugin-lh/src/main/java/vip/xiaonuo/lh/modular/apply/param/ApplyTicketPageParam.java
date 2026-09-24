@@ -19,4 +19,7 @@ public class ApplyTicketPageParam {
 
     @Schema(description = "类型 table_read / lake_export；空=全部")
     private String ticketType;
+
+    @Schema(description = "工作空间；空=不过滤（全局）")
+    private String ws;
 }
