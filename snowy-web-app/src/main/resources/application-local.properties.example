@@ -1,11 +1,12 @@
 #########################################
-# 本机密钥覆盖模板（可提交）
-# 用法：复制为 application-local.properties 后填写真值
+# 本机开发密钥覆盖模板（可提交）
+# 用法：
 #   cp application-local.properties.example application-local.properties
-# application-local.properties 已在 .gitignore，禁止提交
+#   填写真值；IDE / -Dspring.profiles.active=local
+# application-local.properties 已 gitignore，允许明文，禁止提交
 #########################################
 
-# —— 业务库 / Redis ——
+# —— 业务库 / Redis / 控制台 ——
 spring.datasource.dynamic.datasource.master.password=
 spring.data.redis.password=
 spring.datasource.druid.stat-view-servlet.login-password=

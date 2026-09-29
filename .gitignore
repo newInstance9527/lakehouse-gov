@@ -52,10 +52,13 @@ tmp/
 # 本机密钥（spring.profiles.active=local 覆盖）；仅提交 *.example
 **/application-local.properties
 **/application-secrets.properties
+**/application-*-secrets.properties
 **/application-*.local.properties
 !**/application-local.properties.example
 ops/trino-federation/catalog/clickhouse.properties
 ops/trino-federation/catalog/ck.properties
 !ops/trino-federation/catalog/*.properties.example
+# filter-repo 临时替换表（含旧密文），禁止提交
+ops/secrets-history-replacements.txt
 
 

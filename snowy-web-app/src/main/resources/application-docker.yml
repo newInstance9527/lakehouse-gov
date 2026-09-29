@@ -11,7 +11,7 @@ spring:
           driver-class-name: com.mysql.cj.jdbc.Driver
           url: jdbc:mysql://${MYSQL_HOST:mysql}:${MYSQL_PORT:3306}/${MYSQL_DB:snowy}?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true&useInformationSchema=true&rewriteBatchedStatements=true
           username: ${MYSQL_USER:root}
-          password: ${MYSQL_PWD:12345678}
+          password: ${MYSQL_PWD:}
   data:
     redis:
       database: ${REDIS_DB:1}
