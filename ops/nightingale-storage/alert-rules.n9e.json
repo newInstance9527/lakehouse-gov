@@ -1,7 +1,7 @@
 [
   {
     "name": "LhTableDaysToFullP95Below45",
-    "note": "表级 days-to-full(p95)<45；深链 /lifecycle/storage",
+    "note": "表级 days-to-full(p95)<45；route=owner",
     "severity": 1,
     "disabled": 0,
     "prom_for_duration": 1800,
@@ -17,10 +17,10 @@
     "recover_duration": 0,
     "callbacks": [],
     "runbook_url": "",
-    "append_tags": ["domain=storage", "route=platform", "severity=critical"],
+    "append_tags": ["domain=storage", "route=owner", "severity=critical"],
     "annotations": {
-      "summary": "表 {{$labels.fqtn}} days-to-full(p95)={{$value}}d < 45",
-      "description": "C2 分段线性写回 VM。深链 /lifecycle/storage?fqtn={{$labels.fqtn}}"
+      "summary": "表 {{$labels.fqtn}} days-to-full(p95)={{$value}}d < 45 · owner={{$labels.owner}}",
+      "description": "C2 分段线性写回 VM。认责 {{$labels.owner}}（unassigned→平台组）。深链 /lifecycle/storage?fqtn={{$labels.fqtn}}"
     }
   },
   {
@@ -73,11 +73,11 @@
   },
   {
     "name": "LhWorkspaceStorageQuotaOver80Pct",
-    "note": "空间配额≥80%；依赖 lh_ws_storage_{used,quota}_bytes（见 README 残留）",
+    "note": "空间配额≥80%；日批投影 lh_ws_storage_*；route=owner",
     "severity": 2,
     "disabled": 0,
     "prom_for_duration": 900,
-    "prom_ql": "(lh_ws_storage_used_bytes / on(ws) lh_ws_storage_quota_bytes) >= 0.8",
+    "prom_ql": "(lh_ws_storage_used_bytes / on(ws) lh_ws_storage_quota_bytes) >= 0.8 and on(ws) lh_ws_storage_quota_bytes > 0",
     "prom_eval_interval": 60,
     "enable_stime": "00:00",
     "enable_etime": "23:59",
@@ -89,15 +89,15 @@
     "recover_duration": 0,
     "callbacks": [],
     "runbook_url": "",
-    "append_tags": ["domain=workspace", "route=platform", "severity=warning"],
+    "append_tags": ["domain=workspace", "route=owner", "severity=warning"],
     "annotations": {
-      "summary": "空间 {{$labels.ws}} 存储配额 ≥ 80%",
-      "description": "§28.1 熔断前置；深链 /workspace?ws={{$labels.ws}}"
+      "summary": "空间 {{$labels.ws}} 存储配额 ≥ 80% · owner={{$labels.owner}}",
+      "description": "§28.1 熔断前置；认责 {{$labels.owner}}。深链 /workspace?ws={{$labels.ws}}"
     }
   },
   {
     "name": "LhTableStorageCollectStale24h",
-    "note": "单表画像断流>24h",
+    "note": "单表画像断流>24h；route=owner",
     "severity": 1,
     "disabled": 0,
     "prom_for_duration": 900,
@@ -113,10 +113,10 @@
     "recover_duration": 0,
     "callbacks": [],
     "runbook_url": "",
-    "append_tags": ["domain=storage", "route=platform", "severity=critical"],
+    "append_tags": ["domain=storage", "route=owner", "severity=critical"],
     "annotations": {
-      "summary": "表 {{$labels.fqtn}} 存储画像断流 >24h",
-      "description": "排查 job.storage.profile_daily / VM import"
+      "summary": "表 {{$labels.fqtn}} 存储画像断流 >24h · owner={{$labels.owner}}",
+      "description": "排查 job.storage.profile_daily / VM import；认责 {{$labels.owner}}"
     }
   },
   {
@@ -145,7 +145,7 @@
   },
   {
     "name": "LhTableSmallFileRatioHigh",
-    "note": "small_file_ratio>30%",
+    "note": "small_file_ratio>30%；route=owner",
     "severity": 2,
     "disabled": 0,
     "prom_for_duration": 7200,
@@ -161,15 +161,15 @@
     "recover_duration": 0,
     "callbacks": [],
     "runbook_url": "",
-    "append_tags": ["domain=lifecycle", "route=platform", "severity=warning"],
+    "append_tags": ["domain=lifecycle", "route=owner", "severity=warning"],
     "annotations": {
-      "summary": "表 {{$labels.fqtn}} 小文件占比 > 30%",
-      "description": "§32.2；深链 /lifecycle?table={{$labels.fqtn}}&action=compact"
+      "summary": "表 {{$labels.fqtn}} 小文件占比 > 30% · owner={{$labels.owner}}",
+      "description": "§32.2；深链 /lifecycle?table={{$labels.fqtn}}&action=compact；认责 {{$labels.owner}}"
     }
   },
   {
     "name": "LhTableSmallFileWorsening",
-    "note": "小文件>30% 且日环比上升（compaction 落后）",
+    "note": "小文件>30% 且日环比上升；route=owner",
     "severity": 1,
     "disabled": 0,
     "prom_for_duration": 3600,
@@ -185,15 +185,15 @@
     "recover_duration": 0,
     "callbacks": [],
     "runbook_url": "",
-    "append_tags": ["domain=lifecycle", "route=platform", "severity=critical"],
+    "append_tags": ["domain=lifecycle", "route=owner", "severity=critical"],
     "annotations": {
-      "summary": "表 {{$labels.fqtn}} 小文件恶化（compaction SLA）",
-      "description": "§23.3/§32.2"
+      "summary": "表 {{$labels.fqtn}} 小文件恶化 · owner={{$labels.owner}}",
+      "description": "§23.3/§32.2；认责 {{$labels.owner}}"
     }
   },
   {
     "name": "LhTableAvgFileSizeTooSmall",
-    "note": "活跃文件均大小<32MiB",
+    "note": "活跃文件均大小<32MiB；route=owner",
     "severity": 3,
     "disabled": 0,
     "prom_for_duration": 21600,
@@ -209,9 +209,9 @@
     "recover_duration": 0,
     "callbacks": [],
     "runbook_url": "",
-    "append_tags": ["domain=lifecycle", "route=platform", "severity=info"],
+    "append_tags": ["domain=lifecycle", "route=owner", "severity=info"],
     "annotations": {
-      "summary": "表 {{$labels.fqtn}} 均文件 < 32MiB",
+      "summary": "表 {{$labels.fqtn}} 均文件 < 32MiB · owner={{$labels.owner}}",
       "description": "与 small_file_ratio 互补"
     }
   }

@@ -28,4 +28,6 @@ public class GovDqRule extends CommonEntity {
     private String severity;
     private Integer enabled;
     private String omTestFqn;
+    /** 绑定 gov_std_code.code_set_id（枚举/码值） */
+    private String stdCodeSetId;
 }

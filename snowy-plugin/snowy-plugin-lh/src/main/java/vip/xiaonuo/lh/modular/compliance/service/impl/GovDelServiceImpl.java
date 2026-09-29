@@ -355,7 +355,7 @@ public class GovDelServiceImpl implements GovDelService {
         String vaultPath = StrUtil.blankToDefault(req.getVaultPath(),
                 LhVaultPaths.complianceSubject(req.getReqNo()));
         if (!vaultClient.exists(vaultPath)) {
-            throw new CommonException("Vault 无主体明文（演示种子或已销毁）：{}", vaultPath);
+            throw new CommonException("Vault 无主体明文（未登记或已销毁）：{}", vaultPath);
         }
         String plain = vaultClient.getString(vaultPath, "subjectId");
         if (StrUtil.isBlank(plain)) {

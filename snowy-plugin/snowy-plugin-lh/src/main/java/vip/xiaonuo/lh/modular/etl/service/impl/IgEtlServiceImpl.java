@@ -116,6 +116,8 @@ public class IgEtlServiceImpl implements IgEtlService {
     private SecAuthGrantService secAuthGrantService;
     @Resource
     private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
+    @Resource
+    private vip.xiaonuo.lh.modular.observability.service.LhObsSpanService lhObsSpanService;
 
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
@@ -1545,6 +1547,23 @@ public class IgEtlServiceImpl implements IgEtlService {
                 }
             } catch (Exception ignored) {
                 // soft-fail
+            }
+            try {
+                IgEtlDag dag = dagMapper.selectById(run.getDagId());
+                String ws = dag == null ? "default" : StrUtil.blankToDefault(dag.getWs(), "default");
+                String linkId = "failed".equals(status) ? "C" : "C";
+                lhObsSpanService.recordComponentSpan(
+                        ws,
+                        linkId,
+                        "etl",
+                        "dag.run",
+                        "failed".equals(status) ? "error" : "ok",
+                        run.getRunId(),
+                        run.getDagId(),
+                        "failed".equals(status) ? StrUtil.blankToDefault(run.getMessage(), "etl run failed") : null,
+                        "{\"dagId\":\"" + run.getDagId() + "\",\"status\":\"" + status + "\"}");
+            } catch (Exception ignored) {
+                // soft-fail span
             }
         }
     }

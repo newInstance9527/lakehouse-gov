@@ -76,9 +76,9 @@ public class GovLcStorageController {
         return CommonResult.data(govLcStorageService.tableDetail(ws, fqtn, range));
     }
 
-    @Operation(summary = "桶水位与 days-to-full")
+    @Operation(summary = "桶水位与 days-to-full（source 以 vm: 开头表示读 VictoriaMetrics）")
     @GetMapping({"/lh/lifecycle/storage/buckets", "/api/governance/lifecycle/storage/buckets"})
-    public CommonResult<List<Map<String, Object>>> buckets(@RequestParam(required = false) String ws) {
+    public CommonResult<Map<String, Object>> buckets(@RequestParam(required = false) String ws) {
         return CommonResult.data(govLcStorageService.buckets(ws));
     }
 
@@ -95,6 +95,17 @@ public class GovLcStorageController {
             @RequestParam(required = false, defaultValue = "30d") String range,
             @RequestParam(required = false, defaultValue = "ws") String group) {
         return CommonResult.data(govLcStorageService.showback(ws, range, group));
+    }
+
+    @Operation(summary = "存储日报导出（CSV/MD；空表合法；写审计）")
+    @CommonLog("存储趋势日报导出")
+    @GetMapping({"/lh/lifecycle/storage/report/export", "/api/governance/lifecycle/storage/report/export"})
+    @PostMapping({"/lh/lifecycle/storage/report/export", "/api/governance/lifecycle/storage/report/export"})
+    public CommonResult<Map<String, Object>> reportExport(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false, defaultValue = "30d") String range,
+            @RequestParam(required = false, defaultValue = "csv") String format) {
+        return CommonResult.data(govLcStorageService.reportExport(ws, range, format));
     }
 
     @Operation(summary = "重跑存储画像日批（Trino 元数据 → gov_lc_table_stat + VM lh_table_storage_*）")

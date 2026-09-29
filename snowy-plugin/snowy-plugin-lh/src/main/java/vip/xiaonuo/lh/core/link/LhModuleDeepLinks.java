@@ -89,6 +89,14 @@ public final class LhModuleDeepLinks {
         return "/lifecycle?table=" + enc(tableFqn.trim());
     }
 
+    /** 指标中心；可选 q=metricCode */
+    public static String metrics(String metricCode) {
+        if (StrUtil.isBlank(metricCode)) {
+            return "/metrics";
+        }
+        return "/metrics?q=" + enc(metricCode.trim());
+    }
+
     private static String query(Map<String, String> params) {
         if (params == null || params.isEmpty()) {
             return "";

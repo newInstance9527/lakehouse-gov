@@ -24,5 +24,7 @@ public class GovDqRuleUpsertParam {
     private String severity;
     private Boolean enabled;
     private String omTestFqn;
+    /** 绑定 gov_std_code.code_set_id */
+    private String stdCodeSetId;
     private String remark;
 }

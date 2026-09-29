@@ -30,6 +30,7 @@ import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
+import vip.xiaonuo.lh.core.vault.LhVaultDynamicRotate;
 import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryDiscoverer;
 import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryDiscoverResult;
 import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryObjectKinds;
@@ -80,6 +81,8 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
 
     @Resource
     private LhVaultClient vaultClient;
+    @Resource
+    private LhVaultDynamicRotate vaultDynamicRotate;
     @Resource
     private LhConsumerBindingMapper bindingMapper;
     @Resource
@@ -695,9 +698,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public void rotateCred(LhDatasourceIdParam param) {
         LhDatasource ds = queryEntity(param.getId());
         assertCanEditDs(ds);
-        Map<String, Object> old = vaultClient.read(ds.getVaultPath());
-        old.put("rotatedAt", new Date().toString());
-        vaultClient.write(ds.getVaultPath(), old);
+        vaultDynamicRotate.rotateExisting(ds.getVaultPath());
         ds.setRevision(Optional.ofNullable(ds.getRevision()).orElse(1) + 1);
         this.updateById(ds);
         markBindingsStale(ds.getId());

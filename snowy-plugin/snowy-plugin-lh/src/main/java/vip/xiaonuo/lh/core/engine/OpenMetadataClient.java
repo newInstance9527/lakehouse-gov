@@ -898,12 +898,270 @@ public class OpenMetadataClient {
             r.put("source", "openmetadata");
             r.put("fqn", fqn);
             r.put("data", JSONUtil.parse(body));
+            Object score = extractProfileScore(JSONUtil.parse(body));
+            if (score != null) {
+                r.put("score", score);
+            }
             return r;
         } catch (Exception e) {
             r.put("ok", false);
             r.put("degraded", true);
             r.put("message", e.getMessage());
             return r;
+        }
+    }
+
+    /**
+     * 按表 FQN 列出 Test Case（含最近结果）；soft-fail。
+     */
+    public Map<String, Object> listTestCasesByEntityFqn(String tableFqn, int limit) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        if (StrUtil.isBlank(tableFqn)) {
+            r.put("ok", false);
+            r.put("message", "tableFqn required");
+            return r;
+        }
+        int lim = Math.max(1, Math.min(limit, 100));
+        try {
+            String q = "/api/v1/dataQuality/testCases?entityFQN=" + encQuery(tableFqn.trim())
+                    + "&fields=testCaseResult,testDefinition,testSuite&limit=" + lim;
+            String body = authGet(q);
+            JSONObject root = JSONUtil.parseObj(body);
+            JSONArray data = root.getJSONArray("data");
+            int pass = 0;
+            int fail = 0;
+            int aborted = 0;
+            int unknown = 0;
+            List<Map<String, Object>> cases = new ArrayList<>();
+            if (data != null) {
+                for (int i = 0; i < data.size(); i++) {
+                    JSONObject tc = data.getJSONObject(i);
+                    if (tc == null) {
+                        continue;
+                    }
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("fqn", tc.getStr("fullyQualifiedName"));
+                    row.put("name", tc.getStr("name"));
+                    String status = extractTestStatus(tc);
+                    row.put("status", status);
+                    cases.add(row);
+                    String s = StrUtil.blankToDefault(status, "").toLowerCase(Locale.ROOT);
+                    if (s.contains("success") || s.contains("pass")) {
+                        pass++;
+                    } else if (s.contains("fail")) {
+                        fail++;
+                    } else if (s.contains("abort")) {
+                        aborted++;
+                    } else {
+                        unknown++;
+                    }
+                }
+            }
+            r.put("ok", true);
+            r.put("source", "openmetadata");
+            r.put("fqn", tableFqn);
+            r.put("total", cases.size());
+            r.put("pass", pass);
+            r.put("fail", fail);
+            r.put("aborted", aborted);
+            r.put("unknown", unknown);
+            r.put("cases", cases.size() > 20 ? cases.subList(0, 20) : cases);
+            return r;
+        } catch (Exception e) {
+            r.put("ok", false);
+            r.put("degraded", true);
+            r.put("message", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return r;
+        }
+    }
+
+    /**
+     * soft-fail upsert 列级非空/唯一 Test Case；写回 fqn。需要 executable Test Suite。
+     *
+     * @param testDefName columnValuesToBeNotNull / columnValuesToBeUnique
+     */
+    public Map<String, Object> upsertColumnTestCaseSoft(String tableFqn, String columnName,
+                                                        String testDefName, String caseName) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        if (StrUtil.isBlank(tableFqn) || StrUtil.isBlank(columnName) || StrUtil.isBlank(testDefName)) {
+            r.put("ok", false);
+            r.put("degraded", true);
+            r.put("message", "tableFqn/column/testDef 不完整");
+            return r;
+        }
+        try {
+            Map<String, Object> suite = ensureExecutableTestSuite(tableFqn);
+            if (!Boolean.TRUE.equals(suite.get("ok"))) {
+                r.putAll(suite);
+                r.put("ok", false);
+                r.put("degraded", true);
+                return r;
+            }
+            String suiteId = String.valueOf(suite.get("id"));
+            String suiteFqn = String.valueOf(suite.get("fqn"));
+            String name = StrUtil.blankToDefault(caseName,
+                    sanitizeTestName(columnName + "_" + testDefName));
+            String entityLink = "<#E::table::" + tableFqn.trim() + "::columns::" + columnName.trim() + ">";
+
+            // 先按名查是否已存在（表 FQN 下列表）
+            Map<String, Object> listed = listTestCasesByEntityFqn(tableFqn, 100);
+            if (Boolean.TRUE.equals(listed.get("ok"))) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> cases = (List<Map<String, Object>>) listed.getOrDefault("cases", List.of());
+                for (Map<String, Object> c : cases) {
+                    String fqn = String.valueOf(c.getOrDefault("fqn", ""));
+                    String n = String.valueOf(c.getOrDefault("name", ""));
+                    if (name.equalsIgnoreCase(n) || fqn.endsWith("." + name)) {
+                        r.put("ok", true);
+                        r.put("created", false);
+                        r.put("fqn", fqn);
+                        r.put("suiteFqn", suiteFqn);
+                        r.put("hint", "已存在 Test Case");
+                        return r;
+                    }
+                }
+            }
+
+            JSONObject body = new JSONObject();
+            body.set("name", name);
+            body.set("displayName", name);
+            body.set("description", "Lakehouse 门户 gov_dq_rule soft-fail 同步");
+            body.set("entityLink", entityLink);
+            body.set("testDefinition", testDefName);
+            body.set("testSuite", suiteId);
+            body.set("parameterValues", new JSONArray());
+            String resp = authPut("/api/v1/dataQuality/testCases", body.toString());
+            JSONObject created = JSONUtil.parseObj(resp);
+            r.put("ok", true);
+            r.put("created", true);
+            r.put("fqn", created.getStr("fullyQualifiedName"));
+            r.put("omId", created.getStr("id"));
+            r.put("suiteFqn", suiteFqn);
+            return r;
+        } catch (Exception e) {
+            r.put("ok", false);
+            r.put("degraded", true);
+            r.put("message", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return r;
+        }
+    }
+
+    /**
+     * 确保表有 executable Test Suite（{@code {tableFqn}.testSuite} 惯例）。
+     */
+    public Map<String, Object> ensureExecutableTestSuite(String tableFqn) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        if (StrUtil.isBlank(tableFqn)) {
+            r.put("ok", false);
+            r.put("message", "tableFqn required");
+            return r;
+        }
+        String fqn = tableFqn.trim();
+        String suiteFqn = fqn + ".testSuite";
+        try {
+            JSONObject existing = getEntityByFqn("dataQuality/testSuites", suiteFqn, null);
+            if (existing == null) {
+                // 部分版本 collection 为 testSuites
+                existing = getEntityByFqn("testSuites", suiteFqn, null);
+            }
+            if (existing != null) {
+                r.put("ok", true);
+                r.put("id", existing.getStr("id"));
+                r.put("fqn", existing.getStr("fullyQualifiedName", suiteFqn));
+                r.put("created", false);
+                return r;
+            }
+        } catch (Exception ignored) {
+            // try create
+        }
+        try {
+            JSONObject body = new JSONObject();
+            String shortName = fqn.contains(".") ? fqn.substring(fqn.lastIndexOf('.') + 1) + "_testSuite"
+                    : fqn + "_testSuite";
+            body.set("name", sanitizeTestName(shortName));
+            body.set("displayName", "Lakehouse · " + fqn);
+            body.set("description", "门户 DQ soft-fail 自动创建的 executable suite");
+            body.set("executableEntityReference", fqn);
+            String resp;
+            try {
+                resp = authPost("/api/v1/dataQuality/testSuites/basic", body.toString());
+            } catch (Exception e1) {
+                resp = authPost("/api/v1/dataQuality/testSuites", body.toString());
+            }
+            JSONObject created = JSONUtil.parseObj(resp);
+            r.put("ok", true);
+            r.put("id", created.getStr("id"));
+            r.put("fqn", created.getStr("fullyQualifiedName", suiteFqn));
+            r.put("created", true);
+            return r;
+        } catch (Exception e) {
+            r.put("ok", false);
+            r.put("degraded", true);
+            r.put("message", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return r;
+        }
+    }
+
+    private static Object extractProfileScore(Object profileData) {
+        if (!(profileData instanceof JSONObject profile) && !(profileData instanceof Map)) {
+            return null;
+        }
+        JSONObject p = profileData instanceof JSONObject
+                ? (JSONObject) profileData
+                : JSONUtil.parseObj(JSONUtil.toJsonStr(profileData));
+        // 兼容：单对象或数组取最新
+        if (p.containsKey("data") && p.get("data") instanceof JSONArray arr && !arr.isEmpty()) {
+            Object last = arr.get(arr.size() - 1);
+            if (last instanceof JSONObject jo) {
+                p = jo;
+            }
+        }
+        for (String k : List.of("profileSample", "rowCount", "columnCount")) {
+            if (p.get(k) != null) {
+                // 无统一分数时用存在性标记；真正分数由 Test 结果聚合
+                break;
+            }
+        }
+        return null;
+    }
+
+    private static String extractTestStatus(JSONObject tc) {
+        if (tc == null) {
+            return null;
+        }
+        Object result = tc.get("testCaseResult");
+        if (result instanceof JSONObject jr) {
+            String s = jr.getStr("testCaseStatus");
+            if (StrUtil.isBlank(s)) {
+                s = jr.getStr("status");
+            }
+            return s;
+        }
+        if (result instanceof JSONArray ja && !ja.isEmpty()) {
+            JSONObject jr = ja.getJSONObject(ja.size() - 1);
+            if (jr != null) {
+                return StrUtil.blankToDefault(jr.getStr("testCaseStatus"), jr.getStr("status"));
+            }
+        }
+        return tc.getStr("testCaseStatus");
+    }
+
+    private static String sanitizeTestName(String raw) {
+        String s = StrUtil.blankToDefault(raw, "dq_test").replaceAll("[^A-Za-z0-9_]", "_");
+        if (s.length() > 64) {
+            s = s.substring(0, 64);
+        }
+        if (!Character.isLetter(s.charAt(0))) {
+            s = "t_" + s;
+        }
+        return s;
+    }
+
+    private String encQuery(String v) {
+        try {
+            return java.net.URLEncoder.encode(StrUtil.nullToEmpty(v), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return StrUtil.nullToEmpty(v).replace(" ", "%20");
         }
     }
 

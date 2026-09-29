@@ -11,7 +11,6 @@ import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
-import vip.xiaonuo.lh.core.engine.OpenMetadataClient;
 import vip.xiaonuo.lh.core.engine.VictoriaMetricsClient;
 import vip.xiaonuo.lh.modular.apply.entity.ApplyTicket;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketCreateParam;
@@ -31,9 +30,13 @@ import vip.xiaonuo.lh.modular.quality.param.GovDqIdParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqPageParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqRunAddParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqRuleUpsertParam;
+import vip.xiaonuo.lh.modular.quality.param.GovDqStreamProbeParam;
 import vip.xiaonuo.lh.modular.quality.result.GovDqRuleVo;
 import vip.xiaonuo.lh.modular.quality.service.GovDqService;
 import vip.xiaonuo.lh.modular.quality.support.GovDqMetricsFormatter;
+import vip.xiaonuo.lh.modular.quality.support.GovDqOmBridge;
+import vip.xiaonuo.lh.modular.quality.support.GovDqRuleProbeService;
+import vip.xiaonuo.lh.modular.quality.support.GovDqStdCodeResolver;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -45,6 +48,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -73,7 +77,11 @@ public class GovDqServiceImpl implements GovDqService {
     @Resource
     private CbDqSyncWatermarkMapper watermarkMapper;
     @Resource
-    private OpenMetadataClient openMetadataClient;
+    private GovDqRuleProbeService ruleProbeService;
+    @Resource
+    private GovDqOmBridge omBridge;
+    @Resource
+    private GovDqStdCodeResolver stdCodeResolver;
     @Resource
     private vip.xiaonuo.lh.modular.catalog.support.GovAssetQualityGateReactor qualityGateReactor;
     @Resource
@@ -85,6 +93,8 @@ public class GovDqServiceImpl implements GovDqService {
     @Resource
     @Lazy
     private ApplyTicketService applyTicketService;
+    @Resource
+    private vip.xiaonuo.lh.modular.observability.service.LhObsSpanService lhObsSpanService;
 
     @Override
     public Map<String, Object> overview(String ws, String range) {
@@ -122,7 +132,45 @@ public class GovDqServiceImpl implements GovDqService {
         r.put("ruleCount", rules.size());
         r.put("empty", empty);
         r.put("range", StrUtil.blankToDefault(range, "30"));
+        // OM Profiler/Test 抽样（soft-fail；不替代门户 runs）
+        try {
+            r.put("om", omBridge.overviewOm(workspace, 12));
+        } catch (Exception e) {
+            r.put("om", Map.of("available", false, "hint", "OM soft-fail: " + e.getMessage()));
+        }
+        r.put("stream", summarizeStreamRuns(runs));
         return r;
+    }
+
+    /** 近窗 Flink 流式探针 runs（job_run_id=stream:…） */
+    private static Map<String, Object> summarizeStreamRuns(List<GovDqRuleRun> runs) {
+        Map<String, Object> s = new LinkedHashMap<>();
+        if (runs == null || runs.isEmpty()) {
+            s.put("runCount", 0);
+            s.put("failCount", 0);
+            s.put("passCount", 0);
+            s.put("lastAt", null);
+            s.put("hint", "近窗无流式探针回调");
+            return s;
+        }
+        List<GovDqRuleRun> stream = runs.stream()
+                .filter(x -> x != null && StrUtil.startWithIgnoreCase(
+                        StrUtil.blankToDefault(x.getJobRunId(), ""), "stream:"))
+                .collect(Collectors.toList());
+        long fail = stream.stream().filter(x -> !Integer.valueOf(1).equals(x.getPass())).count();
+        Date last = stream.stream()
+                .map(GovDqRuleRun::getRanAt)
+                .filter(Objects::nonNull)
+                .max(Date::compareTo)
+                .orElse(null);
+        s.put("runCount", stream.size());
+        s.put("failCount", fail);
+        s.put("passCount", stream.size() - fail);
+        s.put("lastAt", last);
+        s.put("hint", stream.isEmpty()
+                ? "近窗无流式探针（Flink → POST /lh/quality/rules/stream-probe）"
+                : "近窗流式探针 " + stream.size() + " 次 · 失败 " + fail);
+        return s;
     }
 
     @Override
@@ -290,13 +338,38 @@ public class GovDqServiceImpl implements GovDqService {
         existing.setExprText(param.getExprText());
         existing.setSeverity(normalizeSeverity(param.getSeverity()));
         existing.setEnabled(param.getEnabled() == null || param.getEnabled() ? 1 : 0);
-        existing.setOmTestFqn(param.getOmTestFqn());
+        if (StrUtil.isNotBlank(param.getOmTestFqn())) {
+            existing.setOmTestFqn(param.getOmTestFqn().trim());
+        }
+        // 枚举：显式 stdCodeSetId / expr 中的 codeSet= / 映射·字段名回填
+        String stdCodeSet = StrUtil.blankToDefault(param.getStdCodeSetId(), "").trim();
+        if (StrUtil.isBlank(stdCodeSet)) {
+            stdCodeSet = StrUtil.blankToDefault(
+                    GovDqStdCodeResolver.parseCodeSetFromExpr(param.getExprText()), "");
+        }
+        if (StrUtil.isNotBlank(stdCodeSet)) {
+            existing.setStdCodeSetId(stdCodeSet);
+        } else if (GovDqStdCodeResolver.isEnumRule(existing)) {
+            try {
+                GovDqStdCodeResolver.Resolved r = stdCodeResolver.resolve(existing);
+                if (r != null && StrUtil.isNotBlank(r.codeSetId)) {
+                    existing.setStdCodeSetId(r.codeSetId);
+                }
+            } catch (Exception ignored) {
+                // soft
+            }
+        }
         existing.setRemark(param.getRemark());
         existing.setUpdateTime(now);
         if (ruleMapper.selectById(existing.getId()) == null) {
             ruleMapper.insert(existing);
         } else {
             ruleMapper.updateById(existing);
+        }
+        try {
+            omBridge.syncRuleSoft(existing);
+        } catch (Exception ignored) {
+            // OM soft-fail
         }
         return toVo(existing);
     }
@@ -353,11 +426,32 @@ public class GovDqServiceImpl implements GovDqService {
         run.setCreateTime(new Date());
         runMapper.insert(run);
         Map<String, Object> result = runToMap(run);
-        // 回写标准落地检测流水（门户「落地检测」Tab 消费）
+        // 回写标准落地检测流水（枚举 → 码值合规 + codeSetId）
         try {
             String st = pass ? "ok" : (blocked ? "fail" : "warn");
-            String checkType = StrUtil.blankToDefault(rule.getRuleType(), "质量规则");
-            String stdRef = StrUtil.blankToDefault(rule.getFieldName(), rule.getRuleCode());
+            String checkType;
+            String stdRef;
+            if (GovDqStdCodeResolver.isEnumRule(rule)) {
+                checkType = "码值合规";
+                stdRef = StrUtil.blankToDefault(rule.getStdCodeSetId(), null);
+                if (StrUtil.isBlank(stdRef)) {
+                    GovDqStdCodeResolver.Resolved resolved = stdCodeResolver.resolve(rule);
+                    if (resolved != null) {
+                        stdRef = resolved.codeSetId;
+                        if (StrUtil.isBlank(rule.getStdCodeSetId()) && StrUtil.isNotBlank(stdRef)) {
+                            rule.setStdCodeSetId(stdRef);
+                            rule.setUpdateTime(new Date());
+                            ruleMapper.updateById(rule);
+                        }
+                    }
+                }
+                if (StrUtil.isBlank(stdRef)) {
+                    stdRef = StrUtil.blankToDefault(rule.getFieldName(), rule.getRuleCode());
+                }
+            } else {
+                checkType = StrUtil.blankToDefault(rule.getRuleType(), "质量规则");
+                stdRef = StrUtil.blankToDefault(rule.getFieldName(), rule.getRuleCode());
+            }
             govStdService.recordDetectResult(
                     run.getWs(),
                     rule.getTableName(),
@@ -370,15 +464,36 @@ public class GovDqServiceImpl implements GovDqService {
                     rule.getAssetId(),
                     run.getId());
             result.put("stdDetectWritten", true);
+            result.put("stdRef", stdRef);
+            result.put("checkType", checkType);
         } catch (Exception e) {
             result.put("stdDetectWritten", false);
             result.put("stdDetectMessage", e.getMessage());
         }
-        if (blocked) {
-            Map<String, Object> catalogFx = qualityGateReactor.onBlockedRun(rule, run);
-            result.put("catalogEffect", catalogFx);
+        try {
+            result.put("catalogEffect", qualityGateReactor.onRunResult(rule, run));
+        } catch (Exception e) {
+            result.put("catalogEffect", Map.of("applied", false, "message",
+                    StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName())));
         }
         result.put("vmWritten", writeVmSoft(rule, run));
+        if (!pass || blocked) {
+            try {
+                lhObsSpanService.recordComponentSpan(
+                        run.getWs(),
+                        "F",
+                        "quality",
+                        "dq.rule_run",
+                        blocked ? "error" : "warn",
+                        run.getJobRunId(),
+                        run.getId(),
+                        StrUtil.blankToDefault(run.getMessage(), "quality rule failed"),
+                        "{\"ruleId\":\"" + rule.getId() + "\",\"table\":\""
+                                + StrUtil.blankToDefault(rule.getTableName(), "") + "\"}");
+            } catch (Exception ignored) {
+                // soft-fail span
+            }
+        }
         return result;
     }
 
@@ -455,6 +570,7 @@ public class GovDqServiceImpl implements GovDqService {
             BigDecimal okPct;
             String message;
             Boolean forcedBlock = null;
+            boolean doProbe = param.getProbe() == null || Boolean.TRUE.equals(param.getProbe());
             if (rep != null && rep.getPass() != null) {
                 pass = Boolean.TRUE.equals(rep.getPass());
                 okRows = rep.getOkRows();
@@ -463,15 +579,32 @@ public class GovDqServiceImpl implements GovDqService {
                 message = StrUtil.blankToDefault(rep.getMessage(),
                         pass ? "作业上报通过" : "作业上报失败");
                 forcedBlock = rep.getBlocked();
+            } else if (!enabled) {
+                pass = false;
+                okRows = 0L;
+                failRows = 1L;
+                okPct = new BigDecimal("0.00");
+                message = "规则已禁用，跳过探数 node=" + nodeKey;
+            } else if (doProbe) {
+                GovDqRuleProbeService.ProbeResult pr = ruleProbeService.probe(rule);
+                pass = pr.pass;
+                okRows = pr.okRows;
+                failRows = pr.failRows;
+                okPct = pr.okPct;
+                message = StrUtil.blankToDefault(pr.message, pass ? "探数通过" : "探数失败");
+                if (StrUtil.isNotBlank(pr.sql)) {
+                    message = StrUtil.maxLength(message + " · sql=" + pr.sql.replace('\n', ' '), 900);
+                }
+                if (pr.degraded && !pass) {
+                    notes.add("探数降级 rule=" + ruleId + ": " + pr.message);
+                }
             } else {
-                // 本期无引擎实探：enabled → pass；disabled → fail
-                pass = enabled;
-                okRows = pass ? 1000L : 0L;
-                failRows = pass ? 0L : 1L;
-                okPct = pass ? new BigDecimal("100.00") : new BigDecimal("0.00");
-                message = pass
-                        ? "quality evaluate (enabled) node=" + nodeKey
-                        : "quality evaluate fail: rule disabled node=" + nodeKey;
+                // 排障 stub：enabled → pass
+                pass = true;
+                okRows = 1000L;
+                failRows = 0L;
+                okPct = new BigDecimal("100.00");
+                message = "quality evaluate stub (probe=false) node=" + nodeKey;
             }
             boolean severityBlock = "block".equalsIgnoreCase(StrUtil.blankToDefault(rule.getSeverity(), ""));
             boolean doBlock = forcedBlock != null
@@ -603,7 +736,26 @@ public class GovDqServiceImpl implements GovDqService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> upsertGate(GovDqGateUpsertParam param) {
+        if (param == null) {
+            throw new CommonException("门禁参数不能为空");
+        }
         String workspace = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
+        // 表名可选：空串统一落 NULL（整层门禁）；层 / 表 / 资产至少其一
+        String tableName = StrUtil.trim(param.getTableName());
+        if (StrUtil.isBlank(tableName)) {
+            tableName = null;
+        }
+        String layer = StrUtil.trim(param.getLayer());
+        if (StrUtil.isBlank(layer)) {
+            layer = null;
+        }
+        String assetId = StrUtil.trim(param.getAssetId());
+        if (StrUtil.isBlank(assetId)) {
+            assetId = null;
+        }
+        if (tableName == null && layer == null && assetId == null) {
+            throw new CommonException("请填写层级或表名（表名可选，整层门禁仅填层级）");
+        }
         GovDqGate g = StrUtil.isNotBlank(param.getId()) ? gateMapper.selectById(param.getId()) : null;
         Date now = new Date();
         if (g == null) {
@@ -616,9 +768,9 @@ public class GovDqServiceImpl implements GovDqService {
         } else {
             g.setRevision(g.getRevision() == null ? 1 : g.getRevision() + 1);
         }
-        g.setAssetId(param.getAssetId());
-        g.setTableName(param.getTableName());
-        g.setLayer(param.getLayer());
+        g.setAssetId(assetId);
+        g.setTableName(tableName);
+        g.setLayer(layer);
         g.setMinScore(param.getMinScore() == null ? new BigDecimal("95.00") : param.getMinScore());
         g.setBlockOnFail(param.getBlockOnFail() == null || param.getBlockOnFail() ? 1 : 0);
         g.setUpdateTime(now);
@@ -629,9 +781,28 @@ public class GovDqServiceImpl implements GovDqService {
         }
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", g.getId());
+        m.put("layer", g.getLayer());
+        m.put("tableName", g.getTableName());
+        m.put("assetId", g.getAssetId());
         m.put("minScore", g.getMinScore());
         m.put("blockOnFail", Integer.valueOf(1).equals(g.getBlockOnFail()));
         return m;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteGate(GovDqIdParam param) {
+        if (param == null || StrUtil.isBlank(param.getId())) {
+            throw new CommonException("门禁 id 不能为空");
+        }
+        GovDqGate g = gateMapper.selectById(param.getId());
+        if (g == null) {
+            throw new CommonException("门禁不存在");
+        }
+        g.setDeleteFlag("DELETED");
+        g.setRevision(g.getRevision() == null ? 1 : g.getRevision() + 1);
+        g.setUpdateTime(new Date());
+        gateMapper.updateById(g);
     }
 
     @Override
@@ -688,13 +859,173 @@ public class GovDqServiceImpl implements GovDqService {
             row.setUpdateTime(now);
             watermarkMapper.updateById(row);
         }
-        Map<String, Object> omHealth = openMetadataClient.health();
+        Map<String, Object> synced = omBridge.syncFromOm(workspace);
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("ok", true);
         r.put("markValue", markValue);
-        r.put("openmetadata", omHealth);
-        r.put("hint", "P0：刷新水位；Test Suite 全量同步待接");
+        r.putAll(synced);
+        if (!r.containsKey("ok")) {
+            r.put("ok", true);
+        }
         return r;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> streamProbe(GovDqStreamProbeParam param) {
+        if (param == null) {
+            throw new CommonException("stream-probe 参数不能为空");
+        }
+        GovDqRule rule = resolveStreamRule(param);
+        String ws = StrUtil.blankToDefault(param.getWs(),
+                rule != null ? rule.getWs() : WS_DEFAULT);
+        String ruleCode = rule != null ? rule.getRuleCode()
+                : StrUtil.blankToDefault(param.getRuleCode(), "stream");
+        String table = rule != null ? rule.getTableName()
+                : StrUtil.blankToDefault(param.getTableName(), "_");
+        String severity = rule != null ? StrUtil.blankToDefault(rule.getSeverity(), "alert") : "alert";
+        String jobId = StrUtil.blankToDefault(param.getJobId(), "flink");
+
+        boolean pass;
+        if (param.getPass() != null) {
+            pass = Boolean.TRUE.equals(param.getPass());
+        } else if (param.getFailRatio() != null) {
+            pass = param.getFailRatio().doubleValue() <= 0;
+        } else if (param.getOkPct() != null) {
+            pass = param.getOkPct().doubleValue() >= 100.0;
+        } else {
+            pass = true;
+        }
+        Double okPct = param.getOkPct() == null ? null : param.getOkPct().doubleValue();
+        Double failRatio = param.getFailRatio() == null ? null : param.getFailRatio().doubleValue();
+        if (failRatio == null && okPct != null) {
+            failRatio = Math.max(0.0, 100.0 - okPct);
+        }
+        if (okPct == null && failRatio != null) {
+            okPct = Math.max(0.0, 100.0 - failRatio);
+        }
+        long ts = System.currentTimeMillis();
+        boolean vmWritten = writeVmStreamSoft(ruleCode, table, ws, severity, jobId,
+                pass, okPct, failRatio, param.getLagMs(), ts);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("mode", "stream");
+        out.put("pass", pass);
+        out.put("vmWritten", vmWritten);
+        out.put("ruleCode", ruleCode);
+        out.put("table", table);
+        out.put("ws", ws);
+        out.put("jobId", jobId);
+        out.put("okPct", okPct);
+        out.put("failRatio", failRatio);
+        out.put("lagMs", param.getLagMs());
+        out.put("hint", "流式探针写 lh_dq_stream_*；不阻断 DAG");
+
+        boolean persist = param.getPersistRun() == null || Boolean.TRUE.equals(param.getPersistRun());
+        if (persist && rule != null) {
+            GovDqRunAddParam add = new GovDqRunAddParam();
+            add.setRuleId(rule.getId());
+            add.setWs(ws);
+            add.setPass(pass);
+            add.setOkRows(param.getOkRows());
+            add.setFailRows(param.getFailRows());
+            add.setOkPct(param.getOkPct() != null ? param.getOkPct()
+                    : (okPct == null ? null : BigDecimal.valueOf(okPct)));
+            add.setBlocked(false); // 流式永不因 severity=block 阻断 DAG
+            add.setJobRunId("stream:" + jobId + ":" + ts);
+            String msg = StrUtil.blankToDefault(param.getMessage(),
+                    "stream probe · lagMs=" + param.getLagMs());
+            add.setMessage(msg);
+            // 直接落 run + std/detect；VM 批指标另写，流指标已写
+            Map<String, Object> runResult = addRunWithoutBatchVm(add, rule);
+            out.put("runId", runResult.get("id"));
+            out.put("stdDetectWritten", runResult.get("stdDetectWritten"));
+            out.put("persistRun", true);
+        } else {
+            out.put("persistRun", false);
+            if (rule == null) {
+                out.put("hint", "未匹配到 gov_dq_rule，仅写 VM 流式指标");
+            }
+        }
+        return out;
+    }
+
+    /** 流式落 run：复用 addRun 逻辑但跳过批 lh_dq_rule_*（避免与 stream 指标混写）。 */
+    private Map<String, Object> addRunWithoutBatchVm(GovDqRunAddParam param, GovDqRule rule) {
+        boolean pass = Boolean.TRUE.equals(param.getPass());
+        GovDqRuleRun run = new GovDqRuleRun();
+        run.setId(IdUtil.getSnowflakeNextIdStr());
+        run.setWs(StrUtil.blankToDefault(param.getWs(), rule.getWs()));
+        run.setRuleId(rule.getId());
+        run.setPass(pass ? 1 : 0);
+        run.setOkRows(param.getOkRows());
+        run.setFailRows(param.getFailRows());
+        run.setOkPct(param.getOkPct());
+        run.setBlocked(0);
+        run.setJobRunId(param.getJobRunId());
+        run.setMessage(param.getMessage());
+        run.setRanAt(new Date());
+        run.setCreateTime(new Date());
+        runMapper.insert(run);
+        Map<String, Object> result = runToMap(run);
+        try {
+            String st = pass ? "ok" : "warn";
+            String checkType = GovDqStdCodeResolver.isEnumRule(rule) ? "码值合规"
+                    : StrUtil.blankToDefault(rule.getRuleType(), "流式探针");
+            String stdRef = StrUtil.blankToDefault(rule.getStdCodeSetId(),
+                    StrUtil.blankToDefault(rule.getFieldName(), rule.getRuleCode()));
+            govStdService.recordDetectResult(
+                    run.getWs(), rule.getTableName(),
+                    StrUtil.blankToDefault(rule.getFieldName(), "_"),
+                    stdRef, checkType,
+                    StrUtil.blankToDefault(param.getMessage(), pass ? "流式探针通过" : "流式探针未通过"),
+                    st, rule.getAssetId(), run.getId());
+            result.put("stdDetectWritten", true);
+        } catch (Exception e) {
+            result.put("stdDetectWritten", false);
+        }
+        return result;
+    }
+
+    private GovDqRule resolveStreamRule(GovDqStreamProbeParam param) {
+        if (StrUtil.isNotBlank(param.getRuleId())) {
+            GovDqRule byId = ruleMapper.selectById(param.getRuleId().trim());
+            if (byId != null && !"DELETED".equals(byId.getDeleteFlag())) {
+                return byId;
+            }
+        }
+        if (StrUtil.isBlank(param.getRuleCode())) {
+            return null;
+        }
+        QueryWrapper<GovDqRule> qw = new QueryWrapper<>();
+        qw.lambda().eq(GovDqRule::getRuleCode, param.getRuleCode().trim())
+                .eq(GovDqRule::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(param.getWs()), GovDqRule::getWs, param.getWs())
+                .eq(StrUtil.isNotBlank(param.getTableName()), GovDqRule::getTableName, param.getTableName())
+                .last("LIMIT 1");
+        return ruleMapper.selectOne(qw);
+    }
+
+    private boolean writeVmStreamSoft(String ruleCode, String table, String ws, String severity,
+                                      String jobId, boolean pass, Double okPct, Double failRatio,
+                                      Long lagMs, long ts) {
+        LhProperties.Quality q = lhProperties.getQuality();
+        if (q != null && !q.isVmWriteEnabled()) {
+            return false;
+        }
+        String vmUrl = lhProperties.getLifecycle() == null ? "" : lhProperties.getLifecycle().getVmImportUrl();
+        if (StrUtil.isBlank(vmUrl)) {
+            return false;
+        }
+        try {
+            List<String> lines = GovDqMetricsFormatter.formatStream(
+                    ruleCode, table, ws, severity, jobId, pass, okPct, failRatio, lagMs, ts);
+            Map<String, Object> wr = victoriaMetricsClient.importPrometheus(GovDqMetricsFormatter.joinBody(lines));
+            return wr != null && !Boolean.FALSE.equals(wr.get("ok"));
+        } catch (Exception e) {
+            log.warn("quality stream vm write soft-fail: {}", e.getMessage());
+            return false;
+        }
     }
 
     private GovDqRuleVo toVo(GovDqRule rule) {
@@ -712,6 +1043,7 @@ public class GovDqServiceImpl implements GovDqService {
         v.setSeverity(rule.getSeverity());
         v.setEnabled(Integer.valueOf(1).equals(rule.getEnabled()));
         v.setOmTestFqn(rule.getOmTestFqn());
+        v.setStdCodeSetId(rule.getStdCodeSetId());
         GovDqRuleRun latest = latestRun(rule.getId());
         if (latest != null) {
             v.setPass(Integer.valueOf(1).equals(latest.getPass()));
@@ -721,6 +1053,7 @@ public class GovDqServiceImpl implements GovDqService {
             v.setBlocked(Integer.valueOf(1).equals(latest.getBlocked()));
             v.setRanAt(latest.getRanAt());
             v.setMessage(latest.getMessage());
+            v.setJobRunId(latest.getJobRunId());
             if (Boolean.FALSE.equals(v.getPass())) {
                 v.setStatusText(Boolean.TRUE.equals(v.getBlocked()) ? "失败·已阻断 DAG" : "失败");
             } else {

@@ -425,7 +425,11 @@ public final class DsTaskScriptBuilder {
         sb.append("fi\n");
         sb.append("GOV=\"${LH_GOV_URL:-}\"\n");
         sb.append("if [ -z \"$GOV\" ]; then\n");
-        sb.append("  echo \"[lh-quality] LH_GOV_URL empty; skip runtime evaluate (portal trial/deploy already wrote runs)\"\n");
+        sb.append("  if [ \"$BLOCK_ON_FAIL\" = \"true\" ]; then\n");
+        sb.append("    echo \"[lh-quality] LH_GOV_URL empty; fail-closed (blockOnFail=true)\"\n");
+        sb.append("    exit 1\n");
+        sb.append("  fi\n");
+        sb.append("  echo \"[lh-quality] LH_GOV_URL empty; skip evaluate (blockOnFail=false)\"\n");
         sb.append("  exit 0\n");
         sb.append("fi\n");
         sb.append("GOV=\"${GOV%/}\"\n");

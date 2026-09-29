@@ -21,4 +21,17 @@ class GovDqMetricsFormatterTest {
         assertTrue(body.contains(" 0 "));
         assertTrue(body.contains(" 1 "));
     }
+
+    @Test
+    void formatsStreamMetrics() {
+        List<String> lines = GovDqMetricsFormatter.formatStream(
+                "NULL_CHECK", "ods.s_order", "default", "alert",
+                "flink-cdc", false, 90.0, 10.0, 120_000L, 1_700_000_000_000L);
+        String body = GovDqMetricsFormatter.joinBody(lines);
+        assertTrue(body.contains("lh_dq_stream_pass{"));
+        assertTrue(body.contains("lh_dq_stream_ok_pct{"));
+        assertTrue(body.contains("lh_dq_stream_fail_ratio{"));
+        assertTrue(body.contains("lh_dq_stream_lag_ms{"));
+        assertTrue(body.contains("job=\"flink-cdc\""));
+    }
 }

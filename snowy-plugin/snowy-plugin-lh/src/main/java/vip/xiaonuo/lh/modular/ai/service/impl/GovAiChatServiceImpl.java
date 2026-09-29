@@ -1,5 +1,7 @@
 package vip.xiaonuo.lh.modular.ai.service.impl;
 
+import cn.dev33.satoken.context.mock.SaTokenContextMockUtil;
+import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
@@ -28,8 +30,11 @@ import vip.xiaonuo.lh.modular.ai.service.GovAiChatService;
 import vip.xiaonuo.lh.modular.ai.support.AiEgressPolicy;
 import vip.xiaonuo.lh.modular.ai.support.AiPromptGuard;
 import vip.xiaonuo.lh.modular.ai.support.AiSchemaContextAcl;
+import vip.xiaonuo.lh.modular.ai.support.AiSqlDraftHelper;
 import vip.xiaonuo.lh.modular.ai.support.AiSqlGuard;
 import vip.xiaonuo.lh.modular.ai.support.IntentRouter;
+import vip.xiaonuo.lh.modular.ai.agent.GovAiAgentOrchestrator;
+import vip.xiaonuo.lh.modular.ai.support.AiAssetReadAccess;
 import vip.xiaonuo.lh.modular.aimodel.entity.GovAiModel;
 import vip.xiaonuo.lh.modular.aimodel.mapper.GovAiModelMapper;
 import vip.xiaonuo.lh.modular.aimodel.result.GovAiRouteVo;
@@ -124,6 +129,10 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     private GovAiModelService govAiModelService;
     @Resource
     private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private AiAssetReadAccess aiAssetReadAccess;
+    @Resource
+    private GovAiAgentOrchestrator agentOrchestrator;
 
     @Override
     public Map<String, Object> contextSummary(String ws) {
@@ -248,6 +257,32 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> deleteSession(String sessionId) {
+        if (StrUtil.isBlank(sessionId)) {
+            throw new CommonException("sessionId 不能为空");
+        }
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        GovAiSession session = sessionMapper.selectById(sessionId);
+        if (session == null || !NOT_DELETE.equals(session.getDeleteFlag())) {
+            throw new CommonException("会话不存在或已删除");
+        }
+        if (StrUtil.isNotBlank(session.getUserId()) && !user.getId().equals(session.getUserId())
+                && !LhLoginUsers.isSuperAdmin()) {
+            throw new CommonException("无权删除该会话");
+        }
+        session.setDeleteFlag("DELETED");
+        session.setStatus("deleted");
+        session.setUpdateTime(new Date());
+        session.setRevision(session.getRevision() == null ? 1 : session.getRevision() + 1);
+        sessionMapper.updateById(session);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("id", sessionId);
+        return out;
+    }
+
+    @Override
     public SseEmitter chat(GovAiChatParam param) {
         if (param == null || StrUtil.isBlank(param.getText())) {
             throw new CommonException("text 不能为空");
@@ -255,7 +290,34 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         String workspace = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
         GovAiSession session = ensureSession(param.getSessionId(), workspace, param.getModelOverride());
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
-        ssePool.execute(() -> runChat(emitter, session, param, workspace));
+        // 请求线程捕获登录态；SSE 异步线程无 Servlet 上下文
+        String tokenValue = null;
+        try {
+            tokenValue = StpUtil.getTokenValue();
+        } catch (Exception ignored) {
+            // ignore
+        }
+        final String token = tokenValue;
+        SaBaseLoginUser loginUser = LhLoginUsers.currentUserOrNull();
+        ssePool.execute(() -> {
+            SaTokenContextMockUtil.setMockContext();
+            try {
+                if (StrUtil.isNotBlank(token)) {
+                    try {
+                        StpUtil.setTokenValue(token);
+                    } catch (Exception ignored) {
+                        // token 绑定失败时仍可用 runAs 覆盖
+                    }
+                }
+                if (loginUser != null) {
+                    LhLoginUsers.runAs(loginUser, () -> runChat(emitter, session, param, workspace));
+                } else {
+                    runChat(emitter, session, param, workspace);
+                }
+            } finally {
+                SaTokenContextMockUtil.clearContext();
+            }
+        });
         return emitter;
     }
 
@@ -348,6 +410,17 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             return;
         }
         String safeText = promptScan.getRedacted();
+        // 2B：默认只读探索智能体；生成类 scene 或 Agent 失败 → 固定意图链兜底
+        if (!IntentRouter.isGenerationBypassScene(param.getScene())) {
+            if (tryRunAgentChat(emitter, session, param, workspace, safeText, promptScan, start, userId)) {
+                try {
+                    emitter.complete();
+                } catch (Exception ignored) {
+                    // ignore
+                }
+                return;
+            }
+        }
         String intent = IntentRouter.route(safeText, param.getScene());
         // 雪花 id 约 19 位，须各自独立生成以适配 gov_ai_turn.id varchar(20)；勿用 turnId+"-u" 后缀（会超长截断）
         String userTurnId = IdUtil.getSnowflakeNextIdStr();
@@ -452,11 +525,12 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 appendDiagnoseCitations(emitter, citations, actions, workspace, diagnoseTable);
             }
 
-            // 工具：resolve_metric / compile_metric → 指标中心 API
+            // 工具：resolve_metric / compile_metric → 指标中心 API（citation 与 trial 同级读权）
             String metricCode = null;
             String metricName = null;
             String compiledSql = null;
             String askDataSummary = null;
+            boolean metricReadDenied = false;
             boolean hasSchemaLink = !schemaContext.isEmpty();
             boolean metricTopic = containsMetricKeyword(safeText) || "ask_data".equals(intent);
             if (metricTopic || (("nl2sql".equals(intent) || "ask_data".equals(intent)) && !hasSchemaLink)) {
@@ -464,46 +538,68 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 if (metric != null && StrUtil.isNotBlank(metric.getMetricCode())) {
                     metricCode = metric.getMetricCode();
                     metricName = metric.getName();
+                    boolean canReadMetric = false;
+                    try {
+                        canReadMetric = secAuthGrantService.canReadMetric(metric.getId());
+                    } catch (Exception ignored) {
+                        canReadMetric = false;
+                    }
                     Map<String, Object> c = new LinkedHashMap<>();
                     c.put("type", "metric");
                     c.put("metricCode", metricCode);
                     c.put("title", metricName);
                     c.put("id", metric.getId());
                     c.put("tool", "resolve_metric");
-                    citations.add(c);
-                    compiledSql = compileMetricTool(metricCode, workspace);
-                    if (StrUtil.isNotBlank(compiledSql)) {
-                        Map<String, Object> compileCite = new LinkedHashMap<>();
-                        compileCite.put("type", "metric");
-                        compileCite.put("metricCode", metricCode);
-                        compileCite.put("title", "compile_metric");
-                        compileCite.put("tool", "compile_metric");
-                        compileCite.put("text", StrUtil.maxLength(compiledSql, 240));
-                        citations.add(compileCite);
-                    }
-                    if ("ask_data".equals(intent)) {
-                        askDataSummary = trialMetricSummary(metricCode, workspace);
-                        if (StrUtil.isNotBlank(askDataSummary)) {
-                            Map<String, Object> trialCite = new LinkedHashMap<>();
-                            trialCite.put("type", "metric");
-                            trialCite.put("metricCode", metricCode);
-                            trialCite.put("title", "metric_query_summary");
-                            trialCite.put("tool", "ask_data");
-                            trialCite.put("text", askDataSummary);
-                            citations.add(trialCite);
+                    if (!canReadMetric) {
+                        metricReadDenied = true;
+                        c.put("text", "无读权限，请到申请中心申请后再试跑/查看编译 SQL");
+                        citations.add(c);
+                        // 不可读：不 compile、不 trial，避免 SQL 正文泄漏
+                    } else {
+                        citations.add(c);
+                        compiledSql = compileMetricTool(metricCode, workspace);
+                        if (StrUtil.isNotBlank(compiledSql)) {
+                            Map<String, Object> compileCite = new LinkedHashMap<>();
+                            compileCite.put("type", "metric");
+                            compileCite.put("metricCode", metricCode);
+                            compileCite.put("title", "compile_metric");
+                            compileCite.put("tool", "compile_metric");
+                            compileCite.put("text", StrUtil.maxLength(compiledSql, 240));
+                            citations.add(compileCite);
+                        }
+                        if ("ask_data".equals(intent)) {
+                            askDataSummary = trialMetricSummary(metricCode, workspace);
+                            if (StrUtil.isNotBlank(askDataSummary)) {
+                                Map<String, Object> trialCite = new LinkedHashMap<>();
+                                trialCite.put("type", "metric");
+                                trialCite.put("metricCode", metricCode);
+                                trialCite.put("title", "metric_query_summary");
+                                trialCite.put("tool", "ask_data");
+                                trialCite.put("text", askDataSummary);
+                                citations.add(trialCite);
+                            }
                         }
                     }
                 }
             }
 
             // 生成回答
+            boolean intentTokensAlreadyStreamed = false;
             if ("list_assets".equals(intent)) {
                 answer = listAssetsAnswer(myAssets, workspace);
+            } else if (metricReadDenied) {
+                answer = metricDeniedAnswer(metricCode, metricName);
+                String explore = askDataFallbackSql(schemaContext, myAssets);
+                if (StrUtil.isNotBlank(explore)) {
+                    answer = answer
+                            + "\n可基于已授权表做**探索查询**（非该指标官方口径，试跑需二次确认）：\n\n```sql\n"
+                            + explore + "\n```\n";
+                }
             } else if (metricTopic && StrUtil.isBlank(metricCode)
                     && !"list_assets".equals(intent) && !"api_script".equals(intent)) {
                 answer = missingMetricCodeAnswer(safeText);
                 if ("ask_data".equals(intent)) {
-                    String explore = askDataFallbackSql(safeText, schemaContext, myAssets);
+                    String explore = askDataFallbackSql(schemaContext, myAssets);
                     if (StrUtil.isNotBlank(explore)) {
                         answer = answer
                                 + "\n未绑定指标时，可基于已授权表做**探索查询**（非官方口径，试跑需二次确认）：\n\n```sql\n"
@@ -514,22 +610,53 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     }
                 }
             } else {
+                final boolean[] tokensStarted = {false};
                 answer = buildAnswer(intent, safeText, citations, metricCode, metricName,
-                        compiledSql, modelId, diagnoseTable, schemaContext, askDataSummary, workspace, param);
+                        compiledSql, modelId, diagnoseTable, schemaContext, askDataSummary,
+                        workspace, param, myAssets,
+                        token -> {
+                            if (StrUtil.isBlank(token)) {
+                                return;
+                            }
+                            tokensStarted[0] = true;
+                            try {
+                                sendEvent(emitter, "token", Map.of("text", token));
+                            } catch (Exception ignored) {
+                                // SSE soft
+                            }
+                        });
                 answer = ensureMetricCodeInAnswer(answer, metricCode);
-            }
-            // 防空：有引用但正文为空时，用知识/工具上下文生成可读回退（非 Mock）
-            if (StrUtil.isBlank(answer)) {
-                answer = heuristicAnswer(intent, safeText, citations, metricCode, metricName, compiledSql,
-                        diagnoseTable, schemaContext, askDataSummary, param);
-            }
+                // 防空：有引用但正文为空时，用知识/工具上下文生成可读回退（非 Mock）
+                if (StrUtil.isBlank(answer)) {
+                    answer = heuristicAnswer(intent, safeText, citations, metricCode, metricName, compiledSql,
+                            diagnoseTable, schemaContext, askDataSummary, param, myAssets);
+                    tokensStarted[0] = false;
+                }
+                // SSE 顺序：meta → token* → citation* → action* → done
+                if (!tokensStarted[0]) {
+                    streamTokens(emitter, answer);
+                }
+                flushCitations(emitter, citations);
+                // 工具阶段已收集的动作（如诊断深链）在引用之后下发
+                for (Map<String, Object> earlyAct : new ArrayList<>(actions)) {
+                    sendEvent(emitter, "action", earlyAct);
+                }
 
-            // SSE 顺序：meta → token* → citation* → action* → done（回答为主，引用为辅）
-            streamTokens(emitter, answer);
-            flushCitations(emitter, citations);
-            // 工具阶段已收集的动作（如诊断深链）在引用之后下发
-            for (Map<String, Object> earlyAct : new ArrayList<>(actions)) {
-                sendEvent(emitter, "action", earlyAct);
+                // 建议动作 — 跳到原动作块（下方统一处理）
+                // NOTE: 下列动作逻辑与原先一致，故不在此重复；用标记避免二次 stream
+                intentTokensAlreadyStreamed = true;
+            }
+            if (!intentTokensAlreadyStreamed) {
+                // 非 LLM 路径（list_assets / denied / missing metric）仍切块推送
+                if (StrUtil.isBlank(answer)) {
+                    answer = heuristicAnswer(intent, safeText, citations, metricCode, metricName, compiledSql,
+                            diagnoseTable, schemaContext, askDataSummary, param, myAssets);
+                }
+                streamTokens(emitter, answer);
+                flushCitations(emitter, citations);
+                for (Map<String, Object> earlyAct : new ArrayList<>(actions)) {
+                    sendEvent(emitter, "action", earlyAct);
+                }
             }
 
             // 建议动作
@@ -550,13 +677,27 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                         sql = compiledSql;
                     }
                     if (StrUtil.isBlank(sql)) {
-                        sql = heuristicSql(safeText, schemaContext);
+                        sql = heuristicSql(schemaContext, myAssets);
                     }
                     emitApiScriptActions(emitter, actions, sql, false);
                 }
             } else if ("nl2sql".equals(intent) || "sql_opt".equals(intent) || "ask_data".equals(intent)) {
                 if (StrUtil.isNotBlank(compiledSql)) {
                     emitSqlActions(emitter, actions, compiledSql, metricCode);
+                } else if (metricReadDenied) {
+                    Map<String, Object> applyLink = new LinkedHashMap<>();
+                    applyLink.put("type", "deeplink");
+                    applyLink.put("label", "去申请中心");
+                    applyLink.put("href", "/apply");
+                    actions.add(applyLink);
+                    sendEvent(emitter, "action", applyLink);
+                    String draftSql = extractFencedBlock(answer, "sql");
+                    if (StrUtil.isBlank(draftSql)) {
+                        draftSql = askDataFallbackSql(schemaContext, myAssets);
+                    }
+                    if (StrUtil.isNotBlank(draftSql)) {
+                        emitSqlActions(emitter, actions, draftSql, null);
+                    }
                 } else if (metricTopic && StrUtil.isBlank(metricCode)) {
                     Map<String, Object> metricsLink = new LinkedHashMap<>();
                     metricsLink.put("type", "deeplink");
@@ -573,7 +714,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     // 未命中指标：仍尽量给出可探索 SQL（答案中的 fence / schema / 已授权表），避免只有 deeplink
                     String draftSql = extractFencedBlock(answer, "sql");
                     if (StrUtil.isBlank(draftSql)) {
-                        draftSql = askDataFallbackSql(safeText, schemaContext, myAssets);
+                        draftSql = askDataFallbackSql(schemaContext, myAssets);
                     }
                     if (StrUtil.isNotBlank(draftSql)) {
                         emitSqlActions(emitter, actions, draftSql, null);
@@ -581,18 +722,13 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 } else {
                     String sql = extractFencedBlock(answer, "sql");
                     if (StrUtil.isBlank(sql)) {
-                        sql = heuristicSql(safeText, schemaContext);
+                        sql = heuristicSql(schemaContext, myAssets);
                     }
                     emitSqlActions(emitter, actions, sql, null);
                 }
             }
-            if ("list_assets".equals(intent) && !myAssets.isEmpty()) {
-                Map<String, Object> catLink = new LinkedHashMap<>();
-                catLink.put("type", "deeplink");
-                catLink.put("label", "打开资产目录");
-                catLink.put("href", "/catalog");
-                actions.add(catLink);
-                sendEvent(emitter, "action", catLink);
+            if ("list_assets".equals(intent)) {
+                emitListAssetsActions(emitter, actions, myAssets);
             }
             if (!citations.isEmpty()) {
                 Map<String, Object> kbLink = new LinkedHashMap<>();
@@ -685,7 +821,19 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                                String metricCode, String metricName, String compiledSql,
                                String modelId, String diagnoseTable,
                                List<Map<String, Object>> schemaContext, String askDataSummary,
-                               String workspace, GovAiChatParam param) {
+                               String workspace, GovAiChatParam param,
+                               List<Map<String, Object>> myAssets) {
+        return buildAnswer(intent, text, citations, metricCode, metricName, compiledSql, modelId,
+                diagnoseTable, schemaContext, askDataSummary, workspace, param, myAssets, null);
+    }
+
+    private String buildAnswer(String intent, String text, List<Map<String, Object>> citations,
+                               String metricCode, String metricName, String compiledSql,
+                               String modelId, String diagnoseTable,
+                               List<Map<String, Object>> schemaContext, String askDataSummary,
+                               String workspace, GovAiChatParam param,
+                               List<Map<String, Object>> myAssets,
+                               java.util.function.Consumer<String> onToken) {
         StringBuilder ctx = new StringBuilder();
         ctx.append("意图=").append(intent).append('\n');
         if (StrUtil.isNotBlank(diagnoseTable)) {
@@ -765,23 +913,30 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             if (tryUpstream) {
                 govAiModelService.assertDailyQuota(workspace, modelId);
             }
-            // 有登记 baseUrl 时优先直连（与模型测试一致）；否则走 LiteLLM
-            if (isDirectChatReady(modelId)) {
+            if (onToken != null) {
+                String streamed = chatUpstreamStream(modelId, systemPrompt, userPrompt, onToken);
+                if (StrUtil.isNotBlank(streamed)) {
+                    return streamed;
+                }
+            } else {
+                // 有登记 baseUrl 时优先直连（与模型测试一致）；否则走 LiteLLM
+                if (isDirectChatReady(modelId)) {
+                    String direct = chatDirect(modelId, systemPrompt, userPrompt);
+                    if (StrUtil.isNotBlank(direct)) {
+                        return direct;
+                    }
+                }
+                if (liteLlmClient.available()) {
+                    String llm = liteLlmClient.chatSimple(modelId, systemPrompt, userPrompt);
+                    if (StrUtil.isNotBlank(llm)) {
+                        return llm;
+                    }
+                }
+                // LiteLLM 失败后再试一次直连
                 String direct = chatDirect(modelId, systemPrompt, userPrompt);
                 if (StrUtil.isNotBlank(direct)) {
                     return direct;
                 }
-            }
-            if (liteLlmClient.available()) {
-                String llm = liteLlmClient.chatSimple(modelId, systemPrompt, userPrompt);
-                if (StrUtil.isNotBlank(llm)) {
-                    return llm;
-                }
-            }
-            // LiteLLM 失败后再试一次直连
-            String direct = chatDirect(modelId, systemPrompt, userPrompt);
-            if (StrUtil.isNotBlank(direct)) {
-                return direct;
             }
         } catch (CommonException e) {
             log.warn("AI upstream skipped ({}), falling back to heuristic", e.getMessage());
@@ -789,7 +944,77 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             log.warn("AI upstream failed, falling back to heuristic: {}", e.getMessage());
         }
         return heuristicAnswer(intent, text, citations, metricCode, metricName, compiledSql,
-                diagnoseTable, schemaContext, askDataSummary, param);
+                diagnoseTable, schemaContext, askDataSummary, param, myAssets);
+    }
+
+    /** 真流式上游：直连优先，失败再 LiteLLM；都失败返回 null（由调用方启发式）。 */
+    private String chatUpstreamStream(String modelId, String system, String user,
+                                      java.util.function.Consumer<String> onToken) {
+        if (isDirectChatReady(modelId)) {
+            String direct = chatDirectStream(modelId, system, user, onToken);
+            if (StrUtil.isNotBlank(direct)) {
+                return direct;
+            }
+        }
+        if (liteLlmClient.available()) {
+            Map<String, Object> streamed = liteLlmClient.chatStreamSimple(modelId, system, user, onToken);
+            if (Boolean.TRUE.equals(streamed.get("ok"))) {
+                return String.valueOf(streamed.get("content"));
+            }
+            log.debug("Intent LiteLLM stream failed: {}", streamed.get("error"));
+        }
+        String direct = chatDirectStream(modelId, system, user, onToken);
+        if (StrUtil.isNotBlank(direct)) {
+            return direct;
+        }
+        // 流式全失败：整包再切块推送
+        String fallback = null;
+        if (isDirectChatReady(modelId)) {
+            fallback = chatDirect(modelId, system, user);
+        }
+        if (StrUtil.isBlank(fallback) && liteLlmClient.available()) {
+            fallback = liteLlmClient.chatSimple(modelId, system, user);
+        }
+        if (StrUtil.isBlank(fallback)) {
+            fallback = chatDirect(modelId, system, user);
+        }
+        if (StrUtil.isNotBlank(fallback) && onToken != null) {
+            int step = 48;
+            for (int i = 0; i < fallback.length(); i += step) {
+                onToken.accept(fallback.substring(i, Math.min(fallback.length(), i + step)));
+            }
+        }
+        return fallback;
+    }
+
+    private String chatDirectStream(String modelId, String system, String user,
+                                    java.util.function.Consumer<String> onToken) {
+        if (StrUtil.isBlank(modelId)) {
+            return null;
+        }
+        String id = modelId.startsWith(LhLiteLlmClient.ALIAS_PREFIX)
+                ? modelId.substring(LhLiteLlmClient.ALIAS_PREFIX.length())
+                : modelId;
+        GovAiModel model = modelMapper.selectById(id);
+        if (model == null || !NOT_DELETE.equals(model.getDeleteFlag())) {
+            return null;
+        }
+        if (!Boolean.TRUE.equals(model.getEnabled())) {
+            return null;
+        }
+        if (StrUtil.isBlank(model.getBaseUrl()) || StrUtil.isBlank(model.getModelName())) {
+            return null;
+        }
+        String apiKey = null;
+        if (StrUtil.isNotBlank(model.getVaultPath())) {
+            apiKey = vaultClient.getString(model.getVaultPath(), "apiKey");
+        }
+        Map<String, Object> streamed = openAiCompatClient.chatStreamSimple(
+                model.getBaseUrl(), apiKey, model.getModelName(), system, user, onToken);
+        if (Boolean.TRUE.equals(streamed.get("ok"))) {
+            return String.valueOf(streamed.get("content"));
+        }
+        return null;
     }
 
     /** 是否具备直连 OpenAI 兼容上游的条件（与 chatDirect 前置一致） */
@@ -839,7 +1064,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     private String heuristicAnswer(String intent, String text, List<Map<String, Object>> citations,
                                    String metricCode, String metricName, String compiledSql,
                                    String diagnoseTable, List<Map<String, Object>> schemaContext,
-                                   String askDataSummary, GovAiChatParam param) {
+                                   String askDataSummary, GovAiChatParam param,
+                                   List<Map<String, Object>> myAssets) {
         StringBuilder sb = new StringBuilder();
         sb.append("### ").append(intentLabel(intent)).append("\n\n");
         if (StrUtil.isNotBlank(askDataSummary)) {
@@ -892,9 +1118,12 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     if (schemaContext != null && !schemaContext.isEmpty()) {
                         sb.append("（基于 schema_link）");
                     }
-                    sb.append("：\n\n```sql\n");
-                    sb.append(heuristicSql(text, schemaContext));
-                    sb.append("\n```\n");
+                    String draft = heuristicSql(schemaContext, myAssets);
+                    if (StrUtil.isNotBlank(draft)) {
+                        sb.append("：\n\n```sql\n").append(draft).append("\n```\n");
+                    } else {
+                        sb.append("。\n\n当前无已授权表/schema，无法生成草案。请到申请中心申请读权限，或在左侧选中可查表后再试。\n");
+                    }
                 }
             }
             case "nl2sql" -> {
@@ -913,13 +1142,17 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                     }
                     sb.append("，但编译失败。请到指标中心检查定义后重试，禁止手写生产口径。\n");
                 } else {
-                    sb.append("已按只读约束生成 schema 草案 SQL");
-                    if (schemaContext != null && !schemaContext.isEmpty()) {
-                        sb.append("（基于我的可查表 schema）");
+                    String draft = heuristicSql(schemaContext, myAssets);
+                    if (StrUtil.isNotBlank(draft)) {
+                        sb.append("已按只读约束生成 schema 草案 SQL");
+                        if (schemaContext != null && !schemaContext.isEmpty()) {
+                            sb.append("（基于我的可查表 schema）");
+                        }
+                        sb.append("：\n\n```sql\n").append(draft).append("\n```\n");
+                    } else {
+                        sb.append("当前无可查表/schema，无法生成 SQL 草案。")
+                                .append("请先问「我可以查询哪些资源」，或到申请中心申请读权限。\n");
                     }
-                    sb.append("：\n\n```sql\n");
-                    sb.append(heuristicSql(text, schemaContext));
-                    sb.append("\n```\n");
                 }
             }
             case "list_assets" -> sb.append(listAssetsAnswer(
@@ -1162,91 +1395,54 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         return null;
     }
 
-    private String heuristicSql(String text, List<Map<String, Object>> schemaContext) {
-        String fromSchema = heuristicSqlFromSchema(schemaContext);
-        if (StrUtil.isNotBlank(fromSchema)) {
-            return fromSchema;
-        }
-        String table = extractTableName(text);
-        if (StrUtil.isNotBlank(table)) {
-            return "SELECT *\nFROM iceberg.default." + table + "\n"
-                    + "WHERE dt = date_format(date_add('day', -1, current_date), '%Y-%m-%d')\n"
-                    + "LIMIT 100";
-        }
-        return "SELECT *\nFROM iceberg.default.dwd_order_detail\n"
-                + "WHERE dt = date_format(date_add('day', -1, current_date), '%Y-%m-%d')\n"
-                + "LIMIT 100";
+    /**
+     * 仅允许已 ACL 的 schemaContext / myAssets；禁止演示表与未绑定自由表名。
+     */
+    private String heuristicSql(List<Map<String, Object>> schemaContext,
+                                List<Map<String, Object>> myAssets) {
+        return AiSqlDraftHelper.draftSelect(schemaContext, myAssets);
     }
 
     /**
-     * ask_data 未命中指标时的探索草案：仅用 schemaContext / 已授权表，不回落到示例表。
-     * 无可用对象时返回 null（保留指标中心 / 申请中心 deeplink）。
+     * ask_data 探索草案：仅 schemaContext / 已授权表。
      */
-    private String askDataFallbackSql(String text, List<Map<String, Object>> schemaContext,
+    private String askDataFallbackSql(List<Map<String, Object>> schemaContext,
                                       List<Map<String, Object>> myAssets) {
-        String fromSchema = heuristicSqlFromSchema(schemaContext);
-        if (StrUtil.isNotBlank(fromSchema)) {
-            return fromSchema;
-        }
-        if (myAssets != null && !myAssets.isEmpty()) {
-            Map<String, Object> first = myAssets.get(0);
-            String code = String.valueOf(first.getOrDefault("assetCode", "")).trim();
-            if (StrUtil.isBlank(code) || "null".equalsIgnoreCase(code)) {
-                code = String.valueOf(first.getOrDefault("name", "")).trim();
-            }
-            if (StrUtil.isNotBlank(code) && !"null".equalsIgnoreCase(code)) {
-                String fqn = code.contains(".") ? code : "iceberg.default." + code;
-                return "SELECT *\nFROM " + fqn + "\nWHERE 1 = 1\nLIMIT 100";
-            }
-        }
-        String table = extractTableName(text);
-        if (StrUtil.isNotBlank(table)) {
-            return "SELECT *\nFROM iceberg.default." + table + "\nWHERE 1 = 1\nLIMIT 100";
-        }
-        return null;
+        return AiSqlDraftHelper.draftSelect(schemaContext, myAssets);
     }
 
-    private String heuristicSqlFromSchema(List<Map<String, Object>> schemaContext) {
-        if (schemaContext == null || schemaContext.isEmpty()) {
-            return null;
+    private void emitListAssetsActions(SseEmitter emitter, List<Map<String, Object>> actions,
+                                       List<Map<String, Object>> myAssets) throws IOException {
+        boolean empty = myAssets == null || myAssets.isEmpty();
+        if (empty) {
+            Map<String, Object> applyLink = new LinkedHashMap<>();
+            applyLink.put("type", "deeplink");
+            applyLink.put("label", "去申请中心");
+            applyLink.put("href", "/apply");
+            actions.add(applyLink);
+            sendEvent(emitter, "action", applyLink);
         }
-        Map<String, Object> first = schemaContext.get(0);
-        String schema = String.valueOf(first.getOrDefault("schema", "")).trim();
-        String table = String.valueOf(first.getOrDefault("table",
-                first.getOrDefault("name", ""))).trim();
-        if (StrUtil.isBlank(table) || "null".equalsIgnoreCase(table)) {
-            table = String.valueOf(first.getOrDefault("assetCode", "")).trim();
+        Map<String, Object> catLink = new LinkedHashMap<>();
+        catLink.put("type", "deeplink");
+        catLink.put("label", "打开资产目录");
+        catLink.put("href", "/catalog");
+        actions.add(catLink);
+        sendEvent(emitter, "action", catLink);
+    }
+
+    private static String metricDeniedAnswer(String metricCode, String metricName) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("### 指标无读权限\n\n");
+        sb.append("已解析到指标");
+        if (StrUtil.isNotBlank(metricCode)) {
+            sb.append(" `metric_code`=**").append(metricCode).append("**");
         }
-        if (StrUtil.isBlank(table) || "null".equalsIgnoreCase(table)) {
-            return null;
+        if (StrUtil.isNotBlank(metricName)) {
+            sb.append("（").append(metricName).append("）");
         }
-        String selectList = "*";
-        Object colsObj = first.get("columns");
-        if (colsObj instanceof List<?> cols && !cols.isEmpty()) {
-            List<String> names = new ArrayList<>();
-            for (Object c : cols) {
-                if (c instanceof Map<?, ?> m) {
-                    Object n = m.get("name");
-                    if (n != null && StrUtil.isNotBlank(String.valueOf(n))) {
-                        names.add(String.valueOf(n).trim());
-                    }
-                } else if (c != null && StrUtil.isNotBlank(String.valueOf(c))) {
-                    names.add(String.valueOf(c).trim());
-                }
-            }
-            if (!names.isEmpty()) {
-                selectList = String.join(", ", names);
-            }
-        }
-        String fqn;
-        if (table.contains(".")) {
-            fqn = table;
-        } else if (StrUtil.isNotBlank(schema) && !"null".equalsIgnoreCase(schema)) {
-            fqn = schema + "." + table;
-        } else {
-            fqn = "iceberg.default." + table;
-        }
-        return "SELECT " + selectList + "\nFROM " + fqn + "\nWHERE 1 = 1\nLIMIT 100";
+        sb.append("，但当前账号**无读权限**，不展示编译 SQL / 试跑结果。\n\n");
+        sb.append("请到申请中心申请该指标读权限后再问数。\n");
+        return sb.toString();
     }
 
     private void emitSqlActions(SseEmitter emitter, List<Map<String, Object>> actions,
@@ -1361,24 +1557,9 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         return allowed;
     }
 
-    /** 与 listMyAssets 一致：owner 或表读授权。 */
+    /** 与目录预览 / grants/check 一致：owner ∪ 门户 SELECT 投影 ∪ Grav 实测。 */
     private boolean canReadAssetForSchema(String assetId) {
-        if (StrUtil.isBlank(assetId)) {
-            return false;
-        }
-        try {
-            GovAsset a = assetMapper.selectById(assetId);
-            if (a == null || !NOT_DELETE.equals(a.getDeleteFlag())) {
-                return false;
-            }
-            if (isAssetOwner(a, safeUserId())) {
-                return true;
-            }
-            return secAuthGrantService.hasTableReadGrant(assetId);
-        } catch (Exception e) {
-            log.debug("schemaContext ACL check soft-fail assetId={}: {}", assetId, e.toString());
-            return false;
-        }
+        return aiAssetReadAccess.canRead(assetId);
     }
 
     /**
@@ -1514,34 +1695,52 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     }
 
     /**
-     * 知识检索：全局条目（不再按工作空间 / 公用分库）。
+     * 知识检索：优先当前 ws（含 platform 条目），不足再全局补齐；hit.preferWs 如实标记。
      */
     private List<Map<String, Object>> searchKbPreferWs(String preferWs, String query, int topK) {
         List<Map<String, Object>> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        GovKbSearchParam preferred = new GovKbSearchParam();
-        preferred.setQuery(query);
-        preferred.setTopK(topK);
+        int limit = Math.max(1, topK);
+
+        if (StrUtil.isNotBlank(preferWs)) {
+            GovKbSearchParam preferred = new GovKbSearchParam();
+            preferred.setQuery(query);
+            preferred.setWs(preferWs);
+            preferred.setIncludePlatform(true);
+            preferred.setTopK(limit);
+            appendKbHits(out, seen, preferred, preferWs, true);
+        }
+        if (out.size() < limit) {
+            GovKbSearchParam global = new GovKbSearchParam();
+            global.setQuery(query);
+            global.setTopK(Math.max(limit * 2, 10));
+            appendKbHits(out, seen, global, preferWs, false);
+        }
+        if (out.size() > limit) {
+            return out.subList(0, limit);
+        }
+        return out;
+    }
+
+    private void appendKbHits(List<Map<String, Object>> out, Set<String> seen,
+                              GovKbSearchParam param, String preferWs, boolean forcePrefer) {
         try {
-            for (Map<String, Object> h : govKbService.search(preferred)) {
+            for (Map<String, Object> h : govKbService.search(param)) {
                 String key = String.valueOf(h.getOrDefault("chunkId", h.get("entryId")));
                 if (!seen.add(key)) {
                     continue;
                 }
-                h.put("preferWs", true);
-                h.put("platform", false);
-                if (h.get("ws") == null) {
-                    h.put("ws", preferWs);
-                }
+                String hitWs = String.valueOf(h.getOrDefault("ws", "")).trim();
+                boolean prefer = forcePrefer
+                        || (StrUtil.isNotBlank(preferWs) && preferWs.equals(hitWs));
+                h.put("preferWs", prefer);
+                h.put("platform", "platform".equalsIgnoreCase(String.valueOf(h.get("scope")))
+                        || "_platform".equals(hitWs));
                 out.add(h);
             }
         } catch (Exception ignored) {
             // soft degrade
         }
-        if (out.size() > topK) {
-            return out.subList(0, topK);
-        }
-        return out;
     }
 
     /** compile_metric：POST /lh/metric/compile */
@@ -1651,6 +1850,127 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         p.setTitle("新对话");
         Map<String, Object> created = createSession(p);
         return sessionMapper.selectById(String.valueOf(created.get("id")));
+    }
+
+    /**
+     * 默认只读探索智能体。成功则写完 SSE 并返回 true；失败返回 false 由固定意图链兜底。
+     * <p>尽早推 meta；工具进度以 citation 实时下发；最终回答走真 token 流（或回退切块）。</p>
+     */
+    private boolean tryRunAgentChat(SseEmitter emitter, GovAiSession session, GovAiChatParam param,
+                                    String workspace, String safeText, AiPromptGuard.ScanResult promptScan,
+                                    long start, String userId) {
+        String intent = "agent";
+        String modelId = resolveModel(param, session, intent);
+        String userTurnId = IdUtil.getSnowflakeNextIdStr();
+        String turnId = IdUtil.getSnowflakeNextIdStr();
+        boolean metaSent = false;
+        boolean userPersisted = false;
+        try {
+            assertEgressForChat(modelId, IntentRouter.modelScene(intent));
+
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("intent", intent);
+            meta.put("mode", "agent");
+            meta.put("sessionId", session.getId());
+            meta.put("turnId", turnId);
+            meta.put("ws", workspace);
+            meta.put("modelId", modelId);
+            meta.put("modelName", modelDisplayName(modelId));
+            meta.put("status", "exploring");
+            if (promptScan.isRedacted()) {
+                meta.put("promptRedacted", true);
+                meta.put("promptFindings", promptScan.getFindings());
+            }
+
+            // 尽早推 meta，前端可立刻离开「空泡」；用户轮次仍成功后再落库，避免 fallback 污染
+            sendEvent(emitter, "meta", meta);
+            metaSent = true;
+
+            List<Map<String, Object>> liveCitations = new ArrayList<>();
+            final boolean[] tokensStarted = {false};
+            GovAiAgentOrchestrator.AgentRunResult agentResult = agentOrchestrator.run(
+                    workspace, safeText, modelId,
+                    cite -> {
+                        liveCitations.add(cite);
+                        try {
+                            sendEvent(emitter, "citation", cite);
+                        } catch (Exception ignored) {
+                            // SSE soft
+                        }
+                    },
+                    token -> {
+                        if (StrUtil.isBlank(token)) {
+                            return;
+                        }
+                        tokensStarted[0] = true;
+                        try {
+                            sendEvent(emitter, "token", Map.of("text", token));
+                        } catch (Exception ignored) {
+                            // SSE soft
+                        }
+                    });
+            if (!agentResult.success || StrUtil.isBlank(agentResult.answer)) {
+                log.info("Agent fallback to IntentRouter: {}", agentResult.failReason);
+                return false;
+            }
+
+            persistTurn(session.getId(), userTurnId, "user", intent, param.getText(),
+                    null, null, null, modelId, null, userId);
+            userPersisted = true;
+
+            List<Map<String, Object>> citations = new ArrayList<>(agentResult.citations);
+            if (citations.isEmpty()) {
+                citations.addAll(liveCitations);
+            }
+            List<Map<String, Object>> actions = new ArrayList<>(agentResult.actions);
+
+            // 真流未推送时（无 onToken 增量）回退切块，避免空白
+            if (!tokensStarted[0]) {
+                streamTokens(emitter, agentResult.answer);
+            }
+            // 工具 citation 已实时推过；补推知识类等遗漏
+            for (Map<String, Object> c : citations) {
+                if (liveCitations.contains(c)) {
+                    continue;
+                }
+                sendEvent(emitter, "citation", c);
+            }
+            for (Map<String, Object> act : actions) {
+                sendEvent(emitter, "action", act);
+            }
+
+            int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
+            int promptTok = estimateTokens(safeText);
+            int completionTok = estimateTokens(agentResult.answer);
+            persistTurn(session.getId(), turnId, "assistant", intent, agentResult.answer,
+                    JSONUtil.toJsonStr(citations), promptTok, completionTok, modelId, latency, userId);
+            try {
+                govAiModelService.recordUsage(workspace, modelId, promptTok, completionTok, latency);
+            } catch (Exception ignored) {
+                // soft
+            }
+            if ("新对话".equals(session.getTitle()) || StrUtil.isBlank(session.getTitle())) {
+                session.setTitle(StrUtil.maxLength(safeText.trim(), 40));
+                sessionMapper.updateById(session);
+            }
+            Map<String, Object> done = new LinkedHashMap<>();
+            done.put("turnId", turnId);
+            done.put("intent", intent);
+            done.put("mode", "agent");
+            done.put("steps", agentResult.steps);
+            done.put("promptTokens", promptTok);
+            done.put("completionTokens", completionTok);
+            done.put("citations", citations);
+            done.put("actions", actions);
+            sendEvent(emitter, "done", done);
+            return true;
+        } catch (Exception e) {
+            log.warn("Agent chat failed, fallback: {}", e.getMessage());
+            if (metaSent || userPersisted) {
+                log.debug("Agent had early SSE/persist before fallback");
+            }
+            return false;
+        }
     }
 
     private void persistTurn(String sessionId, String id, String role, String intent, String content,
@@ -1775,71 +2095,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         return modelId;
     }
 
-    private boolean isAssetOwner(GovAsset a, String userId) {
-        if (a == null || StrUtil.isBlank(userId)) {
-            return false;
-        }
-        return userId.equals(a.getCreateUser())
-                || userId.equals(a.getTechOwner())
-                || userId.equals(a.getBizOwner());
-    }
-
     private List<Map<String, Object>> listMyAssets(String preferWs, int topN) {
-        String userId = safeUserId();
-        List<Map<String, Object>> preferred = new ArrayList<>();
-        List<Map<String, Object>> others = new ArrayList<>();
-        try {
-            List<GovAsset> candidates = assetMapper.selectList(new QueryWrapper<GovAsset>().lambda()
-                    .eq(GovAsset::getDeleteFlag, NOT_DELETE)
-                    .orderByDesc(GovAsset::getUpdateTime)
-                    .last("LIMIT 200"));
-            for (GovAsset a : candidates) {
-                String access = null;
-                if (isAssetOwner(a, userId)) {
-                    access = "owned";
-                } else {
-                    try {
-                        if (secAuthGrantService.hasTableReadGrant(a.getId())) {
-                            access = "granted";
-                        }
-                    } catch (Exception ignored) {
-                        // soft
-                    }
-                }
-                if (access == null) {
-                    continue;
-                }
-                Map<String, Object> row = toAssetAccessRow(a, access);
-                if (StrUtil.isNotBlank(preferWs) && preferWs.equals(a.getWs())) {
-                    preferred.add(row);
-                } else {
-                    others.add(row);
-                }
-                if (preferred.size() + others.size() >= Math.max(topN * 3, 30)) {
-                    break;
-                }
-            }
-        } catch (Exception ignored) {
-            return List.of();
-        }
-        List<Map<String, Object>> out = new ArrayList<>();
-        out.addAll(preferred);
-        out.addAll(others);
-        if (out.size() > topN) {
-            return out.subList(0, topN);
-        }
-        return out;
-    }
-
-    private Map<String, Object> toAssetAccessRow(GovAsset a, String access) {
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("id", a.getId());
-        row.put("assetCode", a.getAssetCode());
-        row.put("name", StrUtil.blankToDefault(a.getCnName(), a.getName()));
-        row.put("ws", a.getWs());
-        row.put("layer", a.getLayer());
-        row.put("access", access);
-        return row;
+        return aiAssetReadAccess.listMyAssets(preferWs, topN);
     }
 
     private String formatMyAssetsBrief(List<Map<String, Object>> assets) {
@@ -1858,7 +2115,10 @@ public class GovAiChatServiceImpl implements GovAiChatService {
         sb.append("### 我的可查资源\n\n");
         sb.append("当前空间偏好：`").append(StrUtil.blankToDefault(ws, WS_DEFAULT)).append("`（软排序，不绕过 ACL）\n\n");
         if (assets == null || assets.isEmpty()) {
-            sb.append("暂无 **owned / granted** 表。请在申请中心申请读权限，或确认你是资产 Owner。\n");
+            sb.append("暂无 **owned / granted** 表。\n\n");
+            sb.append("- 到 **申请中心** 申请表读权限（须 Grav 投影成功才计入可查）\n");
+            sb.append("- 或确认你是资产的 createUser / techOwner / bizOwner\n");
+            sb.append("- 也可打开 **资产目录** 浏览后发起申请\n");
             return sb.toString();
         }
         sb.append("| 访问 | 编码 | 名称 | 空间 |\n|---|---|---|---|\n");
@@ -1887,7 +2147,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 continue;
             }
             try {
-                if (!"owned".equals(a.get("access")) && !secAuthGrantService.hasTableReadGrant(id)) {
+                if (!aiAssetReadAccess.canRead(id)) {
                     continue;
                 }
                 GovAssetIdParam p = new GovAssetIdParam();

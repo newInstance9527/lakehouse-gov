@@ -1,0 +1,45 @@
+# 夜莺通知路由样例 · 对齐 alert-rules.prom.yml 的 labels.route
+#
+# 导入告警规则后，在夜莺创建两条「通知规则 / 订阅」，用标签匹配分流：
+#   route=owner    → 按告警事件标签 owner 找人（目录 tech/biz）；owner=unassigned 回落平台组
+#   route=platform → 固定平台组（桶水位 / 全仓 absent）
+#
+# 下列为说明性 YAML（各夜莺版本 UI 字段名略有差异；以控制台「通知规则」为准）。
+
+---
+# 1) 表级 / 空间配额 · 认责到 owner
+name: lh-storage-route-owner
+enable: true
+# 匹配：告警规则 append 的 labels
+pipe:
+  - when:
+      labels:
+        domain: [storage, lifecycle, workspace]
+        route: [owner]
+    then:
+      # 按事件标签 {{$labels.owner}} 解析联系人；无匹配时走 fallback_group
+      notify_channels: [im, ticket]
+      contact_by_label: owner
+      fallback_group: platform-oncall
+      note: "unassigned / 找不到人 → platform-oncall"
+
+---
+# 2) 桶级 / 全仓断流 · 平台组
+name: lh-storage-route-platform
+enable: true
+pipe:
+  - when:
+      labels:
+        domain: [storage]
+        route: [platform]
+    then:
+      notify_channels: [im, ticket]
+      contact_group: platform-oncall
+      note: "桶 TTF / 桶水位80% / 全仓 absent_25h"
+
+---
+# 验收
+# 1. 导入 alert-rules.prom.yml
+# 2. 建上两条通知规则并绑定业务组
+# 3. 在 VM 造一条 lh_table_storage_days_to_full{quantile="p95",owner="alice"}=10 验证 owner 路由
+# 4. 造桶 used/capacity 触发 LhBucketUsageOver80Pct 验证 platform 路由

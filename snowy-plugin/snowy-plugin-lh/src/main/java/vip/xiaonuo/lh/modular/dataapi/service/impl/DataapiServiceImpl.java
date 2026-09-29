@@ -701,7 +701,6 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("assignments", sqlrestClient.listAssignments("", 1, 50));
         m.put("clients", sqlrestClient.listClients());
         m.put("authGroups", sqlrestClient.listAuthGroups());
-        m.put("hint", "构建经 SQLREST Manager API（create/debug/publish/deploy）；默认边缘 SQLREST Gateway");
         return m;
     }
 

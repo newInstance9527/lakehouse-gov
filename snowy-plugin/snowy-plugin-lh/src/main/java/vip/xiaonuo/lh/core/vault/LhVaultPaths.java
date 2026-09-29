@@ -97,4 +97,14 @@ public final class LhVaultPaths {
      * 字段约定：{@code webhookSecret}
      */
     public static final String COMPLIANCE_INTAKE_WEBHOOK = "platform/compliance/intake-webhook";
+
+    /**
+     * 作业 SA 凭证：{@code lh/job-sa/{ws}/{saName}}
+     * 字段约定：{@code password} / {@code generation} / {@code rotatedAt}；轮换时旧密进 {@code previousPassword}
+     */
+    public static String jobSa(String ws, String saName) {
+        String w = (ws == null || ws.isBlank()) ? "default" : ws.trim();
+        String n = saName == null ? "" : saName.trim().replace('/', '_');
+        return "lh/job-sa/" + w + "/" + n;
+    }
 }

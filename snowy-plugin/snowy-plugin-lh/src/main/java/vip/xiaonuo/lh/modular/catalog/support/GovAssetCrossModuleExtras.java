@@ -13,6 +13,7 @@ import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcTableStat;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcPolicyMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
+import vip.xiaonuo.lh.modular.metric.support.GovMetricBindLookup;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRule;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRuleRun;
 import vip.xiaonuo.lh.modular.quality.mapper.GovDqRuleMapper;
@@ -61,6 +62,8 @@ public class GovAssetCrossModuleExtras {
     private GovLcPolicyMapper lcPolicyMapper;
     @Resource
     private GovLcTableStatMapper lcTableStatMapper;
+    @Resource
+    private GovMetricBindLookup metricBindLookup;
 
     public Map<String, Object> buildQuality(GovAsset asset, String objectName) {
         Map<String, Object> out = new LinkedHashMap<>();
@@ -179,6 +182,52 @@ public class GovAssetCrossModuleExtras {
             out.put("available", false);
             out.put("upCount", 0);
             out.put("downCount", 0);
+            out.put("degraded", true);
+            out.put("message", e.getMessage());
+            return out;
+        }
+    }
+
+    /**
+     * 被引用指标：读 gov_metric / gov_metric_ver.bind_table（及 grav_asset_id）。
+     */
+    public Map<String, Object> buildMetrics(GovAsset asset, String objectName) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        String assetId = asset == null ? null : asset.getId();
+        String ws = asset == null ? "default" : StrUtil.blankToDefault(asset.getWs(), "default");
+        String tableHint = StrUtil.blankToDefault(objectName, shortName(asset == null ? null : asset.getOmFqn()));
+        out.put("path", LhModuleDeepLinks.metrics(null));
+        try {
+            List<Map<String, Object>> refs = metricBindLookup.metricsBoundToAsset(
+                    ws,
+                    assetId,
+                    objectName,
+                    asset == null ? null : asset.getAssetCode(),
+                    asset == null ? null : asset.getOmFqn());
+            out.put("available", true);
+            out.put("count", refs.size());
+            List<Map<String, Object>> items = new ArrayList<>();
+            for (Map<String, Object> ref : refs) {
+                Map<String, Object> item = new LinkedHashMap<>(ref);
+                Object code = ref.get("metricCode");
+                if (code != null) {
+                    item.put("path", LhModuleDeepLinks.metrics(String.valueOf(code)));
+                }
+                items.add(item);
+                if (items.size() >= 12) {
+                    break;
+                }
+            }
+            out.put("items", items);
+            if (refs.isEmpty()) {
+                out.put("hint", "无指标绑定本表");
+            }
+            return out;
+        } catch (Exception e) {
+            log.warn("catalog extras.metrics soft-fail asset={}: {}", assetId, e.getMessage());
+            out.put("available", false);
+            out.put("count", 0);
+            out.put("items", List.of());
             out.put("degraded", true);
             out.put("message", e.getMessage());
             return out;

@@ -1,5 +1,7 @@
 package vip.xiaonuo.lh.modular.quality.entity;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Getter;
@@ -16,8 +18,14 @@ public class GovDqGate extends CommonEntity {
     private String id;
     private Integer revision;
     private String ws;
+    /** 可选：清空时须写回 NULL */
+    @TableField(insertStrategy = FieldStrategy.ALWAYS, updateStrategy = FieldStrategy.ALWAYS)
     private String assetId;
+    /** 可选：空=整层门禁 */
+    @TableField(insertStrategy = FieldStrategy.ALWAYS, updateStrategy = FieldStrategy.ALWAYS)
     private String tableName;
+    /** 可选：与 tableName 至少填其一 */
+    @TableField(insertStrategy = FieldStrategy.ALWAYS, updateStrategy = FieldStrategy.ALWAYS)
     private String layer;
     private BigDecimal minScore;
     private Integer blockOnFail;

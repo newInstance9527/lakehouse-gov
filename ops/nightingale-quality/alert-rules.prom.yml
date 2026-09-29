@@ -51,3 +51,50 @@ groups:
         annotations:
           summary: "质量运行时序断流（36h 无 lh_dq_rule_pass）"
           description: "检查 ETL quality 节点、evaluate 回调、lh.lifecycle.vm-import-url"
+
+  - name: lh-quality-stream
+    interval: 30s
+    rules:
+      - alert: LhDqStreamFailed
+        expr: lh_dq_stream_pass == 0
+        for: 2m
+        labels:
+          severity: warning
+          domain: quality
+          route: platform
+        annotations:
+          summary: "流式质量探针 {{ $labels.rule_code }} 失败"
+          description: "作业 {{ $labels.job }} 表 {{ $labels.table }}；Flink→POST /lh/quality/rules/stream-probe"
+
+      - alert: LhDqStreamOkPctLow
+        expr: lh_dq_stream_ok_pct < 95
+        for: 5m
+        labels:
+          severity: warning
+          domain: quality
+          route: owner
+        annotations:
+          summary: "流式质量分 {{ $labels.table }} ok_pct={{ $value }} < 95"
+          description: "滑动窗口·job={{ $labels.job }} rule={{ $labels.rule_code }}"
+
+      - alert: LhDqStreamLagHigh
+        expr: lh_dq_stream_lag_ms > 60000
+        for: 5m
+        labels:
+          severity: warning
+          domain: quality
+          route: platform
+        annotations:
+          summary: "流式探针延迟 {{ $value }}ms > 60s"
+          description: "job={{ $labels.job }} table={{ $labels.table }}"
+
+      - alert: LhDqStreamStale
+        expr: absent_over_time(lh_dq_stream_pass[2h])
+        for: 30m
+        labels:
+          severity: info
+          domain: quality
+          route: platform
+        annotations:
+          summary: "流式探针断流（2h 无 lh_dq_stream_pass）"
+          description: "检查 Flink 旁路算子是否回调 stream-probe、VM 导入"

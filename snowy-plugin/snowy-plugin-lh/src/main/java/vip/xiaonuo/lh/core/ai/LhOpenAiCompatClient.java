@@ -10,9 +10,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * OpenAI 兼容 Chat Completions（直连模型 baseUrl，不经 LiteLLM）。
@@ -49,6 +51,37 @@ public class LhOpenAiCompatClient {
     }
 
     public Map<String, Object> chatProbe(String baseUrl, String apiKey, String model, List<Map<String, String>> messages) {
+        List<Map<String, Object>> msgs = new ArrayList<>();
+        if (messages != null) {
+            for (Map<String, String> m : messages) {
+                if (m == null) {
+                    continue;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("role", m.get("role"));
+                row.put("content", m.get("content"));
+                msgs.add(row);
+            }
+        }
+        return chatProbeObjects(baseUrl, apiKey, model, msgs, null);
+    }
+
+    /**
+     * Chat Completions（支持 tools）。messages 可为带 tool_calls / tool_call_id 的 Object 消息。
+     * 成功时 ok=true，含 content、tool_calls（可能为空列表）。
+     */
+    public Map<String, Object> chatWithTools(String baseUrl, String apiKey, String model,
+                                             List<Map<String, Object>> messages,
+                                             List<Map<String, Object>> tools) {
+        return chatProbeObjects(baseUrl, apiKey, model, messages, tools);
+    }
+
+    /**
+     * 流式 Chat（无 tools）。onDelta 收到每个 content 增量；返回 ok/content/error。
+     */
+    public Map<String, Object> chatStream(String baseUrl, String apiKey, String model,
+                                          List<Map<String, Object>> messages,
+                                          Consumer<String> onDelta) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", false);
         if (StrUtil.isBlank(baseUrl) || StrUtil.isBlank(model) || messages == null || messages.isEmpty()) {
@@ -61,8 +94,45 @@ public class LhOpenAiCompatClient {
             body.set("model", model.trim());
             body.set("messages", messages);
             body.set("temperature", 0.2);
+            body.set("stream", true);
+            return LhOpenAiSseStream.stream(url, apiKey, body.toString(), onDelta);
+        } catch (Exception e) {
+            log.warn("OpenAI-compat stream failed: {}", e.getMessage());
+            out.put("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return out;
+        }
+    }
+
+    public Map<String, Object> chatStreamSimple(String baseUrl, String apiKey, String model,
+                                                String system, String user, Consumer<String> onDelta) {
+        List<Map<String, Object>> msgs = new ArrayList<>();
+        msgs.add(Map.of("role", "system",
+                "content", StrUtil.blankToDefault(system, "You are a helpful assistant.")));
+        msgs.add(Map.of("role", "user", "content", StrUtil.blankToDefault(user, "")));
+        return chatStream(baseUrl, apiKey, model, msgs, onDelta);
+    }
+
+    public Map<String, Object> chatProbeObjects(String baseUrl, String apiKey, String model,
+                                                List<Map<String, Object>> messages,
+                                                List<Map<String, Object>> tools) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", false);
+        if (StrUtil.isBlank(baseUrl) || StrUtil.isBlank(model) || messages == null || messages.isEmpty()) {
+            out.put("error", "baseUrl / model / messages 不完整");
+            return out;
+        }
+        try {
+            String url = chatCompletionsUrl(baseUrl);
+            JSONObject body = new JSONObject();
+            body.set("model", model.trim());
+            body.set("messages", messages);
+            body.set("temperature", 0.2);
+            if (tools != null && !tools.isEmpty()) {
+                body.set("tools", tools);
+                body.set("tool_choice", "auto");
+            }
             HttpRequest req = HttpRequest.post(url)
-                    .timeout(60_000)
+                    .timeout(90_000)
                     .header("Content-Type", "application/json")
                     .body(body.toString());
             if (StrUtil.isNotBlank(apiKey)) {
@@ -83,24 +153,8 @@ public class LhOpenAiCompatClient {
                     return out;
                 }
                 JSONObject root = JSONUtil.parseObj(raw);
-                String upstreamErr = LhLiteLlmClient.extractUpstreamError(root);
-                if (StrUtil.isNotBlank(upstreamErr)) {
-                    out.put("error", upstreamErr);
-                    return out;
-                }
-                JSONArray choices = root.getJSONArray("choices");
-                if (choices == null || choices.isEmpty()) {
-                    out.put("error", "上游响应无 choices");
-                    return out;
-                }
-                JSONObject msg = choices.getJSONObject(0).getJSONObject("message");
-                String content = msg == null ? null : msg.getStr("content");
-                if (StrUtil.isBlank(content)) {
-                    out.put("error", "上游返回空 completion");
-                    return out;
-                }
-                out.put("ok", true);
-                out.put("content", content);
+                Map<String, Object> parsed = LhChatTools.parseAssistantMessage(root);
+                out.putAll(parsed);
                 return out;
             }
         } catch (Exception e) {

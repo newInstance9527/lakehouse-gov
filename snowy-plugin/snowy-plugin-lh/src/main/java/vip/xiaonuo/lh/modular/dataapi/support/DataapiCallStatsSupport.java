@@ -26,7 +26,6 @@ public final class DataapiCallStatsSupport {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("days", d);
         out.put("source", "sqlrest");
-        out.put("note", "调用量聚合自 SQLREST Manager overview（Gateway 访问日志），不含 APISIX");
 
         Map<String, Object> counter = unwrapMap(counterRaw);
         out.put("counter", counter);

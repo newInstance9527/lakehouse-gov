@@ -30,8 +30,11 @@ import vip.xiaonuo.lh.modular.sec.mapper.SecAuthGrantMapper;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -75,6 +78,38 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         }
         // 仅认 Grav 投影成功的 SELECT（grav_projected=1），避免 soft-fail 假授权放行
         return hasActiveSelectProjection(user.getId(), assetId);
+    }
+
+    @Override
+    public List<String> listGrantedSelectAssetIds(String userId) {
+        if (StrUtil.isBlank(userId)) {
+            return List.of();
+        }
+        Date now = new Date();
+        var qw = baseActiveGrantQw(userId, now);
+        qw.eq(SecAuthGrant::getPrivilege, "SELECT")
+                .eq(SecAuthGrant::getGravProjected, 1)
+                .and(w -> w.isNull(SecAuthGrant::getRemark)
+                        .or().notLike(SecAuthGrant::getRemark, "%soft-fail%"))
+                .orderByDesc(SecAuthGrant::getUpdateTime)
+                .last("LIMIT 500");
+        List<SecAuthGrant> grants = grantMapper.selectList(qw);
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        String assetType = LhOpsResourceTypeEnum.ASSET.getValue();
+        for (SecAuthGrant g : grants) {
+            if (g == null) {
+                continue;
+            }
+            String type = StrUtil.blankToDefault(g.getResourceType(), "").trim().toLowerCase(Locale.ROOT);
+            if (StrUtil.isNotBlank(type) && !assetType.equals(type)) {
+                continue;
+            }
+            String id = StrUtil.blankToDefault(g.getResourceId(), g.getAssetId());
+            if (StrUtil.isNotBlank(id)) {
+                ids.add(id.trim());
+            }
+        }
+        return new ArrayList<>(ids);
     }
 
     @Override

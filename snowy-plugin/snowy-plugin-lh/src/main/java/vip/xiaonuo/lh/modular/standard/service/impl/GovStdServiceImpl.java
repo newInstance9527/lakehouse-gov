@@ -82,6 +82,8 @@ public class GovStdServiceImpl implements GovStdService {
     private GovStdDetectResultMapper detectMapper;
     @Resource
     private GovStdGlossarySync glossarySync;
+    @Resource
+    private vip.xiaonuo.lh.modular.domain.service.GovDomainService govDomainService;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -164,7 +166,14 @@ public class GovStdServiceImpl implements GovStdService {
                 .last("LIMIT 1"));
         String dataType = firstNonBlank(param.getDataType(), param.getType());
         String unit = StrUtil.blankToDefault(param.getUnit(), "—");
-        String domain = firstNonBlank(param.getDomainCode(), param.getDomain(), "通用");
+        String domainRaw = firstNonBlank(param.getDomainCode(), param.getDomain());
+        String domain;
+        if (StrUtil.isBlank(domainRaw)) {
+            domain = govDomainService.requireActive("common");
+        } else {
+            String resolved = govDomainService.resolveCode(domainRaw);
+            domain = govDomainService.requireActive(StrUtil.blankToDefault(resolved, domainRaw));
+        }
         String desc = firstNonBlank(param.getDescription(), param.getDesc());
 
         if (existing == null) {
@@ -708,14 +717,7 @@ public class GovStdServiceImpl implements GovStdService {
     @Override
     public Map<String, Object> metaOptions() {
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("domains", List.of(
-                Map.of("value", "交易", "label", "交易"),
-                Map.of("value", "用户", "label", "用户"),
-                Map.of("value", "商品", "label", "商品"),
-                Map.of("value", "通用", "label", "通用"),
-                Map.of("value", "营销", "label", "营销"),
-                Map.of("value", "财务", "label", "财务"),
-                Map.of("value", "门店", "label", "门店")));
+        out.put("domains", govDomainService.options());
         out.put("layers", List.of(
                 "ODS", "DWD", "DWS", "ADS", "DIM", "任务", "消息", "临时", "视图", "接口", "指标", "质量", "其他"));
         out.put("complianceStatuses", List.of(

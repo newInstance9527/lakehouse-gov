@@ -1,0 +1,29 @@
+# 湖仓安全 · Vault 轮换失败（§35.2）
+# 指标：门户 rotateVault → VictoriaMetrics lh_vault_rotate_*
+# 导入：夜莺 ≥8.2「告警规则 → 导入 Prometheus 规则」
+
+groups:
+  - name: lh-security-vault
+    interval: 60s
+    rules:
+      - alert: LhVaultRotateFail
+        expr: lh_vault_rotate_fail == 1
+        for: 2m
+        labels:
+          severity: critical
+          domain: security
+          route: platform
+        annotations:
+          summary: "Vault 凭证轮换失败 · {{ $labels.vault_path }}"
+          description: "kind={{ $labels.kind }}；门户已尝试登记 vault_rotate_fail 工单；深链 /security"
+
+      - alert: LhVaultRotateStale
+        expr: time() - timestamp(lh_vault_rotate_ok) > 86400 * 30
+        for: 1h
+        labels:
+          severity: warning
+          domain: security
+          route: platform
+        annotations:
+          summary: "Vault 超过 30 天无成功轮换写点"
+          description: "检查台账健康度与 /lh/sec/vault/health"

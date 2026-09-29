@@ -100,6 +100,7 @@ public class IgEtlPublishSideEffects {
 
         for (IgEtlNode n : nodes) {
             JSONObject conf = parseConf(n.getConfJson());
+            warnMissingMetricCode(n, conf, notes);
             JSONArray maps = fieldMapsOf(conf);
             if (maps == null || maps.isEmpty()) {
                 continue;
@@ -230,7 +231,7 @@ public class IgEtlPublishSideEffects {
     }
 
     /**
-     * quality 节点：调 {@link GovDqService#evaluate} 写 {@code gov_dq_rule_run}。
+     * quality 节点：调 {@link GovDqService#evaluate}（默认真探数）写 {@code gov_dq_rule_run}。
      * <p>{@code blockOnFail=true} 且存在失败时 {@code blocked=true}，由调用方决定是否阻断试跑/发布。
      * DS SHELL 同期 curl 同一 evaluate，exit 1 阻断下游。</p>
      *
@@ -490,6 +491,29 @@ public class IgEtlPublishSideEffects {
             return JSONUtil.parseObj(confJson);
         } catch (Exception e) {
             return JSONUtil.createObj();
+        }
+    }
+
+    /**
+     * 指标作业 SHOULD 绑定 metric_code（命名约束 §2.6）：指标向节点缺省时记 warn，不阻断发布。
+     */
+    private static void warnMissingMetricCode(IgEtlNode n, JSONObject conf, List<String> notes) {
+        if (n == null || conf == null || notes == null) {
+            return;
+        }
+        String purpose = StrUtil.blankToDefault(conf.getStr("purpose"), "").toLowerCase();
+        String nodeType = StrUtil.blankToDefault(n.getNodeType(), "").toLowerCase();
+        boolean metricish = purpose.contains("metric")
+                || "metric".equalsIgnoreCase(conf.getStr("sourceKind"))
+                || nodeType.contains("metric")
+                || StrUtil.isNotBlank(conf.getStr("metricCode"))
+                || StrUtil.isNotBlank(conf.getStr("metric_code"));
+        if (!metricish) {
+            return;
+        }
+        String code = firstNonBlank(conf.getStr("metric_code"), conf.getStr("metricCode"));
+        if (StrUtil.isBlank(code)) {
+            notes.add("metric_code missing on node " + n.getNodeKey() + " (SHOULD bind gov_metric.metric_code)");
         }
     }
 

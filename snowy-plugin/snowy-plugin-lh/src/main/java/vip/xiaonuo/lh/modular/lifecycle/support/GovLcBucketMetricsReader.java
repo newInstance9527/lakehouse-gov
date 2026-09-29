@@ -16,7 +16,7 @@ import java.util.Map;
  * 读 VictoriaMetrics 桶水位（Categraf MinIO → VM），供 {@code /storage/buckets} 与
  * {@code /storage/trend?group=bucket}；不写、不重复采集。
  * <p>
- * 现网未配 {@code lh.lifecycle.vm-import-url} 时返回空，由调用方回退 seed。
+ * 现网未配 {@code lh.lifecycle.vm-import-url} 时返回空；调用方空态，禁止种子回落。
  */
 @Component
 public class GovLcBucketMetricsReader {
@@ -41,7 +41,7 @@ public class GovLcBucketMetricsReader {
     }
 
     /**
-     * Instant 拉桶列表；无点返回空（调用方 seed）。
+     * Instant 拉桶列表；无点返回空。
      */
     public List<BucketSnapshot> listBuckets() {
         if (!available()) {

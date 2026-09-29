@@ -46,26 +46,29 @@ public class CommonPageRequest {
 
         int page = 1;
 
-        //每页条数
-        String pageSizeString = CommonServletUtil.getParamFromRequest(PAGE_SIZE_PARAM_NAME);
-        if (ObjectUtil.isNotEmpty(pageSizeString)) {
-            try {
-                size = Convert.toInt(pageSizeString);
-                if(size > PAGE_SIZE_MAX_VALUE) {
-                    size = PAGE_SIZE_MAX_VALUE;
+        // SSE / 异步 / 定时任务等非 Web 上下文：不读 request，用默认分页
+        if (CommonServletUtil.isWeb()) {
+            //每页条数
+            String pageSizeString = CommonServletUtil.getParamFromRequest(PAGE_SIZE_PARAM_NAME);
+            if (ObjectUtil.isNotEmpty(pageSizeString)) {
+                try {
+                    size = Convert.toInt(pageSizeString);
+                    if(size > PAGE_SIZE_MAX_VALUE) {
+                        size = PAGE_SIZE_MAX_VALUE;
+                    }
+                } catch (Exception e) {
+                    log.error(">>> 分页条数转换异常：", e);
                 }
-            } catch (Exception e) {
-                log.error(">>> 分页条数转换异常：", e);
             }
-        }
 
-        //第几页
-        String pageString = CommonServletUtil.getParamFromRequest(PAGE_PARAM_NAME);
-        if (ObjectUtil.isNotEmpty(pageString)) {
-            try {
-                page = Convert.toInt(pageString);
-            } catch (Exception e) {
-                log.error(">>> 分页页数转换异常：", e);
+            //第几页
+            String pageString = CommonServletUtil.getParamFromRequest(PAGE_PARAM_NAME);
+            if (ObjectUtil.isNotEmpty(pageString)) {
+                try {
+                    page = Convert.toInt(pageString);
+                } catch (Exception e) {
+                    log.error(">>> 分页页数转换异常：", e);
+                }
             }
         }
         Page<T> objectPage = new Page<>(page, size);

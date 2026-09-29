@@ -79,6 +79,8 @@ public class GovLineageServiceImpl implements GovLineageService {
     @Resource
     private IgEtlDagMapper igEtlDagMapper;
     @Resource
+    private vip.xiaonuo.lh.modular.metric.support.GovMetricBindLookup metricBindLookup;
+    @Resource
     private IgEtlNodeMapper igEtlNodeMapper;
     @Resource
     private IgEtlEdgeMapper igEtlEdgeMapper;
@@ -184,14 +186,21 @@ public class GovLineageServiceImpl implements GovLineageService {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("focus", focusKey);
         r.put("source", impactSource);
-        r.put("up", upMeta.values().stream()
+        List<Map<String, Object>> upList = upMeta.values().stream()
                 .map(m -> impactItem(m, "上游", tableJob.get(normalizeTable(m.table)), workspace))
-                .collect(Collectors.toList()));
-        r.put("down", downMeta.values().stream()
+                .collect(Collectors.toList());
+        List<Map<String, Object>> downList = downMeta.values().stream()
                 .map(m -> impactItem(m, "下游", tableJob.get(normalizeTable(m.table)), workspace))
-                .collect(Collectors.toList()));
-        r.put("upCount", upMeta.size());
-        r.put("downCount", downMeta.size());
+                .collect(Collectors.toList());
+        int metricAdded = appendBoundMetrics(downList, focusKey, workspace);
+        if (metricAdded > 0 && !"openmetadata".equals(impactSource)) {
+            r.put("source", impactSource.contains("metric") ? impactSource : impactSource + "+metric");
+        }
+        r.put("up", upList);
+        r.put("down", downList);
+        r.put("upCount", upList.size());
+        r.put("downCount", downList.size());
+        r.put("metricCount", metricAdded);
         return r;
     }
 
@@ -1038,6 +1047,64 @@ public class GovLineageServiceImpl implements GovLineageService {
         m.put("confidence", StrUtil.blankToDefault(meta.confidence, "explicit"));
         m.put("hop", meta.hop);
         return m;
+    }
+
+    /** 将绑定焦点表的指标并入下游 impact（type=指标，可跳转 /metrics?q=） */
+    private int appendBoundMetrics(List<Map<String, Object>> downList, String focusKey, String ws) {
+        if (downList == null || StrUtil.isBlank(focusKey) || metricBindLookup == null) {
+            return 0;
+        }
+        try {
+            vip.xiaonuo.lh.modular.catalog.entity.GovAsset asset = findAssetByTable(focusKey, ws);
+            List<Map<String, Object>> refs = metricBindLookup.metricsBoundToAsset(
+                    ws,
+                    asset == null ? null : asset.getId(),
+                    focusKey,
+                    asset == null ? null : asset.getAssetCode(),
+                    asset == null ? null : asset.getOmFqn());
+            if (refs == null || refs.isEmpty()) {
+                return 0;
+            }
+            Set<String> existing = new HashSet<>();
+            for (Map<String, Object> row : downList) {
+                Object code = row.get("metricCode");
+                if (code != null) {
+                    existing.add(String.valueOf(code).toLowerCase(Locale.ROOT));
+                }
+                Object key = row.get("key");
+                if (key != null) {
+                    existing.add(String.valueOf(key).toLowerCase(Locale.ROOT));
+                }
+            }
+            int added = 0;
+            for (Map<String, Object> ref : refs) {
+                String code = String.valueOf(ref.getOrDefault("metricCode", ""));
+                if (StrUtil.isBlank(code) || existing.contains(code.toLowerCase(Locale.ROOT))) {
+                    continue;
+                }
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("key", code);
+                m.put("metricCode", code);
+                m.put("type", "指标");
+                m.put("layer", "metric");
+                m.put("note", "下游指标 · " + StrUtil.blankToDefault(String.valueOf(ref.get("name")), code));
+                m.put("name", ref.get("name"));
+                m.put("kind", ref.get("kind"));
+                m.put("status", ref.get("status"));
+                m.put("ver", ref.get("ver"));
+                m.put("owner", ref.get("owner"));
+                m.put("bindField", ref.get("bindField"));
+                m.put("path", ref.get("path"));
+                m.put("confidence", "metric_bind");
+                m.put("hop", 0);
+                downList.add(m);
+                existing.add(code.toLowerCase(Locale.ROOT));
+                added++;
+            }
+            return added;
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     private Map<String, Object> impactItem(String table, String dir, String etlJobId, String ws) {

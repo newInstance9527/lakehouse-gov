@@ -5,6 +5,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
 import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -56,6 +57,13 @@ public class GovAiChatController {
     @PostMapping("/lh/ai/sessions")
     public CommonResult<Map<String, Object>> createSession(@RequestBody(required = false) GovAiSessionCreateParam param) {
         return CommonResult.data(govAiChatService.createSession(param == null ? new GovAiSessionCreateParam() : param));
+    }
+
+    @Operation(summary = "删除会话（软删，仅本人）")
+    @CommonLog("删除AI会话")
+    @DeleteMapping("/lh/ai/sessions/{id}")
+    public CommonResult<Map<String, Object>> deleteSession(@PathVariable("id") String id) {
+        return CommonResult.data(govAiChatService.deleteSession(id));
     }
 
     @Operation(summary = "对话（SSE）")

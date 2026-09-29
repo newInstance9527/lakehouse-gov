@@ -28,11 +28,11 @@ public final class PreviewAdapterSupport {
     private PreviewAdapterSupport() {
     }
 
-    static String dsType(LhDatasource ds) {
+    public static String dsType(LhDatasource ds) {
         return StrUtil.blankToDefault(ds == null ? null : ds.getType(), "").toLowerCase(Locale.ROOT);
     }
 
-    static boolean isJdbcSource(LhDatasource ds) {
+    public static boolean isJdbcSource(LhDatasource ds) {
         if (ds == null) {
             return false;
         }
@@ -136,7 +136,7 @@ public final class PreviewAdapterSupport {
                 || raw.contains("ftp") || raw.equals("file") || raw.contains("http");
     }
 
-    static String shortName(String objectName) {
+    public static String shortName(String objectName) {
         String raw = StrUtil.blankToDefault(objectName, "object");
         String[] parts = raw.split("[./]");
         return parts[parts.length - 1];

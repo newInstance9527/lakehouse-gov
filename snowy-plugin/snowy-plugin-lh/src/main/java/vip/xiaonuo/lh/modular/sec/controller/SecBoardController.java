@@ -3,11 +3,18 @@ package vip.xiaonuo.lh.modular.sec.controller;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
+import jakarta.validation.Valid;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
+import vip.xiaonuo.lh.modular.sec.param.SecJobSaIdParam;
+import vip.xiaonuo.lh.modular.sec.param.SecJobSaRegisterParam;
+import vip.xiaonuo.lh.modular.sec.param.SecVaultRotateParam;
 import vip.xiaonuo.lh.modular.sec.service.SecBoardService;
 
 import java.util.Map;
@@ -62,16 +69,38 @@ public class SecBoardController {
         return CommonResult.data(secBoardService.pageAudit(ws, q, current, size));
     }
 
-    @Operation(summary = "作业 SA 列表（P0 合法空）")
+    @Operation(summary = "作业 SA 列表（sec_job_sa，无明文）")
     @GetMapping("/lh/sec/sa")
-    public CommonResult<Map<String, Object>> sa() {
-        return CommonResult.data(secBoardService.listSa());
+    public CommonResult<Map<String, Object>> sa(@RequestParam(required = false) String ws) {
+        return CommonResult.data(secBoardService.listSa(ws));
     }
 
-    @Operation(summary = "Vault 健康/轮换台账（P0 合法空）")
+    @Operation(summary = "注册作业 SA")
+    @CommonLog("注册作业SA")
+    @PostMapping("/lh/sec/sa")
+    public CommonResult<Map<String, Object>> registerSa(@RequestBody @Valid SecJobSaRegisterParam param) {
+        return CommonResult.data(secBoardService.registerSa(param));
+    }
+
+    @Operation(summary = "退役作业 SA")
+    @CommonLog("退役作业SA")
+    @PostMapping("/lh/sec/sa/retire")
+    public CommonResult<String> retireSa(@RequestBody @Valid SecJobSaIdParam param) {
+        secBoardService.retireSa(param.getId());
+        return CommonResult.ok();
+    }
+
+    @Operation(summary = "Vault 健康/轮换台账（ig_secret_store，无明文）")
     @GetMapping("/lh/sec/vault/health")
     public CommonResult<Map<String, Object>> vaultHealth() {
         return CommonResult.data(secBoardService.vaultHealth());
+    }
+
+    @Operation(summary = "Vault 本地动态密轮换（数据源另置 binding stale）")
+    @CommonLog("安全中心Vault轮换")
+    @PostMapping("/lh/sec/vault/rotate")
+    public CommonResult<Map<String, Object>> vaultRotate(@RequestBody @Valid SecVaultRotateParam param) {
+        return CommonResult.data(secBoardService.rotateVault(param.getVaultPath()));
     }
 
     @Operation(summary = "查询路径 allow/forbid 示意")

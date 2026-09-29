@@ -8,6 +8,7 @@ import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum;
 
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 
 public interface SecAuthGrantService {
@@ -17,6 +18,12 @@ public interface SecAuthGrantService {
      * 不含 EDIT/DELETE/MANAGE；假投影（grav_projected≠1）不放行。
      */
     boolean hasTableReadGrant(String assetId);
+
+    /**
+     * 当前用户已 Grav 投影成功的 SELECT 资产 ID（不含 Owner 自有；与 {@link #hasTableReadGrant} 投影谓词一致）。
+     * 供 AI list_my_assets 倒排，避免扫全站资产。
+     */
+    List<String> listGrantedSelectAssetIds(String userId);
 
     /** 资产管理权：拥有者或 MANAGE grant（兼容旧 assetId） */
     boolean hasManageGrant(String assetId);

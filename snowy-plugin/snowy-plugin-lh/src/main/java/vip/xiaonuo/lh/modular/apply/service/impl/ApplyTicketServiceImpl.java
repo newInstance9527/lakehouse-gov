@@ -62,6 +62,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     public static final String TYPE_SCAN_ELEVATE = "scan_elevate";
     /** 质量规则失败修复工单 */
     public static final String TYPE_QUALITY_FIX = "quality_fix";
+    /** Vault 凭证轮换失败（P1 告警工单） */
+    public static final String TYPE_VAULT_ROTATE_FAIL = "vault_rotate_fail";
     /** 脚本/发布包审批（环境与发布 §22） */
     public static final String TYPE_SCRIPT_PUBLISH = "script_publish";
 
@@ -138,7 +140,37 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (TYPE_QUALITY_FIX.equals(type)) {
             return createQualityFix(param, userId);
         }
+        if (TYPE_VAULT_ROTATE_FAIL.equals(type)) {
+            return createVaultRotateFail(param, userId);
+        }
         return createTableRead(param, userId, type);
+    }
+
+    /**
+     * Vault 轮换失败：挂 vaultPath，供安全/平台跟进（不自动重试轮换）。
+     */
+    private ApplyTicket createVaultRotateFail(ApplyTicketCreateParam param, String userId) {
+        String path = StrUtil.blankToDefault(param.getResourceId(), param.getAssetId());
+        ApplyTicket t = newTicketShell(userId, TYPE_VAULT_ROTATE_FAIL, param, "default");
+        t.setTicketNo(nextPrefixedTicketNo("VR-"));
+        JSONObject payload = new JSONObject();
+        payload.set("vaultPath", path);
+        payload.set("resourceType", StrUtil.blankToDefault(param.getResourceType(), "vault"));
+        payload.set("remark", param.getReason());
+        t.setPayload(payload.toString());
+        if (StrUtil.isBlank(t.getTitle())) {
+            t.setTitle("Vault 轮换失败 · " + StrUtil.blankToDefault(path, "path"));
+        }
+        if (StrUtil.isBlank(t.getReason())) {
+            t.setReason(StrUtil.blankToDefault(param.getReason(), "Vault 凭证轮换失败"));
+        }
+        ticketMapper.insert(t);
+        ApplyTicketItem item = newItemShell(userId, t.getId());
+        item.setAssetId(null);
+        item.setAction("VAULT_ROTATE_FAIL");
+        item.setDetail(payload.toString());
+        itemMapper.insert(item);
+        return t;
     }
 
     /**
@@ -1303,6 +1335,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         }
         if ("quality_fix".equals(t) || "quality".equals(t) || "dq".equals(t) || "dq_fix".equals(t)) {
             return TYPE_QUALITY_FIX;
+        }
+        if ("vault_rotate_fail".equals(t) || "vault_fail".equals(t) || "vault_rotate".equals(t)) {
+            return TYPE_VAULT_ROTATE_FAIL;
         }
         return t;
     }

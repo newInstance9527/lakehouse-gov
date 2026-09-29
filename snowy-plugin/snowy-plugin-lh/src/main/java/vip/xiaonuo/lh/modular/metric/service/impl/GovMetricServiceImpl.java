@@ -77,14 +77,6 @@ public class GovMetricServiceImpl implements GovMetricService {
             "deprecated", "已废弃"
     );
 
-    private static final Map<String, String> DOMAIN_MAP = Map.of(
-            "交易", "trade",
-            "用户", "user",
-            "商品", "goods",
-            "流量", "user",
-            "财务", "trade"
-    );
-
     @Resource
     private GovMetricMapper metricMapper;
     @Resource
@@ -117,6 +109,10 @@ public class GovMetricServiceImpl implements GovMetricService {
     private ReconPartitionService reconPartitionService;
     @Resource
     private LhProperties lhProperties;
+    @Resource
+    private vip.xiaonuo.lh.modular.domain.service.GovDomainService govDomainService;
+    @Resource
+    private vip.xiaonuo.lh.modular.metric.support.GovMetricBindLookup metricBindLookup;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -213,7 +209,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         head.setMetricCode(code);
         head.setName(param.getName().trim());
         head.setKind(kind);
-        head.setDomainCode(normalizeDomain(param.getDomain()));
+        head.setDomainCode(govDomainService.requireActive(normalizeDomain(param.getDomain())));
         head.setUnit(StrUtil.blankToDefault(param.getUnit(), ""));
         head.setOwner(StrUtil.blankToDefault(param.getOwner(), ""));
         head.setCurrentVer("v1");
@@ -246,7 +242,8 @@ public class GovMetricServiceImpl implements GovMetricService {
         resolveAtomBindAsset(kind, param, head.getWs());
         head.setName(StrUtil.blankToDefault(param.getName(), head.getName()).trim());
         head.setKind(kind);
-        head.setDomainCode(normalizeDomain(StrUtil.blankToDefault(param.getDomain(), head.getDomainCode())));
+        head.setDomainCode(govDomainService.requireActive(
+                normalizeDomain(StrUtil.blankToDefault(param.getDomain(), head.getDomainCode()))));
         head.setUnit(param.getUnit() != null ? param.getUnit() : head.getUnit());
         head.setOwner(param.getOwner() != null ? param.getOwner() : head.getOwner());
         head.setRemark(param.getRemark() != null ? param.getRemark() : head.getRemark());
@@ -431,6 +428,13 @@ public class GovMetricServiceImpl implements GovMetricService {
         out.put("upstream", upstream);
         out.put("downstream", downstream);
         out.put("physical", physical);
+        Map<String, Object> impact = metricBindLookup.downstreamImpact(head.getMetricCode(), head.getWs());
+        out.put("apiBindings", impact.getOrDefault("apiBindings", List.of()));
+        out.put("apiCount", impact.getOrDefault("apiCount", 0));
+        out.put("downstreamCount", downstream.size());
+        out.put("impactSummary", Map.of(
+                "downstreamMetrics", downstream.size(),
+                "apiBindings", impact.getOrDefault("apiCount", 0)));
         return out;
     }
 
@@ -1136,15 +1140,12 @@ public class GovMetricServiceImpl implements GovMetricService {
         };
     }
 
-    private static String normalizeDomain(String domain) {
+    private String normalizeDomain(String domain) {
         if (StrUtil.isBlank(domain)) {
-            return "trade";
+            return "common";
         }
-        String d = domain.trim();
-        if (DOMAIN_MAP.containsKey(d)) {
-            return DOMAIN_MAP.get(d);
-        }
-        return d.toLowerCase(Locale.ROOT);
+        String resolved = govDomainService.resolveCode(domain);
+        return StrUtil.blankToDefault(resolved, domain.trim().toLowerCase(Locale.ROOT));
     }
 
     private static String formatSampleDay(Date d) {

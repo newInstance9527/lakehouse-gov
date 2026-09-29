@@ -30,10 +30,28 @@ public final class IntentRouter {
                 case "explain" -> "explain";
                 case "sql_opt", "optimize", "sql-opt" -> "sql_opt";
                 case "list_assets", "my_tables" -> "list_assets";
+                case "agent", "explore" -> "agent";
                 default -> classifyByText(text);
             };
         }
         return classifyByText(text);
+    }
+
+    /**
+     * 生成类 scene：不走只读探索智能体，保留固定意图链。
+     */
+    public static boolean isGenerationBypassScene(String scene) {
+        if (StrUtil.isBlank(scene)) {
+            return false;
+        }
+        String s = scene.trim().toLowerCase(Locale.ROOT).replace('-', '_');
+        return switch (s) {
+            case "nl2sql", "write_sql", "sql",
+                 "sql_opt", "optimize",
+                 "gen_script", "write_script", "script",
+                 "api_script", "build_api", "api_build" -> true;
+            default -> false;
+        };
     }
 
     private static String classifyByText(String text) {
@@ -47,7 +65,11 @@ public final class IntentRouter {
         if (containsAny(t, "诊断", "告警", "失败", "根因", "质量分")) {
             return "diagnose";
         }
-        if (containsAny(t, "我有哪些表", "我的表", "可查表", "已授权表", "拥有的表")) {
+        // 须在 nl2sql「查询」关键词之前：否则「我可以查询哪些资源」会误进写 SQL
+        if (containsAny(t,
+                "我有哪些表", "我的表", "可查表", "已授权表", "拥有的表",
+                "哪些资源", "可查资源", "我可以查询", "能查哪些", "有哪些资源",
+                "可访问资源", "授权资源", "我能查", "可以查哪些")) {
             return "list_assets";
         }
         if (containsAny(t, "问数", "是多少", "有多少", "合计多少", "趋势", "环比", "同比")
@@ -87,7 +109,7 @@ public final class IntentRouter {
             case "nl2sql", "sql_opt", "ask_data", "list_assets", "api_script" -> "sql";
             case "gen_script" -> "script";
             case "diagnose" -> "diagnose";
-            case "docqa", "explain" -> "manual";
+            case "docqa", "explain", "agent" -> "manual";
             default -> "manual";
         };
     }

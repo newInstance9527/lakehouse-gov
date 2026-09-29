@@ -3,7 +3,10 @@
 # 导入：夜莺 ≥8.2「告警规则 → 导入 Prometheus 规则」粘贴本文件；再批量挂通知规则。
 #
 # 分级（labels.severity）：critical≈P0/P1 · warning≈P1 · info≈P2（全栈 §30.3/§30.4）
-# 通知对象：导入后按 append 标签路由到「平台组」；表/桶 owner 依赖后续目录认责标签（残留）。
+# 通知对象：
+#   - 表级 / 空间配额：route=owner，读 series 标签 owner（目录 tech/biz owner；空=unassigned）
+#   - 桶级 / 全仓 absent：仍 route=platform（桶 owner 未投影）
+# 夜莺侧：为 route=owner 配「按标签 owner 找人」；unassigned 回落平台组。
 
 groups:
   - name: lh-storage-c4
@@ -16,10 +19,10 @@ groups:
         labels:
           severity: critical
           domain: storage
-          route: platform
+          route: owner
         annotations:
-          summary: "表 {{ $labels.fqtn }} days-to-full(p95)={{ $value }}d < 45"
-          description: "分段线性预测写回 VM（C2）。深链 /lifecycle/storage?fqtn={{ $labels.fqtn }}&ws={{ $labels.ws }}"
+          summary: "表 {{ $labels.fqtn }} days-to-full(p95)={{ $value }}d < 45 · owner={{ $labels.owner }}"
+          description: "分段线性预测写回 VM。认责 {{ $labels.owner }}（unassigned→平台组）。深链 /lifecycle/storage?fqtn={{ $labels.fqtn }}&ws={{ $labels.ws }}"
           runbook: "扩容或治理回收；勿在存储趋势页直接执行 compaction"
 
       - alert: LhBucketDaysToFullBelow45
@@ -55,17 +58,18 @@ groups:
           description: "生命周期「桶水位 >80%」；与门户 buckets.alert 同源指标。"
 
       - alert: LhWorkspaceStorageQuotaOver80Pct
-        # 空间配额 §28.1：须另有作业/旁路把 gov_ws_quota 投影为下列指标（见 README 残留）
+        # 空间配额 §28.1：日批投影 gov_ws_quota + table_stat → lh_ws_storage_*
         expr: |
           (lh_ws_storage_used_bytes / on(ws) lh_ws_storage_quota_bytes) >= 0.8
+          and on(ws) lh_ws_storage_quota_bytes > 0
         for: 15m
         labels:
           severity: warning
           domain: workspace
-          route: platform
+          route: owner
         annotations:
-          summary: "空间 {{ $labels.ws }} 存储配额使用率 ≥ 80%（{{ $value }}）"
-          description: "熔断前置（§28.1）。深链 /workspace?ws={{ $labels.ws }}。指标未写入时本规则不会触发。"
+          summary: "空间 {{ $labels.ws }} 存储配额使用率 ≥ 80%（{{ $value }}）· owner={{ $labels.owner }}"
+          description: "熔断前置（§28.1）。认责 {{ $labels.owner }}。深链 /workspace?ws={{ $labels.ws }}"
 
       # —— 3. 表级采集断流（日批 24h 无点）——
       - alert: LhTableStorageCollectStale24h
@@ -74,10 +78,10 @@ groups:
         labels:
           severity: critical
           domain: storage
-          route: platform
+          route: owner
         annotations:
-          summary: "表 {{ $labels.fqtn }} 存储画像断流 >24h"
-          description: "job.storage.profile_daily 应对齐写 lh_table_storage_*。平台组排查 Trino/VM import。"
+          summary: "表 {{ $labels.fqtn }} 存储画像断流 >24h · owner={{ $labels.owner }}"
+          description: "job.storage.profile_daily 应对齐写 lh_table_storage_*。认责 {{ $labels.owner }}；平台组协查 Trino/VM import。"
 
       - alert: LhTableStorageCollectAbsent25h
         # 整仓无任何 total 点（日批整体失败）
@@ -98,10 +102,10 @@ groups:
         labels:
           severity: warning
           domain: lifecycle
-          route: platform
+          route: owner
         annotations:
-          summary: "表 {{ $labels.fqtn }} 小文件占比 {{ $value }} > 30%"
-          description: "对齐 §32.2；建议深链 /lifecycle?table={{ $labels.fqtn }}&action=compact（二次确认）。"
+          summary: "表 {{ $labels.fqtn }} 小文件占比 {{ $value }} > 30% · owner={{ $labels.owner }}"
+          description: "对齐 §32.2；建议深链 /lifecycle?table={{ $labels.fqtn }}&action=compact（二次确认）。认责 {{ $labels.owner }}"
 
       - alert: LhTableSmallFileWorsening
         # compaction 赶不上 ingest：占比超阈且日环比上升
@@ -112,10 +116,10 @@ groups:
         labels:
           severity: critical
           domain: lifecycle
-          route: platform
+          route: owner
         annotations:
-          summary: "表 {{ $labels.fqtn }} 小文件恶化（>30% 且环比升）"
-          description: "compaction SLA 未达标（§23.3/§32.2）。挂表 owner 后改 route。"
+          summary: "表 {{ $labels.fqtn }} 小文件恶化（>30% 且环比升）· owner={{ $labels.owner }}"
+          description: "compaction SLA 未达标（§23.3/§32.2）。认责 {{ $labels.owner }}"
 
       - alert: LhTableAvgFileSizeTooSmall
         expr: lh_table_storage_avg_file_bytes > 0 and lh_table_storage_avg_file_bytes < 33554432
@@ -123,7 +127,7 @@ groups:
         labels:
           severity: info
           domain: lifecycle
-          route: platform
+          route: owner
         annotations:
-          summary: "表 {{ $labels.fqtn }} 活跃文件均大小 < 32MiB（{{ $value }}）"
+          summary: "表 {{ $labels.fqtn }} 活跃文件均大小 < 32MiB（{{ $value }}）· owner={{ $labels.owner }}"
           description: "与 small_file_ratio 互补；避免仅看文件数刷屏。"

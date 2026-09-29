@@ -149,6 +149,8 @@ lh:
     profile-daily-enabled: false
     profile-table-timeout-ms: 60000
     profile-max-tables: 200
+    # 表级画像并发（1–8）；单表内元数据 SQL 仍串行
+    profile-concurrency: 4
     # J4：事件驱动采集仅 L3；冷却防风暴
     event-collect-enabled: true
     event-collect-cooldown-minutes: 30

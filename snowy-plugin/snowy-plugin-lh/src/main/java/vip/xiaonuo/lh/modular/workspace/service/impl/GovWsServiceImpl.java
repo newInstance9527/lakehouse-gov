@@ -9,6 +9,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
@@ -138,7 +139,7 @@ public class GovWsServiceImpl implements GovWsService {
         row.setPreferredSchemas(StrUtil.blankToDefault(param.getPreferredSchemas(), "—"));
         row.setOwners(StrUtil.blankToDefault(user.getName(), user.getAccount()));
         row.setDetail(StrUtil.blankToDefault(param.getDetail(),
-                "已创建团队空间；列表默认跟随本空间。跨团队发现请发布到企业共享层。读数请走申请中心。"));
+                "已创建团队空间；列表默认跟随本空间。读数请走申请中心。"));
         row.setTagsJson("[{\"text\":\"新建\",\"cls\":\"tag-blue\"},{\"text\":\"空间优先\",\"cls\":\"tag-gray\"}]");
         if (giteaClient != null && giteaClient.enabled()) {
             String ensureErr = giteaClient.ensureRepo(code, row.getId());
@@ -576,7 +577,15 @@ public class GovWsServiceImpl implements GovWsService {
             pref.setUpdateTime(now);
             prefMapper.updateById(pref);
         }
-        Map<String, Object> out = getCurrent();
+        // 勿在写事务内调用 getCurrent()：其 myRole/resolve 路径会吞掉 SQL 异常，
+        // 导致事务已被标 rollback-only 却正常返回 → UnexpectedRollbackException。
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("wsCode", code);
+        out.put("sharedCatalog", SHARED_CATALOG);
+        out.put("name", w.getName());
+        out.put("domainCode", w.getDomainCode());
+        out.put("member", member);
+        out.put("myRole", myRole(code));
         out.put("nonMemberConfirmed", !member && force);
         return out;
     }
@@ -694,6 +703,8 @@ public class GovWsServiceImpl implements GovWsService {
         return wsMapper.selectList(new QueryWrapper<GovWs>().lambda()
                 .eq(GovWs::getDeleteFlag, NOT_DELETE)
                 .eq(GovWs::getStatus, STATUS_ACTIVE)
+                .ne(GovWs::getWsCode, "enterprise")
+                .ne(GovWs::getWsKind, "enterprise")
                 .orderByAsc(GovWs::getDomainCode)
                 .orderByAsc(GovWs::getWsCode));
     }
@@ -728,7 +739,9 @@ public class GovWsServiceImpl implements GovWsService {
                     return w.getWsCode();
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            // 写事务内不可吞掉：DataAccessException 已被标 rollback-only
+            rethrowIfInTransaction(e);
             // 未登录时概览/列表仍可用默认
         }
         // 无用户偏好时软上下文为平台 default（不造演示域空间）
@@ -741,8 +754,20 @@ public class GovWsServiceImpl implements GovWsService {
                     .eq(GovAsset::getDeleteFlag, NOT_DELETE)
                     .eq(GovAsset::getWs, wsCode));
         } catch (Exception e) {
+            rethrowIfInTransaction(e);
             return 0L;
         }
+    }
+
+    /** 写事务中吞掉 RuntimeException 会触发 UnexpectedRollbackException */
+    private static void rethrowIfInTransaction(Exception e) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            return;
+        }
+        if (e instanceof RuntimeException re) {
+            throw re;
+        }
+        throw new CommonException(StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
     }
 
     private long countMembers(String wsCode) {
@@ -763,6 +788,7 @@ public class GovWsServiceImpl implements GovWsService {
                             .or().eq(GovWsMember::getSubjectId, u.getAccount())));
             return list.isEmpty() ? null : list.get(0).getRoleCode();
         } catch (Exception e) {
+            rethrowIfInTransaction(e);
             return null;
         }
     }

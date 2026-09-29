@@ -1,10 +1,12 @@
 package vip.xiaonuo.lh.modular.observability.service.impl;
 
+import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
+import vip.xiaonuo.lh.core.ws.LhWsFilters;
 import vip.xiaonuo.lh.modular.observability.entity.GovObsSpan;
 import vip.xiaonuo.lh.modular.observability.mapper.GovObsSpanMapper;
 import vip.xiaonuo.lh.modular.observability.service.LhObsSpanService;
@@ -219,6 +221,143 @@ public class LhObsSpanServiceImpl implements LhObsSpanService {
         r.put("neighbors", ns);
         r.put("source", "gov_obs_span");
         return r;
+    }
+
+    @Override
+    public Map<String, Object> ingest(Map<String, Object> body) {
+        List<Map<String, Object>> items = new ArrayList<>();
+        if (body != null && body.get("spans") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> m) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> row = (Map<String, Object>) m;
+                    items.add(row);
+                }
+            }
+        } else if (body != null && !body.isEmpty()) {
+            items.add(body);
+        }
+        int inserted = 0;
+        List<String> ids = new ArrayList<>();
+        for (Map<String, Object> item : items) {
+            GovObsSpan span = fromIngest(item);
+            spanMapper.insert(span);
+            ids.add(span.getId());
+            inserted++;
+        }
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("inserted", inserted);
+        r.put("ids", ids);
+        r.put("ok", true);
+        r.put("source", "gov_obs_span");
+        return r;
+    }
+
+    @Override
+    public void recordComponentSpan(String ws, String linkId, String service, String op, String status,
+                                    String runId, String eventId, String error, String attrsJson) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ws", ws);
+        body.put("linkId", linkId);
+        body.put("service", service);
+        body.put("op", op);
+        body.put("status", status);
+        body.put("runId", runId);
+        body.put("eventId", eventId);
+        body.put("error", error);
+        body.put("attrsJson", attrsJson);
+        Date now = new Date();
+        body.put("startTs", now);
+        body.put("endTs", now);
+        body.put("durationMs", 0L);
+        ingest(body);
+    }
+
+    private GovObsSpan fromIngest(Map<String, Object> item) {
+        GovObsSpan s = new GovObsSpan();
+        s.setId(IdUtil.getSnowflakeNextIdStr());
+        s.setWs(StrUtil.blankToDefault(str(item.get("ws")), "default"));
+        String traceId = str(item.get("traceId"));
+        if (StrUtil.isBlank(traceId)) {
+            traceId = "trc-" + s.getId();
+        }
+        s.setTraceId(traceId);
+        String spanId = str(item.get("spanId"));
+        if (StrUtil.isBlank(spanId)) {
+            spanId = "spn-" + s.getId();
+        }
+        s.setSpanId(spanId);
+        s.setParentSpanId(str(item.get("parentSpanId")));
+        s.setLinkId(StrUtil.blankToDefault(str(item.get("linkId")), "C").toUpperCase(Locale.ROOT));
+        s.setService(StrUtil.blankToDefault(str(item.get("service")), "lakehouse"));
+        s.setOp(StrUtil.blankToDefault(str(item.get("op")), "span"));
+        s.setStatus(StrUtil.blankToDefault(str(item.get("status")), "ok"));
+        Date start = parseDate(item.get("startTs"));
+        Date end = parseDate(item.get("endTs"));
+        if (start == null) {
+            start = new Date();
+        }
+        if (end == null) {
+            end = start;
+        }
+        s.setStartTs(start);
+        s.setEndTs(end);
+        Long dur = asLong(item.get("durationMs"));
+        if (dur == null) {
+            dur = Math.max(0L, end.getTime() - start.getTime());
+        }
+        s.setDurationMs(dur);
+        s.setRunId(str(item.get("runId")));
+        s.setEventId(str(item.get("eventId")));
+        s.setError(str(item.get("error")));
+        Object attrs = item.get("attrsJson");
+        if (attrs == null) {
+            attrs = item.get("attrs");
+        }
+        s.setAttrsJson(attrs == null ? null : (attrs instanceof String ? (String) attrs : String.valueOf(attrs)));
+        s.setDeleteFlag(NOT_DELETE);
+        s.setCreateTime(new Date());
+        return s;
+    }
+
+    private static Date parseDate(Object o) {
+        if (o == null) {
+            return null;
+        }
+        if (o instanceof Date d) {
+            return d;
+        }
+        if (o instanceof Number n) {
+            return new Date(n.longValue());
+        }
+        String s = String.valueOf(o).trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        try {
+            return new Date(Long.parseLong(s));
+        } catch (NumberFormatException ignored) {
+            // fallthrough
+        }
+        try {
+            return cn.hutool.core.date.DateUtil.parse(s);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Long asLong(Object o) {
+        if (o == null) {
+            return null;
+        }
+        if (o instanceof Number n) {
+            return n.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(o));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static Map<String, Object> toSpanRow(GovObsSpan s) {

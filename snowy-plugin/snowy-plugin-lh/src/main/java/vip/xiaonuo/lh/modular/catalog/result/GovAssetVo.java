@@ -103,10 +103,10 @@ public class GovAssetVo {
     @Schema(description = "归属工作空间（home_ws）")
     private String ws;
 
-    @Schema(description = "门户可见性")
+    @Schema(description = "门户可见性（遗留；现仅 private_ws）")
     private String visibility;
 
-    @Schema(description = "企业共享状态")
+    @Schema(description = "遗留共享状态（企业共享已废除）")
     private String shareStatus;
 
     @Schema(description = "乐观锁")

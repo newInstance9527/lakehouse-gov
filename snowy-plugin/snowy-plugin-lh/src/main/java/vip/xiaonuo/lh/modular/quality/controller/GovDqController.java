@@ -20,6 +20,7 @@ import vip.xiaonuo.lh.modular.quality.param.GovDqIdParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqPageParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqRunAddParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqRuleUpsertParam;
+import vip.xiaonuo.lh.modular.quality.param.GovDqStreamProbeParam;
 import vip.xiaonuo.lh.modular.quality.result.GovDqRuleVo;
 import vip.xiaonuo.lh.modular.quality.service.GovDqService;
 
@@ -126,6 +127,14 @@ public class GovDqController {
         return CommonResult.data(govDqService.upsertGate(param));
     }
 
+    @Operation(summary = "删除门禁（软删）")
+    @CommonLog("删除质量门禁")
+    @PostMapping("/lh/quality/gates/delete")
+    public CommonResult<String> deleteGate(@RequestBody @Valid GovDqIdParam param) {
+        govDqService.deleteGate(param);
+        return CommonResult.ok();
+    }
+
     @Operation(summary = "从失败规则开工单")
     @CommonLog("质量开工单")
     @PostMapping("/lh/quality/tickets")
@@ -138,5 +147,12 @@ public class GovDqController {
     @PostMapping("/lh/quality/sync-om")
     public CommonResult<Map<String, Object>> syncOm(@RequestParam(required = false) String ws) {
         return CommonResult.data(govDqService.syncOm(ws));
+    }
+
+    @Operation(summary = "流式探针回调（Flink→VM lh_dq_stream_*；不阻断 DAG）")
+    @CommonLog("质量流式探针")
+    @PostMapping("/lh/quality/rules/stream-probe")
+    public CommonResult<Map<String, Object>> streamProbe(@RequestBody GovDqStreamProbeParam param) {
+        return CommonResult.data(govDqService.streamProbe(param));
     }
 }

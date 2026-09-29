@@ -1,0 +1,27 @@
+# VictoriaMetrics 单节点（存储趋势 / 质量 / 基础设施共用时序库）
+# 用法：docker compose -f docker-compose.yml up -d
+# 门户：lh.lifecycle.vm-import-url=http://127.0.0.1:8428（本地）或 http://127.0.0.1:8428（现网）
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:v1.106.1
+    container_name: lh-victoria-metrics
+    ports:
+      - "8428:8428"
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-retentionPeriod=400d"
+      - "-httpListenAddr=:8428"
+      - "-maxInsertRequestSize=33554432"
+      - "-search.maxQueryDuration=30s"
+      # 与 DB 同机时务必限缓存，避免默认吃掉 ~60% 主机内存
+      - "-memory.allowedPercent=5"
+      - "-memory.allowedBytes=512MB"
+    mem_limit: 768m
+    volumes:
+      - ${LAKEHOUSE_ROOT:-.}/data/victoria-metrics:/victoria-metrics-data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8428/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5

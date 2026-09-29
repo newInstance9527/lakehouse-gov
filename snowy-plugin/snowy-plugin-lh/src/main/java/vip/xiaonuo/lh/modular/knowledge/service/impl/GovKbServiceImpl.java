@@ -345,7 +345,18 @@ public class GovKbServiceImpl implements GovKbService {
         entryQw.lambda()
                 .eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
                 .eq(GovKbEntry::getStatus, "ready");
-        // 全局检索：不按 ws / scope 过滤
+        // 传 ws 时：本空间 workspace 条目 +（可选）platform；不传则全局（兼容旧调用）
+        if (StrUtil.isNotBlank(param.getWs())) {
+            String ws = param.getWs().trim();
+            boolean includePlatform = !Boolean.FALSE.equals(param.getIncludePlatform());
+            entryQw.lambda().and(w -> {
+                w.eq(GovKbEntry::getWs, ws);
+                if (includePlatform) {
+                    w.or().eq(GovKbEntry::getScope, SCOPE_PLATFORM)
+                            .or().eq(GovKbEntry::getWs, WS_PLATFORM);
+                }
+            });
+        }
         if (param.getCats() != null && !param.getCats().isEmpty()) {
             entryQw.lambda().in(GovKbEntry::getCat, param.getCats());
         }

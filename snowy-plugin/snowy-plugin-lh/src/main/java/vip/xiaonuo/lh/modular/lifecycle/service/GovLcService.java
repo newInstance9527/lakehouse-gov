@@ -23,6 +23,12 @@ public interface GovLcService {
 
     List<Map<String, Object>> topStorage(String ws, Integer limit);
 
+    /** 分区归档候选（有 partition_expire_days 的策略表）；无策略时为空列表 */
+    List<Map<String, Object>> archiveCandidates(String ws);
+
+    /** 合规工单只读预览（深链 /compliance）；空列表合法 */
+    List<Map<String, Object>> compliancePreview(String ws, Integer limit);
+
     Map<String, Object> stats(String ws, String tableFqn);
 
     List<GovLcPolicyVo> listPolicies(String ws);

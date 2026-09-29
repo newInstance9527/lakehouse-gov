@@ -69,15 +69,40 @@ public final class GovLcProcedureSql {
                 + "dry_run => " + dryRun + ")";
     }
 
-    /** 分区过期：P0 用注释 + 可选 DELETE 占位；正式接表属性/自定义作业 */
+    /**
+     * 日作业第 4 步：候选分区列表（读 Iceberg {@code .partitions} 元数据）+ 冷桶迁移模板。
+     * 默认 dry-run：只写出候选清单 SQL；物理迁冷桶须人工确认后改 {@code dry_run => false}。
+     * 对齐 doc/生命周期.md §5.2。
+     */
     public static String partitionExpirePlaceholder(String tableFqn, GovLcPolicy policy) {
+        return partitionArchiveStep(tableFqn, policy, "s3a://archive/iceberg");
+    }
+
+    public static String partitionArchiveStep(String tableFqn, GovLcPolicy policy, String coldBucketPrefix) {
         Integer days = policy != null ? policy.getPartitionExpireDays() : null;
         if (days == null || days <= 0) {
-            return "-- skip partition expire for " + tableFqn + " (no partition_expire_days)";
+            return "-- skip partition archive for " + escape(tableFqn) + " (no partition_expire_days)";
         }
-        return "-- partition expire candidate: table=" + escape(tableFqn)
-                + " older_than_days=" + days
-                + "\nSELECT 1 AS _lh_lc_partition_expire_probe";
+        String fqn = escape(tableFqn);
+        String cold = escape(StrUtil.blankToDefault(coldBucketPrefix, "s3a://archive/iceberg"));
+        String cutoff = TS.format(Instant.now().minusSeconds(days * 86400L));
+        List<String> lines = new ArrayList<>();
+        lines.add("-- §5.2 archive candidates: table=" + fqn + " older_than_days=" + days
+                + " cutoff_utc=" + cutoff);
+        lines.add("-- 1) list candidate partitions from Iceberg metadata (no data scan)");
+        lines.add("CREATE OR REPLACE TEMP VIEW _lh_lc_archive_cand_" + safeIdent(tableFqn) + " AS "
+                + "SELECT '" + fqn + "' AS table_fqn, partition, file_count, "
+                + "CAST(NULL AS BIGINT) AS total_size_bytes "
+                + "FROM " + fqn + ".partitions "
+                + "WHERE 1=1 /* filter older_than in job params / partition transforms */");
+        lines.add("SELECT * FROM _lh_lc_archive_cand_" + safeIdent(tableFqn));
+        lines.add("-- 2) cold-bucket migrate TEMPLATE (dry-run；确认后去掉 dry_run 注释并改写 location)");
+        lines.add("-- CALL " + "spark_catalog" + ".system.rewrite_data_files("
+                + "table => '" + fqn + "', "
+                + "options => map('target-location', '" + cold + "/" + fqn.replace('.', '/') + "')) "
+                + "/* dry_run: do not execute until approved */");
+        lines.add("SELECT COUNT(*) AS candidate_partitions FROM _lh_lc_archive_cand_" + safeIdent(tableFqn));
+        return String.join("\n", lines);
     }
 
     public static String script(List<String> statements) {

@@ -122,12 +122,14 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     private GovAssetPreviewRouter previewRouter;
     @Resource
     private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
+    @Resource
+    private vip.xiaonuo.lh.modular.domain.service.GovDomainService govDomainService;
 
     @Override
     public Page<GovAssetVo> page(GovAssetPageParam param) {
         QueryWrapper<GovAsset> qw = new QueryWrapper<GovAsset>().checkSqlInjection();
         qw.lambda().eq(GovAsset::getDeleteFlag, NOT_DELETE);
-        // 空间优先：缺省 scope=workspace；enterprise=已发布共享层；all=特权巡检
+        // 空间优先：缺省 scope=workspace；all=特权巡检
         applyListScope(qw, param);
         String ws = StrUtil.trim(param.getWs());
 
@@ -216,6 +218,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         extras.put("omMeta", loadOmMetaInternal(asset));
         extras.put("quality", crossModuleExtras.buildQuality(asset, objectName));
         extras.put("lineage", crossModuleExtras.buildLineage(asset, objectName));
+        extras.put("metrics", crossModuleExtras.buildMetrics(asset, objectName));
         extras.put("standard", crossModuleExtras.buildStandard(asset, objectName, schema));
         extras.put("lifecycle", crossModuleExtras.buildLifecycle(asset, objectName));
         extras.put("gold", buildGoldExtra(asset, extras.get("omMeta")));
@@ -328,7 +331,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             throw new CommonException("数据源不存在: {}", param.getDsId());
         }
         GovAssetLayerEnum.validate(param.getLayer());
-        String domain = param.getDomain().trim().toLowerCase(Locale.ROOT);
+        String domain = govDomainService.requireActive(param.getDomain());
         String objectName = param.getObjectName().trim();
         String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
 
@@ -464,7 +467,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             asset.setLayer(param.getLayer().trim().toLowerCase(Locale.ROOT));
         }
         if (StrUtil.isNotBlank(param.getDomain())) {
-            asset.setDomainCode(param.getDomain().trim().toLowerCase(Locale.ROOT));
+            asset.setDomainCode(govDomainService.requireActive(param.getDomain()));
         }
         if (param.getName() != null) {
             asset.setName(param.getName());
@@ -707,12 +710,7 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         m.put("layers", Arrays.stream(GovAssetLayerEnum.values())
                 .map(e -> Map.of("value", e.getValue(), "label", e.getLabel()))
                 .toList());
-        m.put("domains", List.of(
-                Map.of("value", "trade", "label", "交易域"),
-                Map.of("value", "user", "label", "用户域"),
-                Map.of("value", "product", "label", "商品域"),
-                Map.of("value", "marketing", "label", "营销域"),
-                Map.of("value", "finance", "label", "财务域")));
+        m.put("domains", govDomainService.options());
         m.put("sensitivities", List.of(
                 Map.of("value", "public", "label", "公开"),
                 Map.of("value", "internal", "label", "内部"),
@@ -748,49 +746,22 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         return govAssetMetaDriftReconcile.listOpen(ws, limit);
     }
 
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public GovAssetVo publishShare(GovAssetIdParam param) {
-        GovAsset asset = requireAsset(param.getId());
-        asset.setVisibility("shared_enterprise");
-        asset.setShareStatus("published");
-        asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
-        asset.setUpdateTime(new Date());
-        this.updateById(asset);
-        return detail(param);
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public GovAssetVo unpublishShare(GovAssetIdParam param) {
-        GovAsset asset = requireAsset(param.getId());
-        asset.setVisibility("private_ws");
-        asset.setShareStatus("none");
-        asset.setRevision(asset.getRevision() == null ? 1 : asset.getRevision() + 1);
-        asset.setUpdateTime(new Date());
-        this.updateById(asset);
-        return detail(param);
-    }
-
     /**
-     * workspace（默认）：按 home_ws 筛；enterprise：已发布共享；all：不过滤归属。
+     * workspace（默认）：按 home_ws 筛；all：不过滤归属。
      * 兼容：未传 scope 但传了 ws → 按 workspace；二者皆空 → 回落 default 空间（禁止隐式全局）。
+     * 企业共享 scope=enterprise 已废除，按本空间处理。
      */
     private void applyListScope(QueryWrapper<GovAsset> qw, GovAssetPageParam param) {
         String scope = StrUtil.trim(param.getScope());
         String ws = StrUtil.trim(param.getWs());
         if (StrUtil.isBlank(scope)) {
-            scope = StrUtil.isNotBlank(ws) ? "workspace" : "workspace";
+            scope = "workspace";
         }
         String s = scope.toLowerCase(Locale.ROOT);
-        if ("enterprise".equals(s)) {
-            qw.lambda().and(w -> w.in(GovAsset::getVisibility, "shared_enterprise", "listed_public")
-                    .or().eq(GovAsset::getShareStatus, "published"));
-            return;
-        }
         if ("all".equals(s)) {
             return;
         }
+        // enterprise 等历史 scope 一律按本空间
         String home = StrUtil.blankToDefault(ws, "default");
         qw.lambda().eq(GovAsset::getWs, home);
     }

@@ -99,14 +99,4 @@ public interface GovAssetService extends IService<GovAsset> {
      * 打开中的漂移单列表
      */
     List<Map<String, Object>> listMetaDrifts(String ws, Integer limit);
-
-    /**
-     * 发布到企业共享层（仅门户可见性；不写 Grav ACL）
-     */
-    GovAssetVo publishShare(GovAssetIdParam param);
-
-    /**
-     * 从企业共享层撤回
-     */
-    GovAssetVo unpublishShare(GovAssetIdParam param);
 }

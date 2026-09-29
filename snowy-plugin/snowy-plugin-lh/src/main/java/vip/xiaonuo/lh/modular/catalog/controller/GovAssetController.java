@@ -135,18 +135,4 @@ public class GovAssetController {
             @RequestParam(required = false) Integer limit) {
         return CommonResult.data(govAssetService.listMetaDrifts(ws, limit));
     }
-
-    @Operation(summary = "发布到企业共享层（门户可见；不写 Grav）")
-    @CommonLog("资产发布企业共享")
-    @PostMapping("/lh/catalog/assets/publish-share")
-    public CommonResult<GovAssetVo> publishShare(@RequestBody @Valid GovAssetIdParam param) {
-        return CommonResult.data(govAssetService.publishShare(param));
-    }
-
-    @Operation(summary = "撤回企业共享")
-    @CommonLog("资产撤回企业共享")
-    @PostMapping("/lh/catalog/assets/unpublish-share")
-    public CommonResult<GovAssetVo> unpublishShare(@RequestBody @Valid GovAssetIdParam param) {
-        return CommonResult.data(govAssetService.unpublishShare(param));
-    }
 }

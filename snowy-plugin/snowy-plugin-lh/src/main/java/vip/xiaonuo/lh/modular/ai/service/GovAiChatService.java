@@ -22,6 +22,9 @@ public interface GovAiChatService {
 
     Map<String, Object> createSession(GovAiSessionCreateParam param);
 
+    /** 软删会话（仅本人；turns 保留审计） */
+    Map<String, Object> deleteSession(String sessionId);
+
     SseEmitter chat(GovAiChatParam param);
 
     Map<String, Object> runSql(GovAiRunSqlParam param);

@@ -67,6 +67,20 @@ public class GovLcController {
         return CommonResult.data(govLcService.topStorage(ws, limit));
     }
 
+    @Operation(summary = "分区归档候选（策略 partition_expire_days；空列表合法）")
+    @GetMapping({"/lh/lifecycle/archive-candidates", "/api/governance/lifecycle/archive-candidates"})
+    public CommonResult<List<Map<String, Object>>> archiveCandidates(@RequestParam(required = false) String ws) {
+        return CommonResult.data(govLcService.archiveCandidates(ws));
+    }
+
+    @Operation(summary = "合规删除工单只读预览（深链 /compliance）")
+    @GetMapping({"/lh/lifecycle/compliance/preview", "/api/governance/lifecycle/compliance/preview"})
+    public CommonResult<List<Map<String, Object>>> compliancePreview(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(govLcService.compliancePreview(ws, limit));
+    }
+
     @Operation(summary = "单表快照/小文件/策略指标")
     @GetMapping({"/lh/lifecycle/stats", "/api/governance/lifecycle/stats"})
     public CommonResult<Map<String, Object>> stats(

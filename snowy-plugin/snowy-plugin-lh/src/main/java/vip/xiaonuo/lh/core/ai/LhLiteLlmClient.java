@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * LiteLLM OpenAI 兼容客户端（P0）
@@ -101,6 +102,26 @@ public class LhLiteLlmClient {
     }
 
     public Map<String, Object> chatProbe(String model, List<Map<String, String>> messages) {
+        List<Map<String, Object>> msgs = new ArrayList<>();
+        if (messages != null) {
+            for (Map<String, String> m : messages) {
+                if (m == null) {
+                    continue;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("role", m.get("role"));
+                row.put("content", m.get("content"));
+                msgs.add(row);
+            }
+        }
+        return chatWithTools(model, msgs, null);
+    }
+
+    /**
+     * Chat Completions（支持 tools）。ok=true 时含 content、tool_calls。
+     */
+    public Map<String, Object> chatWithTools(String model, List<Map<String, Object>> messages,
+                                             List<Map<String, Object>> tools) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", false);
         if (!available()) {
@@ -118,6 +139,10 @@ public class LhLiteLlmClient {
             body.set("model", useModel);
             body.set("messages", messages);
             body.set("temperature", 0.2);
+            if (tools != null && !tools.isEmpty()) {
+                body.set("tools", tools);
+                body.set("tool_choice", "auto");
+            }
             Map<String, Object> http = postJsonResult("/v1/chat/completions", body.toString());
             out.put("httpStatus", http.get("httpStatus"));
             out.put("model", useModel);
@@ -131,29 +156,58 @@ public class LhLiteLlmClient {
                 return out;
             }
             JSONObject root = JSONUtil.parseObj(resp);
-            String upstreamErr = extractUpstreamError(root);
-            if (StrUtil.isNotBlank(upstreamErr)) {
-                out.put("error", upstreamErr);
-                return out;
-            }
-            JSONArray choices = root.getJSONArray("choices");
-            if (choices == null || choices.isEmpty()) {
-                out.put("error", "上游响应无 choices");
-                return out;
-            }
-            JSONObject msg = choices.getJSONObject(0).getJSONObject("message");
-            String content = msg == null ? null : msg.getStr("content");
-            if (StrUtil.isBlank(content)) {
-                out.put("error", "上游返回空 completion");
-                return out;
-            }
-            out.put("ok", true);
-            out.put("content", content);
+            Map<String, Object> parsed = LhChatTools.parseAssistantMessage(root);
+            out.putAll(parsed);
             return out;
         } catch (Exception e) {
             out.put("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
             return out;
         }
+    }
+
+    /**
+     * 流式 Chat Completions（无 tools）。onDelta 为 content 增量。
+     */
+    public Map<String, Object> chatStream(String model, List<Map<String, Object>> messages,
+                                          Consumer<String> onDelta) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", false);
+        if (!available()) {
+            out.put("error", "LiteLLM 未启用或 litellm-url 为空");
+            return out;
+        }
+        LhProperties.Ai ai = lhProperties.getAi();
+        String useModel = StrUtil.blankToDefault(model, ai.getDefaultChatModel());
+        if (StrUtil.isBlank(useModel) || messages == null || messages.isEmpty()) {
+            out.put("error", "模型或消息为空");
+            return out;
+        }
+        try {
+            String base = StrUtil.removeSuffix(ai.getLitellmUrl().trim(), "/");
+            String url = base + "/v1/chat/completions";
+            JSONObject body = new JSONObject();
+            body.set("model", useModel);
+            body.set("messages", messages);
+            body.set("temperature", 0.2);
+            body.set("stream", true);
+            String masterKey = ai.getLitellmMasterKey();
+            Map<String, Object> streamed = LhOpenAiSseStream.stream(url, masterKey, body.toString(), onDelta);
+            streamed.put("model", useModel);
+            return streamed;
+        } catch (Exception e) {
+            out.put("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return out;
+        }
+    }
+
+    public Map<String, Object> chatStreamSimple(String model, String system, String user,
+                                                Consumer<String> onDelta) {
+        List<Map<String, Object>> msgs = new ArrayList<>();
+        if (StrUtil.isNotBlank(system)) {
+            msgs.add(Map.of("role", "system", "content", system));
+        }
+        msgs.add(Map.of("role", "user", "content", StrUtil.nullToEmpty(user)));
+        return chatStream(model, msgs, onDelta);
     }
 
     /**

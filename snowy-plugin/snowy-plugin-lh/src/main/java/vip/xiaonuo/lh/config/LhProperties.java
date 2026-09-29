@@ -431,6 +431,10 @@ public class LhProperties {
         private int profileTableTimeoutMs = 60_000;
         private int profileMaxTables = 200;
         /**
+         * 画像表级并发（1–8，默认 4）。单表仍串行 SQL（files→all_files→snapshots→partitions）。
+         */
+        private int profileConcurrency = 4;
+        /**
          * 事件驱动采集（Iceberg commit 钩子）：仅 L3 低频表；默认开。
          * L1/L2 高频 CDC 禁止走本通道，避免采集风暴。
          */
@@ -539,7 +543,7 @@ public class LhProperties {
     public static class Quality {
         /**
          * 门户基址（DS Worker curl evaluate / runs）。例 http://dev3:82。
-         * 空则 SHELL 仅按嵌入的 block 标志裁决，仍写 runs 由试跑/发布侧完成。
+         * 空且质量节点 blockOnFail=true → SHELL fail-closed（exit 1）；blockOnFail=false 时跳过。
          */
         private String govBaseUrl = "";
         /** 写 VictoriaMetrics（复用 lifecycle.vm-import-url）；false=跳过 */

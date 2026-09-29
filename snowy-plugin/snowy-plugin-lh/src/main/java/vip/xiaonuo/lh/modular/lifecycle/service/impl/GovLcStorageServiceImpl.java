@@ -8,16 +8,23 @@ import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcOrphanScan;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcPolicy;
+import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcRun;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcStorageAdvice;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcStorageChangePoint;
 import vip.xiaonuo.lh.modular.lifecycle.entity.GovLcTableStat;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcOrphanScanMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcPolicyMapper;
+import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcRunMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcStorageAdviceMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcStorageChangePointMapper;
 import vip.xiaonuo.lh.modular.lifecycle.mapper.GovLcTableStatMapper;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcStorageService;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcBucketMetricsReader;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcMetadataSql;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageAssetEnricher;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageCaliberMath;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcTableMetricsReader;
+import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.modular.observability.support.LhFinOpsRates;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWsQuota;
@@ -42,7 +49,8 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 存储趋势 P0：三口径从 {@code gov_lc_table_stat} 派生；建议/变更点读真表；VM 接入后替换派生逻辑。
+ * 存储趋势：三口径优先读画像 {@code gov_lc_table_stat}（日批真值）；时序/预测读 VM {@code lh_table_storage_*}。
+ * 无数据时空态；禁止种子桶 / 合成日曲线 / 启发式可回收。
  */
 @Service
 public class GovLcStorageServiceImpl implements GovLcStorageService {
@@ -68,6 +76,14 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     @Resource
     private GovLcBucketMetricsReader bucketMetricsReader;
     @Resource
+    private GovLcTableMetricsReader tableMetricsReader;
+    @Resource
+    private GovLcStorageAssetEnricher assetEnricher;
+    @Resource
+    private GovLcRunMapper runMapper;
+    @Resource
+    private TrinoClient trinoClient;
+    @Resource
     private GovWsMapper govWsMapper;
     @Resource
     private GovWsQuotaMapper govWsQuotaMapper;
@@ -84,7 +100,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         long netGrowth = rows.stream().mapToLong(TableCaliber::netGrowthBytes).sum();
 
         // 桶为基础设施维度，不随空间软过滤收窄
-        List<Map<String, Object>> bucketList = buckets(null);
+        List<Map<String, Object>> bucketList = bucketRows(null);
         Map<String, Object> tightest = bucketList.stream()
                 .filter(b -> b.get("daysToFullP95") instanceof Number)
                 .min(Comparator.comparingDouble(b -> ((Number) b.get("daysToFullP95")).doubleValue()))
@@ -111,10 +127,13 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         long profiled = rows.stream().filter(TableCaliber::profiled).count();
         out.put("profiledTables", profiled);
         out.put("source", profiled > 0
-                ? "gov_lc_table_stat(trino $files/$snapshots); 桶级见 buckets.source"
-                : "gov_lc_table_stat(seed)+gov_lc_storage_*; 桶级见 buckets.source");
-        out.put("caliberNote", "active+reclaimable=physical（P0 派生；正式由 lh_table_storage_* 承接）");
-        out.put("bucketSource", bucketMetricsReader.available() ? "vm-or-seed" : "seed");
+                ? (tableMetricsReader.available()
+                ? "gov_lc_table_stat(profile)+lh_table_storage_*; buckets=" + (bucketMetricsReader.available() ? "vm" : "empty")
+                : "gov_lc_table_stat(profile); VM 未配")
+                : "empty");
+        out.put("caliberNote", "active+reclaimable=physical；无画像/无 VM 时 KPI 为 0");
+        out.put("bucketSource", bucketMetricsReader.available() ? "vm" : "empty");
+        GovLcStorageCaliberMath.assertHolds(out);
         return out;
     }
 
@@ -130,25 +149,33 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         long totalNow = activeNow + reclaimNow;
 
         List<Map<String, Object>> daily = new ArrayList<>();
-        LocalDate today = LocalDate.now();
-        for (int i = days - 1; i >= 0; i--) {
-            LocalDate d = today.minusDays(i);
-            double factor = 1.0 - (i * (0.0035));
-            long total = Math.round(totalNow * factor);
-            long active = Math.round(activeNow * factor);
-            long reclaim = Math.max(0, total - active);
+        List<GovLcTableMetricsReader.DailyCaliber> vmDaily = tableMetricsReader.dailyAggregate(filterWs, days);
+        if (!vmDaily.isEmpty()) {
+            for (GovLcTableMetricsReader.DailyCaliber d : vmDaily) {
+                Map<String, Object> point = new LinkedHashMap<>();
+                point.put("day", d.date().format(DAY_FMT));
+                point.put("date", d.date().toString());
+                point.put("totalBytes", d.totalBytes());
+                point.put("activeBytes", d.activeBytes());
+                point.put("reclaimableBytes", d.reclaimableBytes());
+                daily.add(point);
+            }
+        }
+        // 无 VM 日序列：不合成假曲线；仅当有当日画像时给单点
+        if (daily.isEmpty() && totalNow > 0) {
+            LocalDate today = LocalDate.now();
             Map<String, Object> point = new LinkedHashMap<>();
-            point.put("day", d.format(DAY_FMT));
-            point.put("date", d.toString());
-            point.put("totalBytes", total);
-            point.put("activeBytes", active);
-            point.put("reclaimableBytes", reclaim);
+            point.put("day", today.format(DAY_FMT));
+            point.put("date", today.toString());
+            point.put("totalBytes", totalNow);
+            point.put("activeBytes", activeNow);
+            point.put("reclaimableBytes", reclaimNow);
             daily.add(point);
         }
 
         List<Map<String, Object>> series;
         if ("bucket".equals(grp)) {
-            series = buckets(null).stream().map(b -> {
+            series = bucketRows(null).stream().map(b -> {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("key", b.get("bucket"));
                 m.put("totalBytes", b.get("usedBytes"));
@@ -208,15 +235,55 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
                 .toList();
 
         Map<String, Object> forecast = new LinkedHashMap<>();
-        if (days >= 15) {
-            forecast.put("available", true);
-            forecast.put("p50DaysToFull", 62);
-            forecast.put("p95DaysToFull", 48);
-            forecast.put("note", "API stub；日批已派生 lh_table_storage_days_to_full 写 VM（现网 VM URL 未配则跳过）");
-        } else {
+        GovLcTableMetricsReader.ForecastSnap snap = tableMetricsReader.forecast(filterWs);
+        if (days < 15) {
             forecast.put("available", false);
             forecast.put("reason", "INSUFFICIENT");
-            forecast.put("note", "样本不足 15 天，不出预测");
+            forecast.put("note", "窗口不足 15 天，不出预测");
+        } else if (snap.p50DaysToFull() == null && snap.p95DaysToFull() == null) {
+            forecast.put("available", false);
+            forecast.put("reason", snap.sampleSeries() <= 0 ? "NO_SERIES" : "INSUFFICIENT");
+            forecast.put("note", tableMetricsReader.available()
+                    ? "VM 无 days_to_full 点（需日批样本≥15 天）"
+                    : "未配置 lh.lifecycle.vm-import-url");
+            forecast.put("source", snap.source());
+        } else {
+            forecast.put("available", true);
+            forecast.put("p50DaysToFull", snap.p50DaysToFull() == null ? null : Math.round(snap.p50DaysToFull()));
+            forecast.put("p95DaysToFull", snap.p95DaysToFull() == null ? null : Math.round(snap.p95DaysToFull()));
+            forecast.put("sampleSeries", snap.sampleSeries());
+            forecast.put("source", snap.source());
+            forecast.put("note", "读 lh_table_storage_days_to_full（日批派生）");
+            long capacity = lhProperties.getLifecycle() != null
+                    ? lhProperties.getLifecycle().getForecastDefaultCapacityBytes()
+                    : 20L * TB;
+            forecast.put("capacityBytes", capacity);
+            Double p50 = snap.p50DaysToFull();
+            Double p95 = snap.p95DaysToFull();
+            List<Map<String, Object>> band = new ArrayList<>();
+            LocalDate today = LocalDate.now();
+            int horizon = Math.min(120, Math.max(7, (int) Math.ceil(Math.max(
+                    p50 != null && p50 > 0 ? p50 : 30,
+                    p95 != null && p95 > 0 ? p95 : 30))));
+            for (int i = 0; i <= horizon; i++) {
+                LocalDate d = today.plusDays(i);
+                Map<String, Object> pt = new LinkedHashMap<>();
+                pt.put("date", d.toString());
+                pt.put("day", d.format(DAY_FMT));
+                if (p50 != null && p50 > 0) {
+                    pt.put("p50Bytes", Math.min(capacity,
+                            Math.round(totalNow + (capacity - totalNow) * (i / p50))));
+                }
+                if (p95 != null && p95 > 0) {
+                    pt.put("p95Bytes", Math.min(capacity,
+                            Math.round(totalNow + (capacity - totalNow) * (i / p95))));
+                }
+                band.add(pt);
+            }
+            forecast.put("band", band);
+            if (p95 != null && p95 > 0 && totalNow < capacity) {
+                forecast.put("capacityIntersectDate", today.plusDays(Math.round(p95)).toString());
+            }
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -229,10 +296,10 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         out.put("changePoints", changePoints);
         out.put("forecast", forecast);
         out.put("source", "bucket".equals(grp)
-                ? (bucketMetricsReader.available()
-                ? "lh_bucket_storage_*|minio_* via VM; seed fallback"
-                : "seed buckets; configure lh.lifecycle.vm-import-url + Categraf")
-                : "gov_lc_table_stat(seed); table series VM P1");
+                ? (bucketMetricsReader.available() ? "lh_bucket_storage_* via VM" : "empty")
+                : (tableMetricsReader.available() && !vmDaily.isEmpty()
+                ? "lh_table_storage_* via VM"
+                : (totalNow > 0 ? "gov_lc_table_stat(profile) snapshot-only" : "empty")));
         return out;
     }
 
@@ -304,15 +371,23 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         }
 
         List<Map<String, Object>> curve = new ArrayList<>();
-        LocalDate today = LocalDate.now();
-        for (int i = days - 1; i >= 0; i--) {
-            LocalDate d = today.minusDays(i);
-            double factor = 1.0 - (i * 0.004);
+        List<GovLcTableMetricsReader.DailyCaliber> vmCurve = tableMetricsReader.dailyForTable(workspace, fqn, days);
+        if (!vmCurve.isEmpty()) {
+            for (GovLcTableMetricsReader.DailyCaliber d : vmCurve) {
+                Map<String, Object> p = new LinkedHashMap<>();
+                p.put("date", d.date().toString());
+                p.put("activeBytes", d.activeBytes());
+                p.put("totalBytes", d.totalBytes());
+                p.put("reclaimableBytes", d.reclaimableBytes());
+                curve.add(p);
+            }
+        } else {
+            // 无 VM 历史：只给当日画像点，不合成斜线
             Map<String, Object> p = new LinkedHashMap<>();
-            p.put("date", d.toString());
-            p.put("activeBytes", Math.round(hit.activeBytes() * factor));
-            p.put("totalBytes", Math.round(hit.totalBytes() * factor));
-            p.put("reclaimableBytes", Math.round(hit.reclaimableBytes() * factor));
+            p.put("date", LocalDate.now().toString());
+            p.put("activeBytes", hit.activeBytes());
+            p.put("totalBytes", hit.totalBytes());
+            p.put("reclaimableBytes", hit.reclaimableBytes());
             curve.add(p);
         }
 
@@ -322,16 +397,16 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
                 .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE)
                 .last("LIMIT 1"));
 
+        Map<String, Object> partitionHint = queryPartitionsLive(fqn, hit.partitionCount());
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ws", workspace);
         out.put("fqtn", fqn);
         out.put("range", rangeLabel(days));
         out.put("row", caliberToTableRow(hit));
         out.put("curve", curve);
-        out.put("partitionHint", Map.of(
-                "note", "P0 stub；正式查 Iceberg $partitions",
-                "partitionCount", hit.partitionCount()
-        ));
+        out.put("curveSource", vmCurve.isEmpty() ? "profile-snapshot" : "vm");
+        out.put("partitionHint", partitionHint);
         out.put("policy", policy == null ? null : Map.of(
                 "keepCount", policy.getKeepCount(),
                 "keepDays", policy.getKeepDays(),
@@ -340,29 +415,66 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         ));
         out.put("deepLink", Map.of(
                 "lifecycle", "/lifecycle?table=" + fqn + "&from=storage-trend",
-                "catalog", "/catalog?q=" + fqn
+                "catalog", "/catalog?q=" + fqn,
+                "querygov", "/querygov?ws=" + workspace + "&range=" + rangeLabel(days)
         ));
+        // 最近三次生命周期作业
+        List<GovLcRun> runs = runMapper.selectList(new QueryWrapper<GovLcRun>().lambda()
+                .eq(GovLcRun::getDeleteFlag, NOT_DELETE)
+                .eq(GovLcRun::getTableFqn, fqn)
+                .orderByDesc(GovLcRun::getStartedAt)
+                .last("LIMIT 3"));
+        List<Map<String, Object>> recentRuns = new ArrayList<>();
+        for (GovLcRun run : runs) {
+            Map<String, Object> rr = new LinkedHashMap<>();
+            rr.put("runId", run.getId());
+            rr.put("kind", run.getKind());
+            rr.put("status", run.getStatus());
+            rr.put("startedAt", run.getStartedAt());
+            rr.put("finishedAt", run.getFinishedAt());
+            recentRuns.add(rr);
+        }
+        out.put("recentRuns", recentRuns);
+        Integer snapCount = hit.snapshotCount();
+        out.put("snapshotAge", Map.of(
+                "snapshotCount", snapCount == null ? 0 : snapCount,
+                "note", snapCount == null || snapCount <= 0
+                        ? "无快照计数"
+                        : "快照数 " + snapCount + "（年龄明细需 $snapshots 扩展）"
+        ));
+        GovLcStorageAssetEnricher.AssetMeta meta = assetEnricher.resolve(fqn);
+        if (meta != null) {
+            out.put("owner", meta.owner());
+            if (StrUtil.isNotBlank(meta.layer())) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> row = (Map<String, Object>) out.get("row");
+                if (row != null) {
+                    row.put("layer", meta.layer());
+                    row.put("layerSource", "gov_asset");
+                    row.put("owner", meta.owner());
+                }
+            }
+        }
         return out;
     }
 
     @Override
-    public List<Map<String, Object>> buckets(String ws) {
+    public Map<String, Object> buckets(String ws) {
         String workspace = wsOrDefault(ws);
         List<Map<String, Object>> list = new ArrayList<>();
+        boolean vmConfigured = bucketMetricsReader.available();
         List<GovLcBucketMetricsReader.BucketSnapshot> fromVm = bucketMetricsReader.listBuckets();
+        String family = null;
         if (!fromVm.isEmpty()) {
             long nowSec = System.currentTimeMillis() / 1000L;
             for (GovLcBucketMetricsReader.BucketSnapshot snap : fromVm) {
                 list.add(bucketFromVm(snap, nowSec));
+                if (family == null && StrUtil.isNotBlank(snap.source())) {
+                    family = snap.source();
+                }
             }
-        } else {
-            // 无 VM / 无点：对齐演示 + §11 热/温/冷；正式读 Categraf→VM
-            list.add(bucket("iceberg-ods", 1.2 * TB, 8L * TB, 62, "warm", "seed"));
-            list.add(bucket("iceberg-dwd", 1.6 * TB, 8L * TB, 148, "warm", "seed"));
-            list.add(bucket("iceberg-dws", 0.3 * TB, 4L * TB, 365, "warm", "seed"));
-            list.add(bucket("archive", 0.3 * TB, 4L * TB, 999, "cold", "seed"));
-            list.add(bucket("clickhouse-hot", 1.1 * TB, 2L * TB, 88, "hot", "seed"));
         }
+        // 无 VM / 无点：空列表合法，禁止演示桶回落
 
         List<GovLcOrphanScan> scans = orphanScanMapper.selectList(new QueryWrapper<GovLcOrphanScan>().lambda()
                 .eq(GovLcOrphanScan::getWs, workspace)
@@ -376,7 +488,34 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
                 b.put("orphanCandidateBytes", orphanByBucket.get(name));
             }
         }
-        return list;
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ws", workspace);
+        out.put("vmConfigured", vmConfigured);
+        // 验收契约：Categraf→VM 有点时顶层 source 必须以 vm: 开头
+        if (!list.isEmpty()) {
+            out.put("source", "vm:" + StrUtil.blankToDefault(family, "lh_bucket_storage_*"));
+        } else if (vmConfigured) {
+            out.put("source", "vm:empty");
+            out.put("hint", "VM 已配但无桶 series；确认 Categraf MinIO 已写入 lh_bucket_storage_* / minio_bucket_*");
+        } else {
+            out.put("source", "unconfigured");
+            out.put("hint", "未配置 lh.lifecycle.vm-import-url");
+        }
+        out.put("list", list);
+        out.put("count", list.size());
+        return out;
+    }
+
+    /** 从 {@link #buckets(String)} 信封取出 list，兼容调用方按行遍历。 */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> bucketRows(String ws) {
+        Map<String, Object> payload = buckets(ws);
+        Object list = payload == null ? null : payload.get("list");
+        if (list instanceof List<?> raw) {
+            return (List<Map<String, Object>>) raw;
+        }
+        return List.of();
     }
 
     @Override
@@ -469,7 +608,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
             long active = rows.stream().mapToLong(TableCaliber::activeBytes).sum();
             long total = rows.stream().mapToLong(TableCaliber::totalBytes).sum();
             long net = rows.stream().mapToLong(TableCaliber::netGrowthBytes).sum();
-            long quotaBytes = quotaByWs.getOrDefault(code, 20L * TB);
+            long quotaBytes = quotaByWs.getOrDefault(code, 0L);
             BigDecimal storageCost = LhFinOpsRates.storageCost(total, days, perTb);
             totalCostAll = totalCostAll.add(storageCost);
             Map<String, Object> row = new LinkedHashMap<>();
@@ -478,10 +617,10 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
             row.put("totalBytes", total);
             row.put("netGrowthBytes", net);
             row.put("quotaBytes", quotaBytes);
-            row.put("quotaPct", pct(total, quotaBytes));
+            row.put("quotaPct", quotaBytes > 0 ? pct(total, quotaBytes) : null);
             row.put("storageCost", storageCost);
             row.put("storageCostLabel", LhFinOpsRates.formatCny(storageCost));
-            row.put("owner", ownerByWs.getOrDefault(code, "platform"));
+            row.put("owner", ownerByWs.getOrDefault(code, "—"));
             row.put("status", quotaBytes > 0 && total * 100.0 / quotaBytes >= 80 ? "QUOTA_WARN" : "ok");
             list.add(row);
         }
@@ -532,8 +671,8 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
     }
 
     /**
-     * P0 三口径派生：size_bytes 视为活跃量；可回收按小文件/快照/告警启发式估。
-     * 正式由 Iceberg 元数据 → VM 的 active/total/reclaimable 取代。
+     * 三口径：仅用画像日批回写的 active/reclaimable；未画像时 size_bytes 作活跃、可回收=0。
+     * 禁止启发式编造可回收/小文件率。
      */
     private TableCaliber derive(GovLcTableStat s, GovLcPolicy policy, int days) {
         long avgFile = nvl(s.getAvgFileBytes());
@@ -549,30 +688,15 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
             active = s.getActiveBytes();
             reclaimable = nvl(s.getReclaimableBytes());
             smallRatio = s.getSmallFileRatio() == null ? 0 : s.getSmallFileRatio().doubleValue();
-        } else {
+        } else if (profiled) {
             active = nvl(s.getSizeBytes());
-            smallRatio = 0;
-            if (avgFile > 0 && avgFile < 32L * 1024 * 1024) {
-                smallRatio = Math.min(0.95, 32.0 * 1024 * 1024 / avgFile * 0.15);
-            }
-            if (files > 200) {
-                smallRatio = Math.max(smallRatio, Math.min(0.9, files / 1500.0));
-            }
+            reclaimable = nvl(s.getReclaimableBytes());
+            smallRatio = s.getSmallFileRatio() == null ? 0 : s.getSmallFileRatio().doubleValue();
+        } else {
+            // 未画像：不进 Top 假水位；仍可展示 size 若有，可回收一律 0
+            active = nvl(s.getSizeBytes());
             reclaimable = 0;
-            if (smallRatio > 0.3) {
-                reclaimable += Math.round(active * 0.08);
-            }
-            if (policy != null && policy.getKeepDays() != null && policy.getKeepDays() <= 3) {
-                reclaimable += Math.round(active * 0.07);
-            } else if (s.getSnapshotCount() != null && s.getSnapshotCount() > 15) {
-                reclaimable += Math.round(active * 0.05);
-            }
-            if ("warn".equalsIgnoreCase(StrUtil.blankToDefault(s.getStatus(), "ok"))) {
-                reclaimable = Math.max(reclaimable, Math.round(active * 0.12));
-            }
-            if (reclaimable == 0) {
-                reclaimable = Math.round(active * 0.05);
-            }
+            smallRatio = s.getSmallFileRatio() == null ? 0 : s.getSmallFileRatio().doubleValue();
         }
 
         String attr = "business_growth";
@@ -588,10 +712,10 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
 
         long total = active + reclaimable;
         long netGrowth = Math.round(active * (growthWindow / 100.0));
-        boolean anomaly = (growthWindow > 20 && netGrowth >= 10 * GB)
+        boolean anomaly = profiled && ((growthWindow > 20 && netGrowth >= 10 * GB)
                 || (total > 0 && reclaimable * 100.0 / total > 40)
                 || smallRatio > 0.30
-                || (growthWindow > 5 && netGrowth >= 10 * GB && "warn".equalsIgnoreCase(s.getStatus()));
+                || (growthWindow > 5 && netGrowth >= 10 * GB && "warn".equalsIgnoreCase(s.getStatus())));
 
         String advice = "catalog";
         if ("small_file".equals(attr)) {
@@ -600,7 +724,7 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
             advice = "expire";
         }
 
-        int partitions = Math.max(1, (int) Math.min(files / 8, 500));
+        int partitions = 0;
         return new TableCaliber(
                 StrUtil.blankToDefault(s.getWs(), WS_DEFAULT),
                 s.getTableFqn(),
@@ -631,7 +755,23 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         m.put("ws", r.ws());
         m.put("fqtn", r.fqtn());
         m.put("tableFqn", r.fqtn());
-        m.put("layer", r.layer());
+        String layer = r.layer();
+        String owner = null;
+        String layerSource = "policy-or-stat";
+        GovLcStorageAssetEnricher.AssetMeta meta = assetEnricher.resolve(r.fqtn());
+        if (meta != null) {
+            if (StrUtil.isNotBlank(meta.layer())) {
+                layer = meta.layer();
+                layerSource = "gov_asset";
+            }
+            owner = meta.owner();
+            if (StrUtil.isNotBlank(meta.ws()) && StrUtil.isBlank(r.ws())) {
+                m.put("ws", meta.ws());
+            }
+        }
+        m.put("layer", layer);
+        m.put("layerSource", layerSource);
+        m.put("owner", owner);
         m.put("activeBytes", r.activeBytes());
         m.put("totalBytes", r.totalBytes());
         m.put("reclaimableBytes", r.reclaimableBytes());
@@ -651,7 +791,8 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         m.put("deepLink", Map.of(
                 "lifecycle", "/lifecycle?table=" + r.fqtn() + "&action=" + r.suggestedAction() + "&from=storage-trend",
                 "catalog", "/catalog?q=" + r.fqtn(),
-                "workspace", "/workspace?ws=" + r.ws()
+                "workspace", "/workspace?ws=" + r.ws(),
+                "querygov", "/querygov?ws=" + r.ws() + "&range=30d"
         ));
         return m;
     }
@@ -755,6 +896,113 @@ public class GovLcStorageServiceImpl implements GovLcStorageService {
         m.put("alert", ttfP95 < 45 ? "danger" : (ttfP95 < 90 ? "warn" : "ok"));
         m.put("source", source);
         return m;
+    }
+
+    /** @deprecated 禁止种子调用；保留签名避免误用编译引用 */
+    @Deprecated
+    @SuppressWarnings("unused")
+    private void noSeedBuckets() {
+        // intentionally empty
+    }
+
+    @Override
+    public Map<String, Object> reportExport(String ws, String range, String format) {
+        String filterWs = normalizeFilterWs(ws);
+        int days = parseRangeDays(range);
+        String fmt = StrUtil.blankToDefault(format, "csv").toLowerCase(Locale.ROOT);
+        Map<String, Object> page = tables(filterWs, rangeLabel(days), null, "all", "totalBytes", "desc", 1, 500);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> list = (List<Map<String, Object>>) page.getOrDefault("list", List.of());
+        Map<String, Object> sum = summary(filterWs, rangeLabel(days));
+
+        StringBuilder sb = new StringBuilder();
+        if ("md".equals(fmt) || "markdown".equals(fmt)) {
+            sb.append("# 存储日报 ").append(rangeLabel(days)).append("\n\n");
+            sb.append("- 物理: ").append(sum.get("physicalBytes")).append("\n");
+            sb.append("- 活跃: ").append(sum.get("activeBytes")).append("\n");
+            sb.append("- 可回收: ").append(sum.get("reclaimableBytes")).append("\n\n");
+            sb.append("| fqtn | layer | total | active | reclaimable | growth% |\n|---|---|---:|---:|---:|---:|\n");
+            for (Map<String, Object> r : list) {
+                sb.append("| ").append(r.get("fqtn")).append(" | ").append(r.get("layer"))
+                        .append(" | ").append(r.get("totalBytes")).append(" | ").append(r.get("activeBytes"))
+                        .append(" | ").append(r.get("reclaimableBytes")).append(" | ").append(r.get("growthPct"))
+                        .append(" |\n");
+            }
+        } else {
+            sb.append("fqtn,layer,totalBytes,activeBytes,reclaimableBytes,growthPct,fileCount,smallFileRatio\n");
+            for (Map<String, Object> r : list) {
+                sb.append(csv(r.get("fqtn"))).append(',')
+                        .append(csv(r.get("layer"))).append(',')
+                        .append(r.get("totalBytes")).append(',')
+                        .append(r.get("activeBytes")).append(',')
+                        .append(r.get("reclaimableBytes")).append(',')
+                        .append(r.get("growthPct")).append(',')
+                        .append(r.get("fileCount")).append(',')
+                        .append(r.get("smallFileRatio")).append('\n');
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ws", filterWs);
+        out.put("range", rangeLabel(days));
+        out.put("format", "md".equals(fmt) || "markdown".equals(fmt) ? "md" : "csv");
+        out.put("rowCount", list.size());
+        out.put("content", sb.toString());
+        out.put("filename", "storage-report-" + rangeLabel(days) + ("md".equals(fmt) ? ".md" : ".csv"));
+        out.put("note", list.isEmpty() ? "无画像表；空导出合法" : "治理角色可读；内容来自 gov_lc_table_stat / VM");
+        return out;
+    }
+
+    private Map<String, Object> queryPartitionsLive(String fqn, int fallbackCount) {
+        Map<String, Object> hint = new LinkedHashMap<>();
+        hint.put("partitionCount", fallbackCount);
+        hint.put("source", "none");
+        try {
+            String catalog = lhProperties.getLifecycle() != null
+                    ? StrUtil.blankToDefault(lhProperties.getLifecycle().getSparkCatalog(), "iceberg")
+                    : "iceberg";
+            if (StrUtil.isBlank(catalog)) {
+                catalog = "iceberg";
+            }
+            GovLcMetadataSql.TableRef ref = GovLcMetadataSql.parse(fqn, catalog);
+            String sql = GovLcMetadataSql.partitions(ref);
+            TrinoClient.ExecuteOptions opts = TrinoClient.ExecuteOptions.job(5);
+            opts.catalog = ref.catalog();
+            opts.schema = ref.schema();
+            opts.timeoutMs = 15_000;
+            opts.source = "job.lifecycle";
+            opts.clientTags = "job.lifecycle,storage-detail";
+            Map<String, Object> exec = trinoClient.execute(sql, opts);
+            if (Boolean.TRUE.equals(exec.get("degraded"))) {
+                hint.put("note", String.valueOf(exec.get("message")));
+                hint.put("source", "degraded");
+                return hint;
+            }
+            Object rowsObj = exec.get("rows");
+            if (rowsObj instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Map<?, ?> map) {
+                Object n = map.get("partition_count");
+                if (n == null && !map.isEmpty()) {
+                    n = map.values().iterator().next();
+                }
+                long count = n instanceof Number ? ((Number) n).longValue() : Long.parseLong(String.valueOf(n));
+                hint.put("partitionCount", count);
+                hint.put("source", "trino $partitions");
+                hint.put("note", "即时读 Iceberg 元数据");
+                return hint;
+            }
+            hint.put("note", "$partitions 无行");
+        } catch (Exception e) {
+            hint.put("note", "查询 $partitions 失败: " + StrUtil.maxLength(e.getMessage(), 160));
+            hint.put("source", "error");
+        }
+        return hint;
+    }
+
+    private static String csv(Object v) {
+        String s = v == null ? "" : String.valueOf(v);
+        if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+            return "\"" + s.replace("\"", "\"\"") + "\"";
+        }
+        return s;
     }
 
     private double growthForLayer(List<TableCaliber> rows, String layer) {

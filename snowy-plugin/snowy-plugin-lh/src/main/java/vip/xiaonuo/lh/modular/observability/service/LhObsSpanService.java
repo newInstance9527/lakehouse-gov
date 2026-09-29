@@ -16,4 +16,11 @@ public interface LhObsSpanService {
                                   long current, long size);
 
     Map<String, Object> spanError(String spanId, String ws);
+
+    /** 批量/单条写入 gov_obs_span；body.spans 或单对象 */
+    Map<String, Object> ingest(Map<String, Object> body);
+
+    /** ETL/质量失败同源写 span（soft-fail 调用方） */
+    void recordComponentSpan(String ws, String linkId, String service, String op, String status,
+                             String runId, String eventId, String error, String attrsJson);
 }

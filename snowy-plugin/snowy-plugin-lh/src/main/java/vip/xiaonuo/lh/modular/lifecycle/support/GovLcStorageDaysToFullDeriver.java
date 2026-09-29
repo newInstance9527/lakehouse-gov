@@ -75,6 +75,7 @@ public class GovLcStorageDaysToFullDeriver {
                 long total = longVal(row.get("totalBytes"));
                 long reclaimable = longVal(row.get("reclaimableBytes"));
                 String layer = row.get("layer") == null ? null : String.valueOf(row.get("layer"));
+                String owner = row.get("owner") == null ? null : String.valueOf(row.get("owner"));
                 long capacity = bucketMetricsReader.capacityForLayer(layer);
                 if (capacity <= 0) {
                     capacity = fallbackCapacity;
@@ -98,7 +99,7 @@ public class GovLcStorageDaysToFullDeriver {
                     continue;
                 }
                 lines.addAll(GovLcStorageMetricsFormatter.formatDaysToFull(
-                        fqn, ws, layer, result.p50Days(), result.p95Days(), dayTsMs));
+                        fqn, ws, layer, owner, result.p50Days(), result.p95Days(), dayTsMs));
                 written++;
                 row.put("daysToFullP50", result.p50Days());
                 row.put("daysToFullP95", result.p95Days());

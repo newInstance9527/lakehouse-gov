@@ -44,6 +44,16 @@ MinIO 默认常常**没有**桶级配额指标。容量优先级：
 | `rename_to_lh.example.toml` | 可选：把 MinIO 名 rename 成平台 `lh_bucket_storage_*` |
 | `capacity_overlay.prom` | 可选：静态 capacity 样本（按现网桶名改） |
 
-## 现网状态（2026-09-23）
+## 现网状态
 
-**未探测到 Categraf / VictoriaMetrics（8428 等）**。本目录为配置与门户接线交付；`lh.lifecycle.vm-import-url` 默认空 → `buckets`/`trend` 回退 seed，days-to-full 用 yaml 桶覆盖 + 软上限。配好 VM 与本采集后无需改代码即可切真源。
+联调可先起本地 VM：见 [`ops/victoria-metrics`](../victoria-metrics) 与一键部署清单 [`ops/storage-collect/DEPLOY.md`](../storage-collect/DEPLOY.md)。
+
+**生产若未部署 Categraf**：桶级 `storage/buckets` / `trend?group=bucket` 为空态（禁止 seed）；days-to-full 容量仍可读 `lh.lifecycle.bucket-capacity-bytes` / 软上限。配好 Categraf→VM 后无需改门户代码即可切真桶水位。
+
+**VM 已部署**：配 `lh.lifecycle.vm-import-url` 后表级日批直写 `lh_table_storage_*` / `lh_ws_storage_*`。
+
+## VM 写入权限与限流
+
+- Categraf remote_write / scrape → 同一 VM；门户日批走 `import/prometheus`，与本模块**分通道同库**
+- 抓取间隔 ≥15min，禁止压垮 MinIO metrics 端点（全栈 §30.2）
+- 生产对 VM `:8428` 做网段 ACL；冒烟脚本见 `ops/storage-collect/smoke-vm.*`

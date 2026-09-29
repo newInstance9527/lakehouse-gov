@@ -36,6 +36,8 @@ import vip.xiaonuo.lh.modular.compliance.mapper.GovDelRequestMapper;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcDsLauncher;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcRunEffectWriter;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageAdviceWriter;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageChangePointWriter;
+import vip.xiaonuo.lh.modular.export.service.ExportBoardService;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -82,23 +84,27 @@ public class GovLcServiceImpl implements GovLcService {
     @Resource
     private GovLcStorageAdviceWriter adviceWriter;
     @Resource
+    private GovLcStorageChangePointWriter changePointWriter;
+    @Resource
     private GovLcRunEffectWriter effectWriter;
     @Resource
     private GovDelRequestMapper govDelRequestMapper;
+    @Resource
+    private ExportBoardService exportBoardService;
 
     @Override
     public Map<String, Object> overview(String ws) {
         String workspace = listWs(ws);
-        // 总存储 = 物理口径，与 /lh/lifecycle/storage/summary 同源（三口径）
+        // 总存储 = 物理口径，与 /lh/lifecycle/storage/summary 同源（三口径）；无画像时为 0
         Map<String, Object> summary = govLcStorageService.summary(workspace, "30d");
         long physicalBytes = toLong(summary.get("physicalBytes"));
         long activeBytes = toLong(summary.get("activeBytes"));
         long reclaimableBytes = toLong(summary.get("reclaimableBytes"));
 
         List<GovLcTableStat> stats = listStats(workspace);
-        long warnTables = stats.stream().filter(s -> !"ok".equalsIgnoreCase(StrUtil.blankToDefault(s.getStatus(), "ok"))).count();
-        long archiveCandidates = stats.stream()
-                .filter(s -> StrUtil.containsIgnoreCase(StrUtil.blankToDefault(s.getPolicyLabel(), ""), "归档"))
+        long warnTables = stats.stream()
+                .filter(s -> "warn".equalsIgnoreCase(StrUtil.blankToDefault(s.getStatus(), "ok"))
+                        || "anomaly".equalsIgnoreCase(StrUtil.blankToDefault(s.getStatus(), "")))
                 .count();
 
         Date monthStart = monthStart();
@@ -108,7 +114,20 @@ public class GovLcServiceImpl implements GovLcService {
                 .ge(GovLcRun::getCreateTime, monthStart)
                 .eq(GovLcRun::getStatus, "success"));
         long compactCount = monthRuns.stream().filter(r -> "compact".equals(r.getKind())).count();
-        long cleanedApproxGb = Math.max(186, compactCount * 12);
+        long cleanedBytes = sumCleanedBytes(monthRuns);
+        long cleanedGb = cleanedBytes > 0
+                ? Math.round(cleanedBytes / (1024.0 * 1024 * 1024))
+                : 0L;
+
+        List<Map<String, Object>> archiveList = archiveCandidates(workspace);
+        long archivePartitions = archiveList.stream()
+                .mapToLong(r -> toLong(r.get("candidatePartitions")))
+                .sum();
+        // 尚无 $partitions 真值时 KPI 用「有过期策略的表数」作候选表水位，不为假分区数
+        long archiveKpi = archivePartitions > 0 ? archivePartitions : archiveList.size();
+
+        long compliancePending = countCompliancePending(workspace);
+        Map<String, Object> hotWarmCold = tierBytesFromBuckets(workspace);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ws", workspace);
@@ -119,17 +138,132 @@ public class GovLcServiceImpl implements GovLcService {
         out.put("reclaimableBytes", reclaimableBytes);
         out.put("reclaimablePct", summary.get("reclaimablePct"));
         out.put("storageRange", summary.get("range"));
-        out.put("monthCleanedGb", cleanedApproxGb);
+        out.put("monthCleanedGb", cleanedGb);
+        out.put("monthCleanedBytes", cleanedBytes);
         out.put("compactSuccessCount", compactCount);
-        out.put("archiveCandidatePartitions", Math.max(38, archiveCandidates * 10));
-        out.put("compliancePending", 1);
+        out.put("archiveCandidatePartitions", archiveKpi);
+        out.put("archiveCandidateTables", archiveList.size());
+        out.put("archiveUnit", archivePartitions > 0 ? "partitions" : "tables");
+        out.put("compliancePending", compliancePending);
         out.put("warnTableCount", warnTables);
-        out.put("hotWarmCold", Map.of(
-                "hotTb", 1.1,
-                "warmTb", 2.8,
-                "coldTb", 0.3
-        ));
-        out.put("caliberNote", "总存储=物理口径；与 storage/summary 同源（active+reclaimable=physical）");
+        out.put("hotWarmCold", hotWarmCold);
+        out.put("source", summary.get("source"));
+        out.put("caliberNote", "总存储=物理口径；与 storage/summary 同源；无水位时 KPI 为 0/空态");
+        // 双轴回收叙事：湖内分区归档 ≠ 出湖授权到期停作业（不双写）
+        out.put("reclaimAxes", buildReclaimAxes(workspace, archiveList.size(),
+                archivePartitions > 0 ? archivePartitions : archiveList.size()));
+        return out;
+    }
+
+    /**
+     * 文案+深链对齐：湖内分区过期/冷桶归档 vs 出湖 ticket 到期回收（停 DAG + 通知删副本）。
+     */
+    private Map<String, Object> buildReclaimAxes(String workspace, long archiveTables, long archiveMetric) {
+        Map<String, Object> axes = new LinkedHashMap<>();
+        Map<String, Object> lake = new LinkedHashMap<>();
+        lake.put("kind", "lake_partition_archive");
+        lake.put("label", "湖内分区归档候选");
+        lake.put("tables", archiveTables);
+        lake.put("metric", archiveMetric);
+        lake.put("unit", archiveMetric > archiveTables ? "partitions" : "tables");
+        lake.put("note", "Iceberg 分区过期 → 冷桶迁移模板；SoT 在本页 archive-candidates");
+        lake.put("deepLink", "/lifecycle?focus=archive");
+        axes.put("lakePartitionArchive", lake);
+
+        Map<String, Object> exp = new LinkedHashMap<>();
+        exp.put("kind", "export_expire_reclaim");
+        exp.put("label", "出湖授权到期回收");
+        exp.put("note", "停 ETL sink 作业 + 通知下游删副本；SoT 在 /export（不写 gov_lc_*）");
+        exp.put("deepLink", "/export?focus=expire");
+        int expiring = 0;
+        try {
+            Map<String, Object> sum = exportBoardService.summary(workspace);
+            if (sum != null && sum.get("expiringSoon") instanceof Number n) {
+                expiring = n.intValue();
+            }
+        } catch (Exception ignored) {
+            /* soft：出湖模块不可用时仍返回深链文案 */
+        }
+        exp.put("expiringSoon", expiring);
+        axes.put("exportExpireReclaim", exp);
+        return axes;
+    }
+
+    @Override
+    public List<Map<String, Object>> archiveCandidates(String ws) {
+        String workspace = listWs(ws);
+        List<GovLcPolicy> policies = policyMapper.selectList(new QueryWrapper<GovLcPolicy>().lambda()
+                .eq(StrUtil.isNotBlank(workspace), GovLcPolicy::getWs, workspace)
+                .eq(GovLcPolicy::getDeleteFlag, NOT_DELETE)
+                .eq(GovLcPolicy::getStatus, "active")
+                .isNotNull(GovLcPolicy::getPartitionExpireDays)
+                .gt(GovLcPolicy::getPartitionExpireDays, 0)
+                .orderByAsc(GovLcPolicy::getTableFqn));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (GovLcPolicy p : policies) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("ws", p.getWs());
+            m.put("tableFqn", p.getTableFqn());
+            m.put("layer", p.getLayer());
+            m.put("partitionExpireDays", p.getPartitionExpireDays());
+            GovLcTableStat st = tableStatMapper.selectOne(new QueryWrapper<GovLcTableStat>().lambda()
+                    .eq(GovLcTableStat::getWs, p.getWs())
+                    .eq(GovLcTableStat::getTableFqn, p.getTableFqn())
+                    .eq(GovLcTableStat::getDeleteFlag, NOT_DELETE)
+                    .last("LIMIT 1"));
+            boolean profiled = st != null && ("ok".equalsIgnoreCase(StrUtil.blankToDefault(st.getCollectStatus(), ""))
+                    || "partial".equalsIgnoreCase(StrUtil.blankToDefault(st.getCollectStatus(), "")));
+            // 分区数真值走 VM lh_table_storage_partitions / tables/detail；$partitions 未回写本表时为 0（空态合法）
+            int parts = 0;
+            m.put("partitionCount", parts);
+            m.put("candidatePartitions", parts);
+            m.put("coldBucketPrefix", "s3a://archive/iceberg");
+            m.put("status", profiled ? "profiled" : "policy_only");
+            m.put("hasExpirePolicy", true);
+            m.put("kind", "lake_partition_archive");
+            m.put("semantics", "lake_partition_expire");
+            m.put("notExportReclaim", true);
+            m.put("hint", "湖内分区过期/冷桶归档；出湖授权到期请走 /export?focus=expire（不双写）");
+            m.put("deepLink", Map.of(
+                    "lifecycle", "/lifecycle?table=" + p.getTableFqn() + "&action=archive&focus=archive",
+                    "catalog", "/catalog?q=" + p.getTableFqn(),
+                    "exportExpire", "/export?focus=expire"
+            ));
+            out.add(m);
+        }
+        return out;
+    }
+
+    @Override
+    public List<Map<String, Object>> compliancePreview(String ws, Integer limit) {
+        String workspace = listWs(ws);
+        int lim = limit == null || limit <= 0 ? 10 : Math.min(limit, 50);
+        Set<String> open = Set.of(
+                "assessing", "pending_approval", "scheduled", "executing", "verifying",
+                "partial_failed", "on_hold", "restricted", "archived");
+        List<GovDelRequest> rows = govDelRequestMapper.selectList(new QueryWrapper<GovDelRequest>().lambda()
+                .eq(StrUtil.isNotBlank(workspace), GovDelRequest::getWs, workspace)
+                .eq(GovDelRequest::getDeleteFlag, NOT_DELETE)
+                .in(GovDelRequest::getStatus, open)
+                .orderByDesc(GovDelRequest::getCreateTime)
+                .last("LIMIT " + lim));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (GovDelRequest r : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", r.getReqNo());
+            m.put("reqId", r.getId());
+            m.put("reqNo", r.getReqNo());
+            m.put("subject", StrUtil.blankToDefault(r.getSubjectMasked(), "—"));
+            m.put("type", r.getReqType());
+            m.put("impact", StrUtil.blankToDefault(r.getScopeLabel(), "—"));
+            m.put("approval", statusApprovalLabel(r.getStatus()));
+            m.put("approvalPending", "pending_approval".equals(r.getStatus()) || "assessing".equals(r.getStatus()));
+            m.put("status", statusZh(r.getStatus()));
+            m.put("statusRaw", r.getStatus());
+            m.put("statusCls", statusCls(r.getStatus()));
+            m.put("deepLink", "/compliance?reqNo=" + StrUtil.blankToDefault(r.getReqNo(), r.getId()));
+            out.add(m);
+        }
         return out;
     }
 
@@ -255,6 +389,7 @@ public class GovLcServiceImpl implements GovLcService {
         String fqn = param.getTableFqn().trim();
         GovLcPolicy existing = findPolicy(workspace, fqn);
         Date now = new Date();
+        boolean created = existing == null;
         if (existing == null) {
             GovLcPolicy p = new GovLcPolicy();
             p.setId(IdUtil.getSnowflakeNextIdStr());
@@ -267,6 +402,10 @@ public class GovLcServiceImpl implements GovLcService {
             p.setCreateTime(now);
             p.setUpdateTime(now);
             policyMapper.insert(p);
+            changePointWriter.writeTablePoint(
+                    workspace, fqn, "policy_upsert",
+                    created ? "新建生命周期策略" : "更新生命周期策略",
+                    p.getId());
             return toPolicyVo(p);
         }
         existing.setRevision(nvlInt(existing.getRevision()) + 1);
@@ -276,6 +415,10 @@ public class GovLcServiceImpl implements GovLcService {
         applyPolicyFields(existing, param);
         existing.setUpdateTime(now);
         policyMapper.updateById(existing);
+        changePointWriter.writeTablePoint(
+                workspace, fqn, "policy_upsert",
+                "更新生命周期策略 rev=" + existing.getRevision(),
+                existing.getId());
         return toPolicyVo(existing);
     }
 
@@ -1048,5 +1191,119 @@ public class GovLcServiceImpl implements GovLcService {
         cal.set(java.util.Calendar.SECOND, 0);
         cal.set(java.util.Calendar.MILLISECOND, 0);
         return cal.getTime();
+    }
+
+    private long sumCleanedBytes(List<GovLcRun> monthRuns) {
+        long sum = 0L;
+        if (monthRuns == null) {
+            return 0L;
+        }
+        for (GovLcRun r : monthRuns) {
+            if (StrUtil.isBlank(r.getMetricsJson())) {
+                continue;
+            }
+            try {
+                cn.hutool.json.JSONObject o = JSONUtil.parseObj(r.getMetricsJson());
+                for (String key : List.of("cleanedBytes", "reclaimedBytes", "deletedBytes", "bytesFreed", "effectBytes")) {
+                    if (o.containsKey(key) && o.get(key) instanceof Number n) {
+                        sum += n.longValue();
+                        break;
+                    }
+                }
+                if (o.get("effect") instanceof cn.hutool.json.JSONObject eff) {
+                    for (String key : List.of("cleanedBytes", "reclaimedBytes", "bytes")) {
+                        if (eff.containsKey(key) && eff.get(key) instanceof Number n) {
+                            sum += n.longValue();
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // ignore malformed metrics
+            }
+        }
+        return sum;
+    }
+
+    private long countCompliancePending(String workspace) {
+        Set<String> open = Set.of(
+                "assessing", "pending_approval", "scheduled", "executing", "verifying",
+                "partial_failed", "on_hold");
+        Long n = govDelRequestMapper.selectCount(new QueryWrapper<GovDelRequest>().lambda()
+                .eq(StrUtil.isNotBlank(workspace), GovDelRequest::getWs, workspace)
+                .eq(GovDelRequest::getDeleteFlag, NOT_DELETE)
+                .in(GovDelRequest::getStatus, open));
+        return n == null ? 0L : n;
+    }
+
+    private Map<String, Object> tierBytesFromBuckets(String workspace) {
+        Map<String, Object> bucketsPayload = govLcStorageService.buckets(workspace);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> buckets = bucketsPayload.get("list") instanceof List<?> raw
+                ? (List<Map<String, Object>>) raw
+                : List.of();
+        long hot = 0;
+        long warm = 0;
+        long cold = 0;
+        for (Map<String, Object> b : buckets) {
+            long used = toLong(b.get("usedBytes"));
+            String tier = String.valueOf(b.getOrDefault("tier", "warm")).toLowerCase(Locale.ROOT);
+            if ("hot".equals(tier)) {
+                hot += used;
+            } else if ("cold".equals(tier)) {
+                cold += used;
+            } else {
+                warm += used;
+            }
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("hotTb", bytesToTb(hot));
+        m.put("warmTb", bytesToTb(warm));
+        m.put("coldTb", bytesToTb(cold));
+        m.put("hotBytes", hot);
+        m.put("warmBytes", warm);
+        m.put("coldBytes", cold);
+        m.put("source", bucketsPayload.getOrDefault("source", buckets.isEmpty() ? "empty" : "buckets"));
+        return m;
+    }
+
+    private static String statusApprovalLabel(String status) {
+        return switch (StrUtil.blankToDefault(status, "")) {
+            case "pending_approval" -> "安全/法务/Owner";
+            case "assessing" -> "评估中";
+            case "scheduled" -> "已排期";
+            case "executing", "verifying" -> "执行中";
+            case "on_hold" -> "法务冻结";
+            case "restricted" -> "限制处理";
+            case "archived" -> "待销毁";
+            default -> "—";
+        };
+    }
+
+    private static String statusZh(String status) {
+        return switch (StrUtil.blankToDefault(status, "")) {
+            case "assessing" -> "评估中";
+            case "pending_approval" -> "待审批";
+            case "scheduled" -> "已排期";
+            case "executing" -> "执行中";
+            case "verifying" -> "验证中";
+            case "partial_failed" -> "部分失败";
+            case "on_hold" -> "法务冻结";
+            case "restricted" -> "限制处理";
+            case "archived" -> "待备份销毁";
+            case "done" -> "已完成";
+            default -> status;
+        };
+    }
+
+    private static String statusCls(String status) {
+        return switch (StrUtil.blankToDefault(status, "")) {
+            case "pending_approval", "on_hold", "restricted" -> "tag-orange";
+            case "executing", "verifying" -> "tag-purple";
+            case "partial_failed" -> "tag-red";
+            case "done" -> "tag-green";
+            case "archived" -> "tag-gray";
+            default -> "tag-blue";
+        };
     }
 }

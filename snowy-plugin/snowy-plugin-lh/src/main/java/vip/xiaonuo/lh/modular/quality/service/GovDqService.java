@@ -7,6 +7,7 @@ import vip.xiaonuo.lh.modular.quality.param.GovDqIdParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqPageParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqRunAddParam;
 import vip.xiaonuo.lh.modular.quality.param.GovDqRuleUpsertParam;
+import vip.xiaonuo.lh.modular.quality.param.GovDqStreamProbeParam;
 import vip.xiaonuo.lh.modular.quality.result.GovDqRuleVo;
 
 import java.util.List;
@@ -32,7 +33,8 @@ public interface GovDqService {
     Map<String, Object> addRun(GovDqRunAddParam param);
 
     /**
-     * 质量节点批量裁决：写 {@code gov_dq_rule_run}，返回 {@code blocked} 供 DS exit 1。
+     * 质量节点批量裁决：无 results 时 Trino/JDBC 真探数写 {@code gov_dq_rule_run}，
+     * 返回 {@code blocked} 供 DS exit 1 / 试跑阻断。
      */
     Map<String, Object> evaluate(GovDqEvaluateParam param);
 
@@ -47,7 +49,14 @@ public interface GovDqService {
 
     Map<String, Object> upsertGate(GovDqGateUpsertParam param);
 
+    void deleteGate(GovDqIdParam param);
+
     Map<String, Object> createTicket(String ruleId, String remark);
 
     Map<String, Object> syncOm(String ws);
+
+    /**
+     * Flink 流式探针回调：写 VM {@code lh_dq_stream_*}（夜莺）；可选落 run；不阻断 DAG。
+     */
+    Map<String, Object> streamProbe(GovDqStreamProbeParam param);
 }

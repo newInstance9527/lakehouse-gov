@@ -22,6 +22,8 @@ public class GovDqRuleVo {
     private String severity;
     private Boolean enabled;
     private String omTestFqn;
+    /** 绑定 gov_std_code.code_set_id */
+    private String stdCodeSetId;
     /** 最近运行 */
     private Boolean pass;
     private BigDecimal okPct;
@@ -31,4 +33,6 @@ public class GovDqRuleVo {
     private String statusText;
     private Date ranAt;
     private String message;
+    /** 最近运行 job_run_id（stream:… 为流式） */
+    private String jobRunId;
 }
