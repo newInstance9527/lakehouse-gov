@@ -1,5 +1,6 @@
 # 湖仓外部组件默认值（application.properties 的 lh.* 优先生效）
-# 凭证：运行时从 vault-path → ig_secret_store 读取；yml 明文仅作首次 bootstrap 种子
+# 凭证：运行时从 vault-path → ig_secret_store 读取。
+# 仓库内 password/api-key/aes-key/hmac 留空；本机覆盖见 snowy-web-app/.../application-local.properties
 lh:
   vault:
     aes-key: ""
@@ -75,7 +76,7 @@ lh:
   apisix:
     admin-url: http://127.0.0.1:9180
     vault-path: platform/apisix/admin
-    api-key: 
+    api-key: ""
     key-auth-enabled: false
   openmetadata:
     url: http://127.0.0.1:8585
@@ -167,7 +168,7 @@ lh:
   # 合规删除：HMAC key + sa_compliance 进 Vault；yml 明文仅 bootstrap，导入后可清空
   compliance:
     hmac-vault-path: platform/compliance/subject-hmac
-    subject-hmac-key: 
+    subject-hmac-key: ""
     sa-vault-path: platform/compliance/sa_compliance
     # 空则 bootstrap 复用 clickhouse.user/password；生产改为独立账号
     sa-user: ""

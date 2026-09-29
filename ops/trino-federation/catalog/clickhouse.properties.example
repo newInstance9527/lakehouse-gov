@@ -1,3 +1,4 @@
+# 模板：复制为 clickhouse.properties 后填写口令（该文件已 gitignore）
 # Trino 联邦源：ClickHouse 热仓（B6）
 # 现网：与 lh-trino 同 Docker 网，主机名 lh-clickhouse；口令见部署台账。
 # 挂载后 SHOW CATALOGS 应出现 clickhouse；再 POST catalog-map + 白名单即可进即席查询面。

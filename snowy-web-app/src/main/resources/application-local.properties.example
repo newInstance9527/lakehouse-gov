@@ -1,0 +1,32 @@
+#########################################
+# 本机密钥覆盖模板（可提交）
+# 用法：复制为 application-local.properties 后填写真值
+#   cp application-local.properties.example application-local.properties
+# application-local.properties 已在 .gitignore，禁止提交
+#########################################
+
+# —— 业务库 / Redis ——
+spring.datasource.dynamic.datasource.master.password=
+spring.data.redis.password=
+spring.datasource.druid.stat-view-servlet.login-password=
+knife4j.basic.password=
+
+# —— Vault 本地 AES ——
+lh.vault.aes-key=
+
+# —— 外部组件 bootstrap（优先 Vault；仅首次种子）——
+lh.trino.password=
+lh.ds.password=
+lh.flink.password=
+lh.clickhouse.password=
+lh.sqlrest.password=
+lh.apisix.api-key=
+lh.openmetadata.password=
+lh.marquez.password=
+lh.gravitino.password=
+lh.superset.password=
+lh.minio.access-key=
+lh.minio.secret-key=
+lh.compute.gitea.token=
+lh.ai.litellm-master-key=
+lh.compliance.subject-hmac-key=

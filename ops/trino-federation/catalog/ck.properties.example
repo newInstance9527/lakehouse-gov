@@ -1,3 +1,4 @@
+# 模板：复制为 ck.properties 后填写口令（该文件已 gitignore）
 # 现网既有联邦名（与 clickhouse 同连 ClickHouse）；保留以免打断旧引用。
 connector.name=clickhouse
 connection-url=jdbc:clickhouse://lh-clickhouse:8123/default

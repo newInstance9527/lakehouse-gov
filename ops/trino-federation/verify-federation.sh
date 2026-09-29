@@ -3,7 +3,7 @@
 set -euo pipefail
 TRINO_URL="${TRINO_URL:-https://127.0.0.1:18080}"
 USER="${TRINO_USER:-admin}"
-PASS="${TRINO_PASSWORD:-}"
+PASS="${TRINO_PASSWORD:?set TRINO_PASSWORD}"
 IMPERSONATE="${TRINO_IMPERSONATE:-superAdmin}"
 
 post_sql() {

@@ -49,4 +49,13 @@ tmp/
 # 写 -s / maven.repo.local 等个人盘符会直接导致 Error executing Maven。
 .mvn/maven.config
 
+# 本机密钥（spring.profiles.active=local 覆盖）；仅提交 *.example
+**/application-local.properties
+**/application-secrets.properties
+**/application-*.local.properties
+!**/application-local.properties.example
+ops/trino-federation/catalog/clickhouse.properties
+ops/trino-federation/catalog/ck.properties
+!ops/trino-federation/catalog/*.properties.example
+
 
