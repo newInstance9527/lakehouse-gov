@@ -119,6 +119,16 @@ public class GovAssetController {
         return CommonResult.data(govAssetService.metaOptions());
     }
 
+    @Operation(summary = "登记查重（本空间）")
+    @GetMapping("/lh/catalog/assets/checkDuplicate")
+    public CommonResult<Map<String, Object>> checkDuplicate(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String dsId,
+            @RequestParam(required = false) String objectName,
+            @RequestParam(required = false) String assetCode) {
+        return CommonResult.data(govAssetService.checkDuplicate(ws, dsId, objectName, assetCode));
+    }
+
     @Operation(summary = "元数据漂移对账（门户↔Grav/OM；error 摘金+degraded）")
     @CommonLog("资产元数据漂移对账")
     @PostMapping("/lh/catalog/assets/drift/reconcile")

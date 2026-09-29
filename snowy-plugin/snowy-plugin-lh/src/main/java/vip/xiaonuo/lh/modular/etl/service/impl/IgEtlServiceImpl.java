@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.enums.CommonSortOrderEnum;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.DsClient;
 import vip.xiaonuo.lh.core.engine.DsWorkflowBuilder;
@@ -48,6 +49,7 @@ import vip.xiaonuo.lh.modular.etl.support.IgEtlPublishSideEffects;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlRunAlertBuilder;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlRunResultPreview;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlSinkTargetChecker;
+import vip.xiaonuo.lh.modular.contract.service.ContractService;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlVaultInjector;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
@@ -59,6 +61,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -118,14 +121,19 @@ public class IgEtlServiceImpl implements IgEtlService {
     private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
     @Resource
     private vip.xiaonuo.lh.modular.observability.service.LhObsSpanService lhObsSpanService;
+    @Resource
+    private LhProperties lhProperties;
+    @Resource
+    private ContractService contractService;
 
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
         QueryWrapper<IgEtlDag> qw = new QueryWrapper<>();
-        // 软过滤：传 ws 则按归属筛；空则「查看全部」
+        // 空间优先：缺省 scope=workspace；all=特权巡检
+        String scope = StrUtil.blankToDefault(StrUtil.trim(param.getScope()), "workspace").toLowerCase(Locale.ROOT);
         String ws = StrUtil.trim(param.getWs());
-        if (StrUtil.isNotBlank(ws)) {
-            qw.lambda().eq(IgEtlDag::getWs, ws);
+        if (!"all".equals(scope)) {
+            qw.lambda().eq(IgEtlDag::getWs, StrUtil.blankToDefault(ws, WS_DEFAULT));
         }
         if (StrUtil.isNotBlank(param.getStatus())) {
             qw.lambda().eq(IgEtlDag::getStatus, param.getStatus());
@@ -905,6 +913,20 @@ public class IgEtlServiceImpl implements IgEtlService {
         List<IgEtlEdge> edges = edgeMapper.selectList(new QueryWrapper<IgEtlEdge>().lambda()
                 .eq(IgEtlEdge::getDagId, dag.getId()).orderByAsc(IgEtlEdge::getSortNo));
 
+        Map<String, Object> contractFx = Map.of("checked", 0, "skipped", true);
+        if (lhProperties.getEtl() != null && lhProperties.getEtl().isContractGateEnabled()) {
+            contractFx = contractService.assertDeployAllowed(dag.getWs(), collectDagTableFqns(dag.getId()));
+        }
+
+        // 质量硬门禁：先于写 DS，避免远端工作流已创建后才失败
+        Map<String, Object> qualityFxEarly = null;
+        if (lhProperties.getEtl() != null && lhProperties.getEtl().isHardFailQualityOnDeploy()) {
+            qualityFxEarly = publishSideEffects.applyQuality(dag, nodes, "deploy-precheck:" + dag.getDagCode());
+            if (Boolean.TRUE.equals(qualityFxEarly.get("blocked"))) {
+                throw new CommonException("质量门禁未通过，已阻止发布（lh.etl.hard-fail-quality-on-deploy=true）");
+            }
+        }
+
         List<Map<String, Object>> plan = new ArrayList<>();
         for (IgEtlNode n : nodes) {
             Map<String, Object> resolved = engineResolver.resolve(n.getNodeType(), n.getConfJson());
@@ -926,6 +948,16 @@ public class IgEtlServiceImpl implements IgEtlService {
         Map<String, Object> sinkFx = sinkTargetChecker.applyOnDeploy(dag, nodes, workflow);
         Map<String, Object> dsResp = dsClient.createOrUpdateWorkflow(workflow);
 
+        if (lhProperties.getEtl() != null
+                && lhProperties.getEtl().isHardFailDsOnDeploy()
+                && Boolean.TRUE.equals(dsResp.get("degraded"))) {
+            runAlertBuilder.build(
+                    dag, "deploy:" + dag.getDagCode(), "failed",
+                    str(dsResp.get("message"), "DS degraded"), "P1");
+            throw new CommonException("DS 投影降级，已阻止发布（lh.etl.hard-fail-ds-on-deploy=true）："
+                    + str(dsResp.get("message"), str(dsResp.get("resp"), "degraded")));
+        }
+
         String wfCode = str(dsResp.get("workflowCode"), preferredCode);
         String nextVer = bumpVer(dag.getVer());
         dag.setStatus("prod");
@@ -940,13 +972,14 @@ public class IgEtlServiceImpl implements IgEtlService {
         upsertWatermark("deploy", "dag:" + dag.getId(), nextVer);
 
         Map<String, Object> sideEffects = publishSideEffects.apply(dag, nodes, edges);
-        Map<String, Object> qualityFx = publishSideEffects.applyQuality(
-                dag, nodes, "deploy:" + dag.getDagCode() + ":" + nextVer);
+        Map<String, Object> qualityFx = qualityFxEarly != null
+                ? qualityFxEarly
+                : publishSideEffects.applyQuality(dag, nodes, "deploy:" + dag.getDagCode() + ":" + nextVer);
         sideEffects.putAll(qualityFx);
         sideEffects.put("vault", vaultFx);
         sideEffects.put("sinkTarget", sinkFx);
+        sideEffects.put("contract", contractFx);
         if (Boolean.TRUE.equals(qualityFx.get("blocked"))) {
-            // 发布仍落 DS/版本，但标记 quality 阻断供门户提示（引擎侧依赖 DS 条件边）
             sideEffects.put("qualityGateBlocked", true);
         }
         upsertWatermark("lineage_parse", "dag:" + dag.getId(),

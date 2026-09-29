@@ -99,4 +99,9 @@ public interface GovAssetService extends IService<GovAsset> {
      * 打开中的漂移单列表
      */
     List<Map<String, Object>> listMetaDrifts(String ws, Integer limit);
+
+    /**
+     * 登记前查重（本空间）：按 dsId+objectName 或 assetCode。
+     */
+    Map<String, Object> checkDuplicate(String ws, String dsId, String objectName, String assetCode);
 }

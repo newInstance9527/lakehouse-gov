@@ -164,6 +164,16 @@ public class LhComponentCredentialResolver {
         return out;
     }
 
+    /** 夜莺：username/password；无凭证时返回空字段（调用方跳过） */
+    public Map<String, String> nightingale() {
+        LhProperties.Observability c = lhProperties.getObservability();
+        if (c == null) {
+            return Map.of("username", "", "password", "", "token", "");
+        }
+        String path = StrUtil.blankToDefault(c.getNightingaleVaultPath(), LhVaultPaths.NIGHTINGALE);
+        return resolveUserPass(path, c.getNightingaleUser(), c.getNightingalePassword(), null);
+    }
+
     private static String str(Object o) {
         return o == null ? null : String.valueOf(o);
     }

@@ -1,20 +1,22 @@
 package vip.xiaonuo.lh.modular.etl.support;
 
 import cn.hutool.core.util.StrUtil;
+import jakarta.annotation.Resource;
 import org.springframework.stereotype.Component;
+import vip.xiaonuo.lh.core.engine.NightingaleClient;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 失败告警载荷：带 run_id，门户可跳转运维 /ops?runId=
- *
- * @author lakehouse
- * @date 2026/9/19
+ * 失败告警：登记载荷并尝试推夜莺（soft-fail）。
  */
 @Component
 public class IgEtlRunAlertBuilder {
+
+    @Resource
+    private NightingaleClient nightingaleClient;
 
     /**
      * @param severity P0/P1/P2
@@ -40,9 +42,19 @@ public class IgEtlRunAlertBuilder {
         a.put("message", StrUtil.blankToDefault(message, "run failed"));
         a.put("opsPath", opsPath);
         a.put("opsHint", "在任务运维中心按 run_id 打开该次执行");
-        // soft：本期登记载荷；真实推夜莺 webhook 后续接
-        a.put("pushed", false);
-        a.put("degraded", true);
+        a.put("source", "etl");
+
+        Map<String, Object> push = nightingaleClient.pushEvent(a);
+        a.put("pushed", Boolean.TRUE.equals(push.get("pushed")));
+        a.put("pushSkipped", Boolean.TRUE.equals(push.get("skipped")));
+        a.put("degraded", Boolean.TRUE.equals(push.get("degraded"))
+                || !Boolean.TRUE.equals(push.get("pushed")));
+        if (push.get("message") != null) {
+            a.put("pushMessage", push.get("message"));
+        }
+        if (push.get("httpStatus") != null) {
+            a.put("pushHttpStatus", push.get("httpStatus"));
+        }
         return a;
     }
 

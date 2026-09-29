@@ -13,73 +13,31 @@
 package vip.xiaonuo.lh.core.vault;
 
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.crypto.SecureUtil;
-import cn.hutool.crypto.symmetric.AES;
-import cn.hutool.json.JSONUtil;
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.common.exception.CommonException;
-import vip.xiaonuo.lh.config.LhProperties;
-import vip.xiaonuo.lh.modular.datasource.entity.LhSecretStore;
-import vip.xiaonuo.lh.modular.datasource.mapper.LhSecretStoreMapper;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 本地 Vault 客户端（一期：AES 密文落 {@code ig_secret_store}）
- * <p>接口形态对齐 HashiCorp Vault：{@code write/read(path)}，后续可无感替换实现。</p>
- *
- * @author lakehouse
- * @date 2026/3/18
+ * 凭证门面：委托 {@link LhVaultStore}（{@code lh.vault.backend=aes|hashicorp}）。
+ * <p>调用方继续注入本类，无需感知后端切换。</p>
  */
 @Component
 public class LhVaultClient {
 
     @Resource
-    private LhSecretStoreMapper secretStoreMapper;
-    @Resource
-    private LhProperties lhProperties;
+    private LhVaultStore vaultStore;
 
-    private AES aes() {
-        byte[] key = SecureUtil.md5(lhProperties.getVault().getAesKey()).substring(0, 16)
-                .getBytes(StandardCharsets.UTF_8);
-        return SecureUtil.aes(key);
+    public String backendId() {
+        return vaultStore.backendId();
     }
 
-    /**
-     * 写入 / 覆盖凭证
-     *
-     * @param vaultPath 路径
-     * @param secret    明文 Map（将被 JSON + AES）
-     */
     public void write(String vaultPath, Map<String, Object> secret) {
-        if (StrUtil.isBlank(vaultPath)) {
-            throw new CommonException("vault_path 不能为空");
-        }
-        String cipher = aes().encryptBase64(JSONUtil.toJsonStr(secret));
-        LhSecretStore exist = secretStoreMapper.selectById(vaultPath);
-        if (exist == null) {
-            LhSecretStore row = new LhSecretStore();
-            row.setVaultPath(vaultPath);
-            row.setSecretCipher(cipher);
-            secretStoreMapper.insert(row);
-        } else {
-            exist.setSecretCipher(cipher);
-            secretStoreMapper.updateById(exist);
-        }
+        vaultStore.write(vaultPath, secret);
     }
 
-    /**
-     * 路径不存在或为 PLACEHOLDER 时写入；已有真实密文则跳过（避免覆盖运维轮换结果）
-     *
-     * @param vaultPath 路径
-     * @param secret    种子凭证
-     * @return true=本次写入；false=已存在跳过
-     */
     public boolean writeIfAbsent(String vaultPath, Map<String, Object> secret) {
         if (exists(vaultPath)) {
             return false;
@@ -88,75 +46,30 @@ public class LhVaultClient {
         return true;
     }
 
-    /**
-     * 读取凭证（不存在抛错）
-     *
-     * @param vaultPath 路径
-     * @return 明文 Map
-     */
     public Map<String, Object> read(String vaultPath) {
-        LhSecretStore row = secretStoreMapper.selectOne(new LambdaQueryWrapper<LhSecretStore>()
-                .eq(LhSecretStore::getVaultPath, vaultPath));
-        if (row == null || StrUtil.isBlank(row.getSecretCipher())) {
-            throw new CommonException("凭证不存在: {}", vaultPath);
-        }
-        if ("PLACEHOLDER".equals(row.getSecretCipher())) {
-            return new LinkedHashMap<>();
-        }
-        String plain = aes().decryptStr(row.getSecretCipher());
-        return JSONUtil.parseObj(plain);
+        return vaultStore.read(vaultPath);
     }
 
-    /**
-     * 读取凭证；不存在返回空 Map（不抛错）
-     *
-     * @param vaultPath 路径
-     * @return 明文 Map 或空
-     */
     public Map<String, Object> readOrEmpty(String vaultPath) {
-        if (StrUtil.isBlank(vaultPath) || !exists(vaultPath)) {
+        if (StrUtil.isBlank(vaultPath)) {
             return Collections.emptyMap();
         }
-        try {
-            return read(vaultPath);
-        } catch (Exception e) {
-            return Collections.emptyMap();
-        }
+        return vaultStore.readOrEmpty(vaultPath);
     }
 
-    /**
-     * 读取字符串字段
-     *
-     * @param vaultPath 路径
-     * @param key       字段名
-     * @return 值，缺失返回 null
-     */
     public String getString(String vaultPath, String key) {
         Object v = readOrEmpty(vaultPath).get(key);
         return v == null ? null : String.valueOf(v);
     }
 
-    /**
-     * 路径是否已有可用密文（非 PLACEHOLDER）
-     *
-     * @param vaultPath 路径
-     * @return true=可用
-     */
     public boolean exists(String vaultPath) {
-        if (StrUtil.isBlank(vaultPath)) {
-            return false;
-        }
-        LhSecretStore row = secretStoreMapper.selectById(vaultPath);
-        return row != null && StrUtil.isNotBlank(row.getSecretCipher())
-                && !"PLACEHOLDER".equals(row.getSecretCipher());
+        return vaultStore.exists(vaultPath);
     }
 
-    /**
-     * 删除凭证
-     *
-     * @param vaultPath 路径
-     */
     public void delete(String vaultPath) {
-        secretStoreMapper.deleteById(vaultPath);
+        if (StrUtil.isBlank(vaultPath)) {
+            throw new CommonException("vault_path 不能为空");
+        }
+        vaultStore.delete(vaultPath);
     }
 }

@@ -1,0 +1,4 @@
+out/
+.env
+drills/*.md
+!drills/.gitkeep

@@ -22,6 +22,7 @@ import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 
@@ -50,6 +51,8 @@ public class ElasticsearchPreviewAdapter implements GovAssetPreviewAdapter {
 
     @Resource
     private LhVaultClient vaultClient;
+    @Resource
+    private LhProperties lhProperties;
 
     @Override
     public int order() {
@@ -96,7 +99,7 @@ public class ElasticsearchPreviewAdapter implements GovAssetPreviewAdapter {
             if (StrUtil.isNotBlank(user)) {
                 req.basicAuth(user, StrUtil.nullToEmpty(password));
             }
-            if (https) {
+            if (https && lhProperties.getHttp().isInsecureSsl()) {
                 trustAll(req);
             }
             HttpResponse resp = req.execute();
@@ -111,7 +114,7 @@ public class ElasticsearchPreviewAdapter implements GovAssetPreviewAdapter {
                     if (StrUtil.isNotBlank(user)) {
                         req.basicAuth(user, StrUtil.nullToEmpty(password));
                     }
-                    if (https) {
+                    if (https && lhProperties.getHttp().isInsecureSsl()) {
                         trustAll(req);
                     }
                     resp = req.execute();

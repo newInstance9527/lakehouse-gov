@@ -8,6 +8,7 @@ import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vip.xiaonuo.common.exception.CommonException;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.idempotency.LhIdempotencyGuard;
 import vip.xiaonuo.lh.modular.contract.entity.GovContractCdcCfg;
@@ -23,6 +24,7 @@ import vip.xiaonuo.lh.modular.contract.service.ContractService;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,6 +37,8 @@ public class ContractServiceImpl implements ContractService {
     private static final Set<String> CHANGE_STATUSES = Set.of(
             "draft", "checking", "review", "approved", "rejected", "executed", "blocked");
 
+    @Resource
+    private LhProperties lhProperties;
     @Resource
     private GovContractSchemaMapper schemaMapper;
     @Resource
@@ -427,6 +431,91 @@ public class ContractServiceImpl implements ContractService {
             cdcMapper.updateById(row);
         }
         return getCdcConfig(topic, workspace);
+    }
+
+    @Override
+    public Map<String, Object> assertDeployAllowed(String ws, List<String> tableFqns) {
+        String workspace = StrUtil.blankToDefault(ws, "default");
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ws", workspace);
+        if (tableFqns == null || tableFqns.isEmpty()) {
+            out.put("checked", 0);
+            out.put("blocked", 0);
+            out.put("notes", List.of());
+            return out;
+        }
+        int checked = 0;
+        List<String> blocked = new ArrayList<>();
+        List<String> notes = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (String raw : tableFqns) {
+            String name = contractNameOf(raw);
+            if (StrUtil.isBlank(name) || !seen.add(name)) {
+                continue;
+            }
+            GovContractSchema schema = findSchema(workspace, name);
+            if (schema == null) {
+                // 也试短名（去掉 catalog/schema 前缀最后一段）
+                String bare = bareName(name);
+                if (!bare.equals(name)) {
+                    schema = findSchema(workspace, bare);
+                    if (schema != null) {
+                        name = bare;
+                    }
+                }
+            }
+            if (schema == null) {
+                if (lhProperties.getEtl() != null && lhProperties.getEtl().isContractRequireRegistered()) {
+                    blocked.add(name + " 无契约登记（lh.etl.contract-require-registered=true）");
+                } else {
+                    notes.add(name + ": 无契约登记（跳过）");
+                }
+                continue;
+            }
+            checked++;
+            String st = StrUtil.blankToDefault(schema.getStatus(), "ok");
+            if ("fail".equalsIgnoreCase(st) || "blocked".equalsIgnoreCase(st)) {
+                blocked.add(name + " 契约状态=" + st);
+                continue;
+            }
+            final String schemaName = name;
+            final String schemaId = schema.getId();
+            long openBreaking = changeMapper.selectCount(new QueryWrapper<GovContractChange>().lambda()
+                    .eq(GovContractChange::getDeleteFlag, NOT_DELETE)
+                    .eq(GovContractChange::getWs, workspace)
+                    .and(w -> w.eq(GovContractChange::getSchemaName, schemaName)
+                            .or().eq(GovContractChange::getSchemaId, schemaId))
+                    .in(GovContractChange::getStatus, List.of("blocked", "checking", "review"))
+                    .eq(GovContractChange::getCompatResult, "fail"));
+            if (openBreaking > 0) {
+                blocked.add(schemaName + " 有 " + openBreaking + " 条未关闭破坏性变更");
+            } else {
+                notes.add(schemaName + ": 契约 ok");
+            }
+        }
+        out.put("checked", checked);
+        out.put("blocked", blocked.size());
+        out.put("notes", notes);
+        out.put("blockedNames", blocked);
+        if (!blocked.isEmpty()) {
+            throw new CommonException("数据契约门禁未通过：" + String.join("；", blocked));
+        }
+        return out;
+    }
+
+    private static String contractNameOf(String fqn) {
+        String s = StrUtil.trim(fqn);
+        if (StrUtil.isBlank(s)) {
+            return "";
+        }
+        // iceberg.ods.t_order → 优先完整名匹配，find 失败再 bare
+        return s;
+    }
+
+    private static String bareName(String fqn) {
+        String s = StrUtil.trim(fqn);
+        int i = s.lastIndexOf('.');
+        return i >= 0 ? s.substring(i + 1) : s;
     }
 
     private void applyChangeToSchema(GovContractChange change) {

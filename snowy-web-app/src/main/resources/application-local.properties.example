@@ -12,8 +12,13 @@ spring.data.redis.password=
 spring.datasource.druid.stat-view-servlet.login-password=
 knife4j.basic.password=
 
-# —— Vault 本地 AES ——
+# —— Vault（aes 默认；hashicorp 见 ops/vault）——
+lh.vault.backend=aes
 lh.vault.aes-key=
+
+# —— TLS（本机 lab 自签证书可开；prod/test 须 false）——
+lh.trino.insecure-ssl=true
+lh.http.insecure-ssl=true
 
 # —— 外部组件 bootstrap（优先 Vault；仅首次种子）——
 lh.trino.password=

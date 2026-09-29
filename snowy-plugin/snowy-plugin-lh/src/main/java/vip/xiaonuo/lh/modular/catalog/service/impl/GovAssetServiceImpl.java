@@ -430,23 +430,35 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             datasourceMapper.updateById(ds);
         }
 
-        // soft-fail：登记后尝试门户清单→OM
+        // soft-fail / 可配硬失败：登记后尝试门户清单→OM
         try {
             softRefreshOm(asset, ds);
         } catch (Exception e) {
             log.warn("Asset register OM soft-fail id={}: {}", asset.getId(), e.getMessage());
+            if (lhProperties.getCatalog() != null && lhProperties.getCatalog().isProjectionHardFail()) {
+                throw new CommonException("资产登记 OM 投影失败（lh.catalog.projection-hard-fail=true）：" + e.getMessage());
+            }
         }
-        // soft-fail：可投影类型挂接 Grav 指针，否则即席 schema-tree 永久为空（仅查面 iceberg，ds_* 不进树）
+        // soft-fail / 可配硬失败：可投影类型挂接 Grav 指针
         try {
             if (gravitinoProjector.supportsGravitino(ds.getType())) {
                 Map<String, Object> grav = upsertGravBridge(asset, List.of(link));
                 if (!Boolean.TRUE.equals(grav.get("ok"))) {
                     log.warn("Asset register Grav soft-skip id={} reason={}",
                             asset.getId(), grav.getOrDefault("reason", grav.get("message")));
+                    if (lhProperties.getCatalog() != null && lhProperties.getCatalog().isProjectionHardFail()) {
+                        throw new CommonException("资产登记 Grav 投影失败（lh.catalog.projection-hard-fail=true）："
+                                + grav.getOrDefault("reason", grav.get("message")));
+                    }
                 }
             }
+        } catch (CommonException e) {
+            throw e;
         } catch (Exception e) {
             log.warn("Asset register Grav soft-fail id={}: {}", asset.getId(), e.getMessage());
+            if (lhProperties.getCatalog() != null && lhProperties.getCatalog().isProjectionHardFail()) {
+                throw new CommonException("资产登记 Grav 投影失败（lh.catalog.projection-hard-fail=true）：" + e.getMessage());
+            }
         }
 
         GovAssetIdParam idParam = new GovAssetIdParam();
@@ -744,6 +756,64 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     @Override
     public List<Map<String, Object>> listMetaDrifts(String ws, Integer limit) {
         return govAssetMetaDriftReconcile.listOpen(ws, limit);
+    }
+
+    @Override
+    public Map<String, Object> checkDuplicate(String ws, String dsId, String objectName, String assetCode) {
+        String home = StrUtil.blankToDefault(StrUtil.trim(ws), WS_DEFAULT);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ws", home);
+        out.put("duplicate", false);
+        String obj = StrUtil.trim(objectName);
+        String code = StrUtil.trim(assetCode);
+        String ds = StrUtil.trim(dsId);
+
+        if (StrUtil.isNotBlank(ds) && StrUtil.isNotBlank(obj)) {
+            List<GovAssetSourceLink> links = linkMapper.selectList(new QueryWrapper<GovAssetSourceLink>().lambda()
+                    .eq(GovAssetSourceLink::getDsId, ds)
+                    .eq(GovAssetSourceLink::getObjectName, obj)
+                    .eq(GovAssetSourceLink::getLinkRole, LINK_PRIMARY)
+                    .eq(GovAssetSourceLink::getDeleteFlag, NOT_DELETE)
+                    .last("LIMIT 5"));
+            for (GovAssetSourceLink link : links) {
+                GovAsset asset = this.getById(link.getAssetId());
+                if (asset == null || !NOT_DELETE.equals(asset.getDeleteFlag())) {
+                    continue;
+                }
+                if (!home.equals(StrUtil.blankToDefault(asset.getWs(), WS_DEFAULT))) {
+                    continue;
+                }
+                out.put("duplicate", true);
+                out.put("reason", "object");
+                out.put("assetId", asset.getId());
+                out.put("assetCode", asset.getAssetCode());
+                out.put("name", asset.getName());
+                out.put("dsId", ds);
+                out.put("objectName", obj);
+                return out;
+            }
+        }
+
+        if (StrUtil.isNotBlank(code)) {
+            GovAsset hit = this.getOne(new QueryWrapper<GovAsset>().lambda()
+                    .eq(GovAsset::getWs, home)
+                    .eq(GovAsset::getAssetCode, code)
+                    .eq(GovAsset::getDeleteFlag, NOT_DELETE)
+                    .last("LIMIT 1"));
+            if (hit != null) {
+                out.put("duplicate", true);
+                out.put("reason", "assetCode");
+                out.put("assetId", hit.getId());
+                out.put("assetCode", hit.getAssetCode());
+                out.put("name", hit.getName());
+                return out;
+            }
+        }
+
+        out.put("dsId", ds);
+        out.put("objectName", obj);
+        out.put("assetCode", code);
+        return out;
     }
 
     /**

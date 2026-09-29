@@ -1,9 +1,15 @@
 # 湖仓外部组件默认值（application.properties 的 lh.* 优先生效）
-# 凭证：运行时从 vault-path → ig_secret_store 读取。
-# 仓库内 password/api-key/aes-key/hmac 留空；本机覆盖见 snowy-web-app/.../application-local.properties
+# 凭证：运行时 vault-path → LhVaultStore（aes=ig_secret_store / hashicorp=KV v2）。
+# 仓库内 password/api-key/aes-key/hmac/token 留空；本机覆盖见 snowy-web-app/.../application-local.properties
 lh:
   vault:
+    backend: aes
     aes-key: ""
+    # backend: hashicorp   # 见 lakehouse-gov/ops/vault
+    # addr: http://127.0.0.1:8200
+    # token: ""
+    # kv-mount: secret
+    # timeout-ms: 8000
   trino:
     url: https://127.0.0.1:18080
     # Web UI 根（Explain / 慢查询外链；缺省回退为 url）
@@ -11,7 +17,7 @@ lh:
     vault-path: platform/trino/query
     user: admin
     password: ""
-    insecure-ssl: true
+    insecure-ssl: false
     # 即席查询面：白名单 ∩ SHOW CATALOGS；湖表 iceberg + 联邦 clickhouse（须 Trino 已挂载）
     query-catalogs: iceberg,clickhouse
     lake-catalogs: iceberg
@@ -19,6 +25,8 @@ lh:
     show-unrunnable-in-tree: false
     # 主体 bind/sync 时下发 impersonation；空=仅 GET 导出。与 Trino 同机或共享卷时填 rules.json 路径
     # impersonation-rules-path: /etc/trino/access-control/rules.json
+  http:
+    insecure-ssl: false
   ds:
     url: http://127.0.0.1:12345/dolphinscheduler
     vault-path: platform/dolphinscheduler/api
@@ -123,9 +131,17 @@ lh:
   etl:
     default-engine: flink
     local-trial-fallback: true
+    contract-gate-enabled: true
+    # true=无契约登记也阻断发布（试点可开；prod 建议 true）
+    contract-require-registered: false
+    hard-fail-quality-on-deploy: true
+    # true=DS 投影 degrade 时发布硬失败
+    hard-fail-ds-on-deploy: false
   catalog:
     # false=注册资产时 objectName 必须已在 ig_ds_table；true=允许手工对象名
     allow-manual-object-name: false
+    # true=Grav/OM 投影失败阻断登记（默认 soft-fail；prod 见 application-prod）
+    projection-hard-fail: false
   lifecycle:
     spark-catalog: iceberg
     # 空=跳过 VM；配好后日批直写 /api/v1/import/prometheus（禁 Pushgateway）
@@ -155,6 +171,14 @@ lh:
     # J4：事件驱动采集仅 L3；冷却防风暴
     event-collect-enabled: true
     event-collect-cooldown-minutes: 30
+    # 存储日报定时订阅（V76）；默认关，配订阅 webhook 后开
+    report-sub-enabled: false
+    report-sub-cron: "0 0 8 * * ?"
+    # MinIO Inventory CSV 校准；报告桶放 inventory/{srcBucket}/latest.csv
+    inventory-calibrate-enabled: false
+    inventory-calibrate-cron: "0 30 3 * * SUN"
+    inventory-report-bucket: ""
+    inventory-report-prefix: inventory
   # §24.3 FinOps 单价（showback 金额化与 /lh/observability/costs 同源）
   finops:
     storage-per-tb-month: 100
@@ -165,6 +189,17 @@ lh:
     # DS Worker 可达的门户基址；空则 SHELL 跳过运行时 evaluate（试跑/发布仍门户写 runs）
     gov-base-url: ""
     vm-write-enabled: true
+  # 运维监控 §30：夜莺当前告警；空 URL=仅 VM PromQL
+  observability:
+    nightingale-url: ""
+    nightingale-vault-path: platform/nightingale/api
+    nightingale-user: root
+    nightingale-password: ""
+    nightingale-timeout-ms: 5000
+    nightingale-alert-limit: 50
+    # 事件推送：填 webhook；空则尝试 {url}/v1/n9e/event/push
+    nightingale-webhook-url: ""
+    nightingale-push-enabled: true
   # 合规删除：HMAC key + sa_compliance 进 Vault；yml 明文仅 bootstrap，导入后可清空
   compliance:
     hmac-vault-path: platform/compliance/subject-hmac

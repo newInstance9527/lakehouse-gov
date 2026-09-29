@@ -13,6 +13,7 @@ import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.ai.LhLiteLlmClient;
 import vip.xiaonuo.lh.core.ai.LhOpenAiCompatClient;
+import vip.xiaonuo.lh.core.engine.NightingaleClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
 import vip.xiaonuo.lh.modular.aimodel.entity.GovAiModel;
@@ -73,6 +74,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
     private LhOpenAiCompatClient openAiCompatClient;
     @Resource
     private LhProperties lhProperties;
+    @Resource
+    private NightingaleClient nightingaleClient;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -528,6 +531,32 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         out.put("failCount", fail);
         out.put("items", items);
         out.put("ws", StrUtil.blankToDefault(ws, "*"));
+
+        // N7：失败 / Key 过期预警 → 夜莺（soft-fail，复用 NightingaleClient.pushEvent）
+        if (fail > 0 || warn > 0 || !Boolean.TRUE.equals(litellm.get("ok"))) {
+            Map<String, Object> evt = new LinkedHashMap<>();
+            String sev = fail > 0 || !Boolean.TRUE.equals(litellm.get("ok")) ? "P1" : "P2";
+            evt.put("title", "AI 模型巡检告警");
+            evt.put("message", "checked=" + models.size()
+                    + " fail=" + fail + " warn=" + warn
+                    + " litellmOk=" + litellm.get("ok")
+                    + " ws=" + StrUtil.blankToDefault(ws, "*"));
+            evt.put("severity", sev);
+            evt.put("source", "ai-patrol");
+            evt.put("opsPath", "/ai/models");
+            evt.put("labels", Map.of(
+                    "failCount", String.valueOf(fail),
+                    "warnCount", String.valueOf(warn),
+                    "ws", StrUtil.blankToDefault(ws, "*")));
+            try {
+                Map<String, Object> push = nightingaleClient.pushEvent(evt);
+                out.put("alertPushed", Boolean.TRUE.equals(push.get("pushed")));
+                out.put("alertPushMessage", push.get("message"));
+            } catch (Exception e) {
+                out.put("alertPushed", false);
+                out.put("alertPushMessage", e.getMessage());
+            }
+        }
         return out;
     }
 

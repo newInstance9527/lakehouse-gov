@@ -317,7 +317,12 @@ public class GovDelServiceImpl implements GovDelService {
         req.setSourceRef(param.getSourceRef());
         req.setDeadline(param.getDeadline() != null ? param.getDeadline() : plusWorkDays(now, SLA_WORK_DAYS));
         req.setApplicant(currentOperator());
-        req.setRemark(param.getRemark());
+        String remark = StrUtil.trim(param.getRemark());
+        if (StrUtil.isNotBlank(param.getSeedTable())) {
+            String seed = param.getSeedTable().trim();
+            remark = StrUtil.isBlank(remark) ? ("seed:" + seed) : (remark + " · seed:" + seed);
+        }
+        req.setRemark(remark);
         req.setDeleteFlag(NOT_DELETE);
         req.setCreateTime(now);
         req.setUpdateTime(now);
@@ -327,6 +332,9 @@ public class GovDelServiceImpl implements GovDelService {
         secret.put("subjectId", plain);
         secret.put("subjectType", subjectType);
         secret.put("reqNo", req.getReqNo());
+        if (StrUtil.isNotBlank(param.getSeedTable())) {
+            secret.put("seedTable", param.getSeedTable().trim());
+        }
         vaultClient.write(vaultPath, secret);
 
         requestMapper.insert(req);
@@ -336,6 +344,9 @@ public class GovDelServiceImpl implements GovDelService {
 
         if (param.getAutoAssess() == null || Boolean.TRUE.equals(param.getAutoAssess())) {
             buildPlan(req);
+            if (StrUtil.isNotBlank(param.getSeedTable())) {
+                ensureSeedTarget(req, param.getSeedTable().trim());
+            }
         }
         return detail(req.getId());
     }
@@ -2489,6 +2500,28 @@ public class GovDelServiceImpl implements GovDelService {
         t.setCreateTime(now);
         t.setUpdateTime(now);
         return t;
+    }
+
+    /** 深链种子表：若计划中尚无该 FQN，补一条 lake 载体（soft，不挡受理）。 */
+    private void ensureSeedTarget(GovDelRequest req, String seedFqn) {
+        if (req == null || StrUtil.isBlank(seedFqn)) {
+            return;
+        }
+        String fqn = seedFqn.trim();
+        Long exist = targetMapper.selectCount(new QueryWrapper<GovDelTarget>().lambda()
+                .eq(GovDelTarget::getReqId, req.getId())
+                .eq(GovDelTarget::getDeleteFlag, NOT_DELETE)
+                .and(w -> w.eq(GovDelTarget::getObjectFqn, fqn)
+                        .or().eq(GovDelTarget::getObjectFqn, shortName(fqn))));
+        if (exist != null && exist > 0) {
+            return;
+        }
+        GovDelTarget t = newTarget(req, "iceberg", fqn, "seed", "cow", null);
+        t.setManualAdded(true);
+        t.setLineageLayer(guessLayer(fqn));
+        t.setRemark("深链种子表");
+        targetMapper.insert(t);
+        logExec(req, t, "plan.seed", "success", null, null, "深链种子表纳入计划: " + fqn);
     }
 
     private GovDelExec logExec(GovDelRequest req, GovDelTarget target, String step, String status,

@@ -390,8 +390,12 @@ public class SecBoardServiceImpl implements SecBoardService {
                     Object rem = m.get("remainingDays");
                     return rem instanceof Number ? ((Number) rem).intValue() : Integer.MAX_VALUE;
                 }));
+        String backend = vaultClient.backendId();
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("source", "ig_secret_store");
+        r.put("backend", backend);
+        r.put("source", "hashicorp".equalsIgnoreCase(backend)
+                ? "ig_secret_store+hashicorp"
+                : "ig_secret_store");
         r.put("items", items);
         r.put("total", page.getTotal());
         r.put("ok", expired == 0);
@@ -399,8 +403,11 @@ public class SecBoardServiceImpl implements SecBoardService {
         r.put("expiredCount", expired);
         r.put("missingCount", missing);
         r.put("hint", items.isEmpty()
-                ? "暂无 Vault 台账（ig_secret_store 空）"
-                : "§35.2：剩余<7 天 warn、过期 expired；立即轮换=本地动态密（previous* 宽限期）");
+                ? ("hashicorp".equalsIgnoreCase(backend)
+                ? "台账索引空；hashicorp 后端凭据在 KV，可用数据源 vault_path 探测"
+                : "暂无 Vault 台账（ig_secret_store 空）")
+                : "§35.2：剩余<7 天 warn、过期 expired；立即轮换=动态密（previous* 宽限期）；backend="
+                + backend);
         return r;
     }
 
@@ -502,9 +509,12 @@ public class SecBoardServiceImpl implements SecBoardService {
         String path = row.getVaultPath();
         String kind = kindOf(path);
         int rotateDays = rotateDaysOf(path, ds != null ? ds.getType() : null);
-        boolean placeholder = row.getSecretCipher() == null
+        boolean hashicorp = "hashicorp".equalsIgnoreCase(vaultClient.backendId());
+        boolean placeholder = hashicorp
+                ? !vaultClient.exists(path)
+                : (row.getSecretCipher() == null
                 || "PLACEHOLDER".equals(row.getSecretCipher())
-                || StrUtil.isBlank(row.getSecretCipher());
+                || StrUtil.isBlank(row.getSecretCipher()));
 
         Date lastRotated = row.getUpdateTime() != null ? row.getUpdateTime() : row.getCreateTime();
         if (!placeholder) {

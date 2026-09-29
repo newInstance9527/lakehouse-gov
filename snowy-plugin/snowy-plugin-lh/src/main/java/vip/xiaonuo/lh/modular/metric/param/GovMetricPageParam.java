@@ -23,6 +23,9 @@ public class GovMetricPageParam {
     @Schema(description = "工作空间")
     private String ws;
 
+    @Schema(description = "列表范围 workspace|all；缺省 workspace（须配 ws）")
+    private String scope;
+
     @Schema(description = "排序字段")
     private String sortField;
 

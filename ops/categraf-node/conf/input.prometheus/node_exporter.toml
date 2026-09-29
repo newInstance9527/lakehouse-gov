@@ -1,0 +1,5 @@
+# scrape node_exporter（若节点已装）
+[[instances]]
+urls = ["http://127.0.0.1:9100/metrics"]
+labels = { job = "node" }
+interval = 30

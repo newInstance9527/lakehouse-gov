@@ -59,6 +59,9 @@ public final class LhVaultPaths {
     /** MinIO AK/SK */
     public static final String MINIO = "platform/minio/s3";
 
+    /** 夜莺（Nightingale / n9e）登录账号 */
+    public static final String NIGHTINGALE = "platform/nightingale/api";
+
     /** AI 模型 API Key 前缀：{@code secret/lakehouse/ai/{modelId}} */
     public static final String AI_MODEL_PREFIX = "secret/lakehouse/ai/";
 

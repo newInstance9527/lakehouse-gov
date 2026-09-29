@@ -18,17 +18,17 @@ import jakarta.annotation.Resource;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import vip.xiaonuo.common.annotation.CommonLog;
+import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.pojo.CommonResult;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.modular.schemasync.param.LhSchemaSyncRunParam;
 import vip.xiaonuo.lh.modular.schemasync.service.LhSchemaSyncService;
 
 import java.util.Map;
 
 /**
- * Grav→OM Schema Sync 触发接口（与数据源登记解耦；独立前端无登录）
- *
- * @author lakehouse
- * @date 2026/3/18
+ * Grav→OM Schema Sync 触发接口（与数据源登记解耦）。
+ * <p>波次 P4：须登录且具备运维/元数据管理员角色。</p>
  */
 @Tag(name = "Schema Sync控制器")
 @RestController
@@ -42,6 +42,10 @@ public class LhSchemaSyncController {
     @CommonLog("Schema Sync")
     @PostMapping("/lh/schemasync/run")
     public CommonResult<Map<String, Object>> run(@RequestBody(required = false) LhSchemaSyncRunParam param) {
+        LhLoginUsers.requireUser();
+        if (!LhLoginUsers.hasAnyRole("superAdmin", "dataOps", "metadataAdmin", "bizAdmin")) {
+            throw new CommonException("需要运维或元数据管理员角色");
+        }
         return CommonResult.data(schemaSyncService.run(param == null ? new LhSchemaSyncRunParam() : param));
     }
 }

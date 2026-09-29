@@ -18,7 +18,9 @@ import jakarta.annotation.Resource;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import vip.xiaonuo.common.annotation.CommonLog;
+import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.pojo.CommonResult;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.DsClient;
 import vip.xiaonuo.lh.core.engine.DataxClient;
 import vip.xiaonuo.lh.core.engine.FlinkClient;
@@ -31,10 +33,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 计算引擎 / 外部组件适配控制器（独立前端无登录）
- *
- * @author lakehouse
- * @date 2026/3/18
+ * 计算引擎 / 外部组件适配控制器。
+ * <p>波次 P4：须登录；提交/轮换等写接口另需运维角色。</p>
  */
 @Tag(name = "计算引擎适配控制器")
 @RestController
@@ -56,21 +56,35 @@ public class LhEngineController {
     @Resource
     private GravitinoClient gravitinoClient;
 
+    private static void requireLogin() {
+        LhLoginUsers.requireUser();
+    }
+
+    private static void requireOps() {
+        LhLoginUsers.requireUser();
+        if (!LhLoginUsers.hasAnyRole("superAdmin", "dataOps", "bizAdmin")) {
+            throw new CommonException("需要运维或管理员角色");
+        }
+    }
+
     @Operation(summary = "Flink作业列表")
     @GetMapping("/lh/engine/flinkJobs")
     public CommonResult<List<Map<String, Object>>> flinkJobs() {
+        requireLogin();
         return CommonResult.data(flinkClient.listJobs());
     }
 
     @Operation(summary = "DS工作流列表")
     @GetMapping("/lh/engine/dsWorkflows")
     public CommonResult<List<Map<String, Object>>> dsWorkflows() {
+        requireLogin();
         return CommonResult.data(dsClient.listWorkflows());
     }
 
     @Operation(summary = "组件健康")
     @GetMapping("/lh/engine/health")
     public CommonResult<List<Map<String, Object>>> health() {
+        requireLogin();
         return CommonResult.data(List.of(
                 flinkClient.health(),
                 sparkClient.health(),
@@ -86,6 +100,7 @@ public class LhEngineController {
     @CommonLog("Flink提交JAR")
     @PostMapping("/lh/engine/flink/submitJar")
     public CommonResult<Map<String, Object>> flinkSubmitJar(@RequestBody Map<String, Object> body) {
+        requireOps();
         return CommonResult.data(flinkClient.submitJar(
                 str(body.get("jarId")),
                 str(body.get("entryClass")),
@@ -96,12 +111,14 @@ public class LhEngineController {
     @Operation(summary = "Flink 作业详情")
     @GetMapping("/lh/engine/flink/job")
     public CommonResult<Map<String, Object>> flinkJob(@RequestParam String jobId) {
+        requireLogin();
         return CommonResult.data(flinkClient.getJob(jobId));
     }
 
     @Operation(summary = "预览引擎提交脚本")
     @PostMapping("/lh/engine/previewSubmit")
     public CommonResult<Map<String, Object>> previewSubmit(@RequestBody Map<String, Object> body) {
+        requireLogin();
         String engine = str(body.get("engine"));
         String nodeKey = str(body.get("nodeKey"));
         String nodeType = str(body.get("nodeType"));
@@ -122,6 +139,7 @@ public class LhEngineController {
     @GetMapping("/lh/engine/om/tables")
     public CommonResult<Map<String, Object>> omTables(
             @RequestParam(defaultValue = "10") int limit) {
+        requireLogin();
         return CommonResult.data(openMetadataClient.listTables(limit));
     }
 
@@ -133,6 +151,7 @@ public class LhEngineController {
     @CommonLog("轮换OpenMetadata Bot Token")
     @PostMapping("/lh/engine/om/rotateBotToken")
     public CommonResult<String> rotateOmBotToken(@RequestBody Map<String, String> body) {
+        requireOps();
         String token = body.get("token");
         String email = body.get("email");
         openMetadataClient.rotateBotToken(token, email);

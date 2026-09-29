@@ -4,15 +4,20 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcStorageService;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageEventCollect;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageInventoryCalibrator;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageProfileCollector;
+import vip.xiaonuo.lh.modular.lifecycle.support.GovLcStorageReportSubSupport;
 
 import java.util.List;
 import java.util.Map;
@@ -35,6 +40,10 @@ public class GovLcStorageController {
     private GovLcStorageProfileCollector profileCollector;
     @Resource
     private GovLcStorageEventCollect eventCollect;
+    @Resource
+    private GovLcStorageReportSubSupport reportSubSupport;
+    @Resource
+    private GovLcStorageInventoryCalibrator inventoryCalibrator;
 
     @Operation(summary = "存储趋势概览（三口径 KPI）")
     @GetMapping({"/lh/lifecycle/storage/summary", "/api/governance/lifecycle/storage/summary"})
@@ -123,5 +132,46 @@ public class GovLcStorageController {
             @RequestParam String tableFqn,
             @RequestParam(required = false) String eventId) {
         return CommonResult.data(eventCollect.onCommit(ws, tableFqn, eventId));
+    }
+
+    @Operation(summary = "存储日报订阅列表")
+    @GetMapping({"/lh/lifecycle/storage/report/subscriptions", "/api/governance/lifecycle/storage/report/subscriptions"})
+    public CommonResult<List<Map<String, Object>>> reportSubscriptions(@RequestParam(required = false) String ws) {
+        return CommonResult.data(reportSubSupport.list(ws));
+    }
+
+    @Operation(summary = "存储日报订阅创建/更新")
+    @CommonLog("存储日报订阅保存")
+    @PostMapping({"/lh/lifecycle/storage/report/subscriptions", "/api/governance/lifecycle/storage/report/subscriptions"})
+    public CommonResult<Map<String, Object>> upsertReportSubscription(@RequestBody Map<String, Object> body) {
+        return CommonResult.data(reportSubSupport.upsert(body));
+    }
+
+    @Operation(summary = "存储日报订阅删除")
+    @CommonLog("存储日报订阅删除")
+    @DeleteMapping({
+            "/lh/lifecycle/storage/report/subscriptions/{id}",
+            "/api/governance/lifecycle/storage/report/subscriptions/{id}"
+    })
+    public CommonResult<String> deleteReportSubscription(@PathVariable String id) {
+        reportSubSupport.delete(id);
+        return CommonResult.ok();
+    }
+
+    @Operation(summary = "立即推送全部/单条日报订阅")
+    @CommonLog("存储日报订阅推送")
+    @PostMapping({"/lh/lifecycle/storage/report/subscriptions/run", "/api/governance/lifecycle/storage/report/subscriptions/run"})
+    public CommonResult<Map<String, Object>> runReportSubscriptions(@RequestParam(required = false) String id) {
+        if (id != null && !id.isBlank()) {
+            return CommonResult.data(reportSubSupport.runOne(id));
+        }
+        return CommonResult.data(reportSubSupport.runDue());
+    }
+
+    @Operation(summary = "MinIO Inventory CSV 校准桶物理量")
+    @CommonLog("存储 Inventory 校准")
+    @PostMapping({"/lh/lifecycle/storage/inventory/calibrate", "/api/governance/lifecycle/storage/inventory/calibrate"})
+    public CommonResult<Map<String, Object>> inventoryCalibrate() {
+        return CommonResult.data(inventoryCalibrator.calibrate());
     }
 }

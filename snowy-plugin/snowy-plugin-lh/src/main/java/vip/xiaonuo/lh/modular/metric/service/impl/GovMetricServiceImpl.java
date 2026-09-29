@@ -151,10 +151,11 @@ public class GovMetricServiceImpl implements GovMetricService {
     public Page<GovMetricVo> page(GovMetricPageParam param) {
         QueryWrapper<GovMetric> qw = new QueryWrapper<GovMetric>().checkSqlInjection();
         qw.lambda().eq(GovMetric::getDeleteFlag, NOT_DELETE);
-        // 软过滤：传 ws 则按归属筛；空则「查看全部」
+        // 空间优先：缺省 scope=workspace；all=特权巡检
+        String scope = StrUtil.blankToDefault(StrUtil.trim(param.getScope()), "workspace").toLowerCase(Locale.ROOT);
         String ws = StrUtil.trim(param.getWs());
-        if (StrUtil.isNotBlank(ws)) {
-            qw.lambda().eq(GovMetric::getWs, ws);
+        if (!"all".equals(scope)) {
+            qw.lambda().eq(GovMetric::getWs, StrUtil.blankToDefault(ws, WS_DEFAULT));
         }
         if (StrUtil.isNotBlank(param.getDomain()) && !"all".equalsIgnoreCase(param.getDomain())) {
             qw.lambda().eq(GovMetric::getDomainCode, normalizeDomain(param.getDomain()));

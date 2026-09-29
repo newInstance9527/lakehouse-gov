@@ -45,6 +45,9 @@ public class GovDelRequestCreateParam {
     @Schema(description = "备注")
     private String remark;
 
+    @Schema(description = "深链种子表 FQN（可选；受理评估时优先纳入计划）")
+    private String seedTable;
+
     @Schema(description = "创建后立即评估（默认 true）")
     private Boolean autoAssess;
 }

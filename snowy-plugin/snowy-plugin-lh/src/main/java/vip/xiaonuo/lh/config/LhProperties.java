@@ -58,12 +58,32 @@ public class LhProperties {
     private Metric metric = new Metric();
     private Quality quality = new Quality();
     private Export export = new Export();
+    private Observability observability = new Observability();
+    /** 出站 HTTPS 客户端（ES 等）是否跳过证书校验；默认 false */
+    private Http http = new Http();
+
+    @Getter
+    @Setter
+    public static class Http {
+        private boolean insecureSsl = false;
+    }
 
     @Getter
     @Setter
     public static class Vault {
-        /** AES 密钥材料（勿提交生产真实值到公共仓库） */
+        /**
+         * 后端：{@code aes}（默认，ig_secret_store）或 {@code hashicorp}（KV v2）。
+         */
+        private String backend = "aes";
+        /** AES 密钥材料（仅 aes 后端；勿提交生产真值） */
         private String aesKey = "";
+        /** HashiCorp Vault 根地址，例 http://127.0.0.1:8200 */
+        private String addr = "";
+        /** Vault token（仅 hashicorp；生产用 ENV / 注入，勿提交） */
+        private String token = "";
+        /** KV v2 mount，默认 secret */
+        private String kvMount = "secret";
+        private int timeoutMs = 8000;
     }
 
     @Getter
@@ -76,7 +96,7 @@ public class LhProperties {
         /** bootstrap only */
         private String user;
         private String password;
-        private boolean insecureSsl = true;
+        private boolean insecureSsl = false;
         /**
          * true：人查用 X-Trino-User 代执行已映射主体（Trino 须允许服务账号 impersonate）。
          * false：人查直接拒绝，不会改用服务账号。
@@ -333,6 +353,24 @@ public class LhProperties {
          * 默认 true，便于无 DS Worker 时也能验证最小链路。
          */
         private boolean localTrialFallback = true;
+        /**
+         * 发布前检查数据契约：若 sink/source 表已登记契约且 status=fail，或存在未关闭破坏性变更，则硬失败。
+         * 无契约登记时不阻断（避免无契约环境全体卡死）。
+         */
+        private boolean contractGateEnabled = true;
+        /**
+         * 与 contractGateEnabled 联用：true 时，DAG 引用的表必须已有契约登记，否则硬失败。
+         * 默认 false（试点可开）；生产建议 true。
+         */
+        private boolean contractRequireRegistered = false;
+        /**
+         * 发布时 quality 节点 blockOnFail 命中则抛错回滚，不再 soft 标记后继续。
+         */
+        private boolean hardFailQualityOnDeploy = true;
+        /**
+         * 发布时 DS createOrUpdateWorkflow 返回 degraded 则硬失败（不把门户标为 prod 成功）。
+         */
+        private boolean hardFailDsOnDeploy = false;
     }
 
     @Getter
@@ -475,6 +513,18 @@ public class LhProperties {
          * 与 {@link #callbackBaseUrl} 同时非空时，投影尾节点 SHELL 自动 curl 回写。
          */
         private String callbackToken = "";
+        /** 存储日报定时订阅推送；默认关，配 webhook 后开 */
+        private boolean reportSubEnabled = false;
+        private String reportSubCron = "0 0 8 * * ?";
+        /** MinIO Inventory CSV 校准；默认关 */
+        private boolean inventoryCalibrateEnabled = false;
+        private String inventoryCalibrateCron = "0 30 3 * * SUN";
+        /** Inventory 报告所在桶（存放 latest.csv） */
+        private String inventoryReportBucket = "";
+        /** 前缀，默认 inventory → inventory/{srcBucket}/latest.csv */
+        private String inventoryReportPrefix = "inventory";
+        /** 待校准源桶；空则用 VM 已有桶列表 */
+        private java.util.List<String> inventorySourceBuckets = new java.util.ArrayList<>();
     }
 
     /**
@@ -492,6 +542,11 @@ public class LhProperties {
         private boolean metaDriftEnabled = false;
         /** 漂移日批 cron；默认每天 04:15 */
         private String metaDriftCron = "0 15 4 * * ?";
+        /**
+         * 登记时 Grav/OM 投影失败是否硬失败（默认 false=soft-fail 保留门户登记）。
+         * 试点加固可开 true，避免「登记成功但引擎侧未投影」幻觉。
+         */
+        private boolean projectionHardFail = false;
     }
 
     /**
@@ -624,6 +679,30 @@ public class LhProperties {
         /** 扫描 ¥/GB */
         private java.math.BigDecimal computePerGbScan = new java.math.BigDecimal("0.50");
         private String currency = "CNY";
+    }
+
+    /**
+     * 运维监控：夜莺告警事件 API（§30）；未配 URL 则 alerts 仅走 VM PromQL。
+     */
+    @Getter
+    @Setter
+    public static class Observability {
+        /** 夜莺根地址，例 http://127.0.0.1:17000；空=跳过 n9e */
+        private String nightingaleUrl = "";
+        private String nightingaleVaultPath = LhVaultPaths.NIGHTINGALE;
+        /** bootstrap 用户；生产写 Vault 后可清空 */
+        private String nightingaleUser = "root";
+        private String nightingalePassword = "";
+        private int nightingaleTimeoutMs = 5000;
+        /** 拉当前告警条数上限 */
+        private int nightingaleAlertLimit = 50;
+        /**
+         * 事件推送：优先 webhook（运维自建接收或 n9e 回调）；
+         * 空则尝试 {@code {nightingaleUrl}/v1/n9e/event/push}（需已登录）。
+         */
+        private String nightingaleWebhookUrl = "";
+        /** 为 false 时只登记载荷不推送（默认 true） */
+        private boolean nightingalePushEnabled = true;
     }
 
     /**
