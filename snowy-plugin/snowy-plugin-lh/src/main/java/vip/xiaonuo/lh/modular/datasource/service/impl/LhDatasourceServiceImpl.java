@@ -861,10 +861,38 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         } else {
             qw.lambda().orderByAsc(LhDsTable::getTableName);
         }
-        Page<LhDsTable> raw = dsTableMapper.selectPage(CommonPageRequest.defaultPage(), qw);
+        // 表清单常 >100；CommonPageRequest 全局上限 100，本接口单独放宽
+        Page<LhDsTable> pageReq = inventoryTablePageRequest();
+        Page<LhDsTable> raw = dsTableMapper.selectPage(pageReq, qw);
         Page<LhDsTableVo> page = new Page<>(raw.getCurrent(), raw.getSize(), raw.getTotal());
         page.setRecords(raw.getRecords().stream().map(viewAssembler::toTableVo).collect(Collectors.toList()));
         return page;
+    }
+
+    /** 表清单分页：默认 500，最大 5000（覆盖同步后全量展示） */
+    private static Page<LhDsTable> inventoryTablePageRequest() {
+        long current = 1;
+        long size = 500;
+        if (vip.xiaonuo.common.util.CommonServletUtil.isWeb()) {
+            String pageStr = vip.xiaonuo.common.util.CommonServletUtil.getParamFromRequest("current");
+            String sizeStr = vip.xiaonuo.common.util.CommonServletUtil.getParamFromRequest("size");
+            if (StrUtil.isNotBlank(pageStr)) {
+                try {
+                    current = Math.max(1, Long.parseLong(pageStr.trim()));
+                } catch (NumberFormatException ignored) {
+                    current = 1;
+                }
+            }
+            if (StrUtil.isNotBlank(sizeStr)) {
+                try {
+                    size = Long.parseLong(sizeStr.trim());
+                } catch (NumberFormatException ignored) {
+                    size = 500;
+                }
+            }
+        }
+        size = Math.max(1, Math.min(size, 5000));
+        return new Page<>(current, size);
     }
 
     @Transactional(rollbackFor = Exception.class)

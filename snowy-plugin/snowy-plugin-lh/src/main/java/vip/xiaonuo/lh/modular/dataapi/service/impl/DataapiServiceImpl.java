@@ -190,6 +190,7 @@ public class DataapiServiceImpl implements DataapiService {
             throw new CommonException("id 不能为空");
         }
         DataapiApiBinding b = requireBinding(param.getId());
+        assertEditable(b);
         applyParam(b, param);
         b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
         bindingMapper.updateById(b);
@@ -205,9 +206,27 @@ public class DataapiServiceImpl implements DataapiService {
             throw new CommonException("请提供 SQL/Groovy 脚本，或已有 sqlrestApiId");
         }
         DataapiApiBinding binding;
+        // newBinding 会预生成雪花 id；不能用 id 是否为空判断 insert/update，否则新建只 update 0 行导致「绑定不存在」
+        boolean insertBinding = false;
         if (StrUtil.isNotBlank(param.getId())) {
-            binding = requireBinding(param.getId());
-            applyParam(binding, param);
+            DataapiApiBinding existing = bindingMapper.selectById(param.getId());
+            if (existing == null || "DELETED".equals(existing.getDeleteFlag())) {
+                // 历史幽灵 id：前端仍持有未入库主键 → 按 path/method 复用或新建
+                QueryWrapper<DataapiApiBinding> existQw = baseQw(StrUtil.blankToDefault(param.getWs(), WS_DEFAULT))
+                        .eq("public_path", normalizePath(param.getPublicPath()))
+                        .eq("method", StrUtil.blankToDefault(param.getMethod(), "GET").toUpperCase());
+                DataapiApiBinding byPath = bindingMapper.selectOne(existQw.last("LIMIT 1"));
+                if (byPath != null) {
+                    binding = byPath;
+                    applyParam(binding, param);
+                } else {
+                    binding = newBinding(param);
+                    insertBinding = true;
+                }
+            } else {
+                binding = existing;
+                applyParam(binding, param);
+            }
         } else {
             QueryWrapper<DataapiApiBinding> existQw = baseQw(StrUtil.blankToDefault(param.getWs(), WS_DEFAULT))
                     .eq("public_path", normalizePath(param.getPublicPath()))
@@ -218,7 +237,12 @@ public class DataapiServiceImpl implements DataapiService {
                 applyParam(binding, param);
             } else {
                 binding = newBinding(param);
+                insertBinding = true;
             }
+        }
+
+        if (!insertBinding) {
+            assertEditable(binding);
         }
 
         Long sqlrestId = parseLong(binding.getSqlrestApiId());
@@ -308,11 +332,18 @@ public class DataapiServiceImpl implements DataapiService {
             }
         }
 
-        if (StrUtil.isBlank(binding.getId())) {
+        if (insertBinding || StrUtil.isBlank(binding.getId())) {
+            if (StrUtil.isBlank(binding.getId())) {
+                binding.setId(IdUtil.getSnowflakeNextIdStr());
+            }
             bindingMapper.insert(binding);
         } else {
             binding.setRevision(binding.getRevision() == null ? 1 : binding.getRevision() + 1);
-            bindingMapper.updateById(binding);
+            int updated = bindingMapper.updateById(binding);
+            // 历史脏数据：前端持有未入库 id 时兜底插入，避免探针/审批再报「绑定不存在」
+            if (updated == 0) {
+                bindingMapper.insert(binding);
+            }
         }
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -359,7 +390,7 @@ public class DataapiServiceImpl implements DataapiService {
         if (StrUtil.isNotBlank(param.getId())) {
             DataapiApiBinding b = requireBinding(param.getId());
             if (StrUtil.isBlank(sql) && StrUtil.isNotBlank(b.getSqlrestApiId())) {
-                return enrichTrial(sqlrestClient.trial(b.getSqlrestApiId()), null);
+                return enrichTrial(sqlrestClient.trial(b.getSqlrestApiId(), portalParams), null);
             }
             if (portalParams == null && StrUtil.isNotBlank(b.getParamJson())) {
                 portalParams = new ArrayList<>();
@@ -495,6 +526,39 @@ public class DataapiServiceImpl implements DataapiService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> unpublish(DataapiIdParam param) {
+        DataapiApiBinding b = requireBinding(param.getId());
+        if (!"published".equals(b.getState())) {
+            throw new CommonException("仅已发布接口可取消发布");
+        }
+        Map<String, Object> sr = Map.of("ok", true, "skipped", true);
+        if (StrUtil.isNotBlank(b.getSqlrestApiId())) {
+            sr = sqlrestClient.retire(Long.parseLong(b.getSqlrestApiId()));
+        }
+        Map<String, Object> ax = Map.of("ok", true, "skipped", true, "edgeMode", sqlrestClient.edgeMode());
+        if (sqlrestClient.useApisixEdge() && StrUtil.isNotBlank(b.getApisixRouteId())) {
+            ax = apisixClient.deleteRoute(b.getApisixRouteId());
+            b.setApisixRouteId(null);
+        }
+        // 回草稿：保留 sqlrestApiId / 版本指针，清空审批单号，编辑后须重新申请发布
+        b.setState("draft");
+        b.setPublishTicketNo(null);
+        b.setLastError(null);
+        b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
+        bindingMapper.updateById(b);
+        Map<String, Object> result = new LinkedHashMap<>();
+        boolean ok = Boolean.TRUE.equals(sr.get("ok")) && Boolean.TRUE.equals(ax.get("ok"));
+        result.put("ok", ok);
+        result.put("degraded", Boolean.TRUE.equals(sr.get("degraded")) || Boolean.TRUE.equals(ax.get("degraded")));
+        result.put("sqlrest", sr);
+        result.put("apisix", ax);
+        result.put("binding", toPortalCard(b, true));
+        result.put("message", "已取消发布，接口回草稿；修改后请重新申请发布");
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> retire(DataapiIdParam param) {
         DataapiApiBinding b = requireBinding(param.getId());
         Map<String, Object> sr = Map.of("ok", true, "skipped", true);
@@ -518,11 +582,118 @@ public class DataapiServiceImpl implements DataapiService {
     }
 
     @Override
+    public Map<String, Object> listVersions(String id) {
+        DataapiApiBinding b = requireBinding(id);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("bindingId", b.getId());
+        result.put("state", b.getState());
+        result.put("revision", b.getRevision());
+        result.put("currentVersion", b.getSqlrestVersion());
+        result.put("currentCommitId", b.getSqlrestCommitId());
+        List<Map<String, Object>> versions = new ArrayList<>();
+        if (StrUtil.isBlank(b.getSqlrestApiId())) {
+            result.put("ok", true);
+            result.put("versions", versions);
+            result.put("message", "尚未同步到接口服务，无版本历史");
+            return result;
+        }
+        Map<String, Object> sr = sqlrestClient.listVersions(Long.parseLong(b.getSqlrestApiId()));
+        boolean ok = Boolean.TRUE.equals(sr.get("ok"));
+        result.put("ok", ok);
+        result.put("degraded", Boolean.TRUE.equals(sr.get("degraded")));
+        if (ok && sr.get("data") instanceof List<?> list) {
+            String curCommit = StrUtil.blankToDefault(b.getSqlrestCommitId(), "");
+            Integer curVer = b.getSqlrestVersion();
+            for (Object item : list) {
+                cn.hutool.json.JSONObject v = JSONUtil.parseObj(item);
+                Map<String, Object> row = new LinkedHashMap<>();
+                Long commitId = v.getLong("commitId");
+                Integer version = v.getInt("version");
+                row.put("commitId", commitId);
+                row.put("version", version);
+                row.put("description", v.getStr("description"));
+                row.put("createTime", v.get("createTime"));
+                boolean current = (commitId != null && curCommit.equals(String.valueOf(commitId)))
+                        || (version != null && curVer != null && version.equals(curVer));
+                row.put("current", current);
+                versions.add(row);
+            }
+        } else if (!ok) {
+            result.put("message", sr.get("message"));
+        }
+        result.put("versions", versions);
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> rollback(DataapiIdParam param) {
+        DataapiApiBinding b = requireBinding(param.getId());
+        if (StrUtil.isBlank(b.getSqlrestApiId())) {
+            throw new CommonException("尚未同步到接口服务，无法回退");
+        }
+        if (param.getCommitId() == null) {
+            throw new CommonException("commitId 不能为空");
+        }
+        long apiId = Long.parseLong(b.getSqlrestApiId());
+        Map<String, Object> versions = sqlrestClient.listVersions(apiId);
+        Integer targetVersion = param.getVersion();
+        String targetDesc = null;
+        if (Boolean.TRUE.equals(versions.get("ok")) && versions.get("data") instanceof List<?> list) {
+            boolean found = false;
+            for (Object item : list) {
+                cn.hutool.json.JSONObject v = JSONUtil.parseObj(item);
+                Long cid = v.getLong("commitId");
+                if (cid != null && cid.equals(param.getCommitId())) {
+                    found = true;
+                    if (targetVersion == null) {
+                        targetVersion = v.getInt("version");
+                    }
+                    targetDesc = v.getStr("description");
+                    break;
+                }
+            }
+            if (!found) {
+                throw new CommonException("目标版本不存在：" + param.getCommitId());
+            }
+        }
+        Map<String, Object> deploy = sqlrestClient.deploy(apiId, param.getCommitId());
+        boolean ok = Boolean.TRUE.equals(deploy.get("ok"));
+        if (!ok) {
+            throw new CommonException("回退部署失败：" + deploy.get("message"));
+        }
+        b.setSqlrestCommitId(String.valueOf(param.getCommitId()));
+        if (targetVersion != null) {
+            b.setSqlrestVersion(targetVersion);
+        }
+        b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
+        b.setLastError(null);
+        // 已发布：流量已切到历史版本；草稿：仅更新指针，上线仍须申请发布
+        if (!"published".equals(b.getState()) && !"retired".equals(b.getState())) {
+            b.setState("draft");
+        }
+        bindingMapper.updateById(b);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("deploy", deploy);
+        result.put("binding", toPortalCard(b, true));
+        Map<String, Object> rolled = new LinkedHashMap<>();
+        rolled.put("commitId", param.getCommitId());
+        rolled.put("version", targetVersion);
+        rolled.put("description", StrUtil.nullToDefault(targetDesc, ""));
+        result.put("rolledBackTo", rolled);
+        result.put("message", "published".equals(b.getState())
+                ? "已回退到 v" + (targetVersion != null ? targetVersion : param.getCommitId()) + " 并重新部署"
+                : "已指向 v" + (targetVersion != null ? targetVersion : param.getCommitId()) + "；当前为草稿，申请发布后生效于网关");
+        return result;
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public void delete(DataapiIdParam param) {
         DataapiApiBinding b = requireBinding(param.getId());
         if ("published".equals(b.getState())) {
-            throw new CommonException("已发布接口请先下线再删除");
+            throw new CommonException("已发布接口请先取消发布或下线再删除");
         }
         b.setDeleteFlag("DELETED");
         bindingMapper.updateById(b);
@@ -923,6 +1094,24 @@ public class DataapiServiceImpl implements DataapiService {
             throw new CommonException("路径无效：请填写如 /api/demo 的对外路径（勿只填 /api/）");
         }
         String url = SqlrestClient.toGatewayRequestUrl(base, p);
+        String methodUpper = method.toUpperCase();
+        List<Map<String, Object>> probeParams = param != null ? param.getParams() : null;
+        Map<String, Object> valueMap = probeParamValueMap(probeParams);
+        String requestBody = null;
+        if (!valueMap.isEmpty() && ("GET".equals(methodUpper) || "DELETE".equals(methodUpper))) {
+            StringBuilder qs = new StringBuilder();
+            for (Map.Entry<String, Object> e : valueMap.entrySet()) {
+                if (qs.length() > 0) {
+                    qs.append('&');
+                }
+                qs.append(cn.hutool.core.util.URLUtil.encodeQuery(e.getKey()))
+                        .append('=')
+                        .append(cn.hutool.core.util.URLUtil.encodeQuery(String.valueOf(e.getValue())));
+            }
+            url = url.contains("?") ? url + "&" + qs : url + "?" + qs;
+        } else if (!valueMap.isEmpty()) {
+            requestBody = JSONUtil.toJsonStr(valueMap);
+        }
         int timeout = lhProperties.getDataapi() != null
                 ? Math.max(2000, lhProperties.getDataapi().getGatewayProbeTimeoutMs())
                 : 8000;
@@ -932,17 +1121,42 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("publicPath", p.startsWith("/") ? p : "/" + p);
         m.put("sqlrestPath", srPath);
         m.put("requestUrl", url);
-        m.put("method", method.toUpperCase());
+        m.put("method", methodUpper);
+        if (requestBody != null) {
+            m.put("requestBody", requestBody);
+        }
+        String appKey = param != null ? StrUtil.trim(param.getAppKey()) : null;
+        String bearer = param != null ? StrUtil.trim(param.getBearerToken()) : null;
+        if (StrUtil.isNotBlank(appKey)) {
+            m.put("authAppKey", true);
+        }
+        if (StrUtil.isNotBlank(bearer)) {
+            m.put("authBearer", true);
+        }
         enrichProbeBinding(m, binding);
         long t0 = System.currentTimeMillis();
         try {
-            HttpRequest req = "POST".equalsIgnoreCase(method)
+            HttpRequest req = "POST".equals(methodUpper)
                     ? HttpRequest.post(url)
-                    : "PUT".equalsIgnoreCase(method)
+                    : "PUT".equals(methodUpper)
                     ? HttpRequest.put(url)
-                    : "DELETE".equalsIgnoreCase(method)
+                    : "DELETE".equals(methodUpper)
                     ? HttpRequest.delete(url)
                     : HttpRequest.get(url);
+            if (StrUtil.isNotBlank(appKey)) {
+                req.header("X-App-Key", appKey);
+            }
+            if (StrUtil.isNotBlank(bearer)) {
+                String token = bearer;
+                if (!token.regionMatches(true, 0, "Bearer ", 0, 7)) {
+                    token = "Bearer " + token;
+                }
+                req.header("Authorization", token);
+            }
+            if (requestBody != null) {
+                req.header("Content-Type", "application/json;charset=UTF-8");
+                req.body(requestBody);
+            }
             HttpResponse resp = req.timeout(timeout).execute();
             String body = resp.body();
             int status = resp.getStatus();
@@ -953,6 +1167,9 @@ public class DataapiServiceImpl implements DataapiService {
             m.put("latencyMs", System.currentTimeMillis() - t0);
             m.put("bodyPreview", body == null ? "" : body.substring(0, Math.min(800, body.length())));
             applyProbeDiagnosis(m, status, null);
+            if ((status == 401 || status == 403) && StrUtil.isBlank(appKey) && StrUtil.isBlank(bearer)) {
+                m.put("suggestion", "在线调试中填写 X-App-Key 与 Bearer Secret，或将接口设为 open");
+            }
         } catch (Exception e) {
             m.put("ok", false);
             m.put("latencyMs", System.currentTimeMillis() - t0);
@@ -960,6 +1177,35 @@ public class DataapiServiceImpl implements DataapiService {
             applyProbeDiagnosis(m, null, e.getMessage());
         }
         return m;
+    }
+
+    /** 从门户/调试入参提取 name→value（value / example / defaultValue） */
+    private static Map<String, Object> probeParamValueMap(List<Map<String, Object>> portalParams) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (portalParams == null) {
+            return out;
+        }
+        for (Map<String, Object> p : portalParams) {
+            if (p == null) {
+                continue;
+            }
+            String name = StrUtil.trim(String.valueOf(p.getOrDefault("name", "")));
+            if (StrUtil.isBlank(name) || "null".equals(name)) {
+                continue;
+            }
+            Object v = p.get("value");
+            if (v == null || StrUtil.isBlank(String.valueOf(v))) {
+                v = p.get("example");
+            }
+            if (v == null || StrUtil.isBlank(String.valueOf(v))) {
+                v = p.get("defaultValue") != null ? p.get("defaultValue") : p.get("default");
+            }
+            if (v == null || StrUtil.isBlank(String.valueOf(v))) {
+                continue;
+            }
+            out.put(name, v);
+        }
+        return out;
     }
 
     /** 探针附带绑定 / SQLREST 在线态，便于 404 时给出可读原因 */
@@ -1329,6 +1575,9 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("updateTime", b.getUpdateTime() == null ? null : b.getUpdateTime().toString());
         m.put("lastError", b.getLastError());
         m.put("publishTicketNo", b.getPublishTicketNo());
+        m.put("revision", b.getRevision() == null ? 1 : b.getRevision());
+        m.put("sqlrestVersion", b.getSqlrestVersion());
+        m.put("sqlrestCommitId", b.getSqlrestCommitId());
         if (detail) {
             if (StrUtil.isNotBlank(b.getParamJson())) {
                 m.put("params", JSONUtil.parseArray(b.getParamJson()));
@@ -1409,5 +1658,12 @@ public class DataapiServiceImpl implements DataapiService {
             throw new CommonException("绑定不存在");
         }
         return b;
+    }
+
+    /** 已发布不可直接改定义，须先取消发布回草稿 */
+    private static void assertEditable(DataapiApiBinding b) {
+        if (b != null && "published".equals(b.getState())) {
+            throw new CommonException("已发布接口请先取消发布后再编辑；改完后需重新申请发布");
+        }
     }
 }

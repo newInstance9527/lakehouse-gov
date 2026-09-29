@@ -66,6 +66,13 @@ public class GovAiChatController {
         return CommonResult.data(govAiChatService.deleteSession(id));
     }
 
+    @Operation(summary = "删除会话（POST 兜底，同 DELETE）")
+    @CommonLog("删除AI会话")
+    @PostMapping("/lh/ai/sessions/{id}/delete")
+    public CommonResult<Map<String, Object>> deleteSessionPost(@PathVariable("id") String id) {
+        return CommonResult.data(govAiChatService.deleteSession(id));
+    }
+
     @Operation(summary = "对话（SSE）")
     @PostMapping(value = "/lh/ai/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chat(@RequestBody GovAiChatParam param) {

@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.core.engine.FlinkIcebergSinkSqlCompiler;
 import vip.xiaonuo.lh.core.engine.GravitinoClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
@@ -381,7 +382,11 @@ public class IgEtlSinkTargetChecker {
         String schema;
         String table;
         if ("sink_iceberg".equals(sinkType)) {
-            catalog = firstNonBlank(conf.getStr("catalog"), lhProperties.getGravitino().getCatalog(), "iceberg");
+            // 与 Flink 入湖一致：prod_catalog/hive → iceberg（autoCreate 只建 schema/表，不建 catalog）
+            catalog = FlinkIcebergSinkSqlCompiler.lakeCatalog(conf);
+            if (StrUtil.isBlank(catalog)) {
+                catalog = firstNonBlank(lhProperties.getGravitino().getCatalog(), "iceberg");
+            }
             schema = firstNonBlank(conf.getStr("database"), conf.getStr("schema"), "default");
             table = conf.getStr("table");
         } else if ("sink_ck".equals(sinkType)) {

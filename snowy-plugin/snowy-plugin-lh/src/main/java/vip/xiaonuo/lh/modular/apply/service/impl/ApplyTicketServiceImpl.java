@@ -334,6 +334,10 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (StrUtil.isBlank(bindingId)) {
             throw new CommonException("API 发布申请须携带 apiBindingId（先保存草稿绑定）");
         }
+        DataapiApiBinding binding = dataapiApiBindingMapper.selectById(bindingId);
+        if (binding == null || "DELETED".equals(binding.getDeleteFlag())) {
+            throw new CommonException("绑定不存在，请先在工作台保存草稿后再提交发布申请：" + bindingId);
+        }
         ApplyTicket t = newTicketShell(userId, TYPE_API_PUBLISH, param, "default");
         t.setTicketNo(nextPrefixedTicketNo("API-"));
         JSONObject payload = new JSONObject();
@@ -352,12 +356,9 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         item.setDetail(payload.toString());
         itemMapper.insert(item);
         // 回写绑定上的申请单号（草稿已存在；发布仍须审批通过）
-        DataapiApiBinding binding = dataapiApiBindingMapper.selectById(bindingId);
-        if (binding != null) {
-            binding.setPublishTicketNo(t.getTicketNo());
-            binding.setUpdateTime(new Date());
-            dataapiApiBindingMapper.updateById(binding);
-        }
+        binding.setPublishTicketNo(t.getTicketNo());
+        binding.setUpdateTime(new Date());
+        dataapiApiBindingMapper.updateById(binding);
         return t;
     }
 

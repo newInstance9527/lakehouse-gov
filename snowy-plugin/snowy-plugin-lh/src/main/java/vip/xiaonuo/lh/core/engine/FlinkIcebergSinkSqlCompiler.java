@@ -161,9 +161,19 @@ public final class FlinkIcebergSinkSqlCompiler {
         return sb.toString();
     }
 
-    /** 演示默认 prod_catalog 一律落到湖 catalog。 */
-    static String lakeCatalog(JSONObject conf) {
+    /**
+     * 湖 catalog 归一：演示名 {@code prod_catalog}/{@code hive} 一律落到真实湖 catalog {@code iceberg}
+     *（Trino/Grav 均无 prod_catalog；autoCreate 也不建 catalog）。
+     * 供 Flink 入湖 SQL、Sink 校验/建表、试跑预览共用。
+     */
+    public static String lakeCatalog(JSONObject conf) {
         String c = firstNonBlank(conf.getStr("catalog"), conf.getStr("gravCatalog"), "iceberg");
+        return normalizeLakeCatalog(c);
+    }
+
+    /** 单字段归一（校验 / 预览解析 catalog 时用）。 */
+    public static String normalizeLakeCatalog(String catalog) {
+        String c = StrUtil.blankToDefault(catalog, "iceberg").trim();
         if ("prod_catalog".equalsIgnoreCase(c) || "hive".equalsIgnoreCase(c)) {
             return "iceberg";
         }

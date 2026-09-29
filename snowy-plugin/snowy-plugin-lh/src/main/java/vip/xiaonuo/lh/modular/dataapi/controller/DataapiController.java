@@ -94,11 +94,31 @@ public class DataapiController {
         return CommonResult.data(dataapiService.publish(param));
     }
 
-    @Operation(summary = "下线")
+    @Operation(summary = "取消发布：下线回草稿，须重新申请发布；与永久下线(retire)不同")
+    @CommonLog("数据服务取消发布")
+    @PostMapping("/lh/dataapi/unpublish")
+    public CommonResult<Map<String, Object>> unpublish(@RequestBody @Valid DataapiIdParam param) {
+        return CommonResult.data(dataapiService.unpublish(param));
+    }
+
+    @Operation(summary = "下线（永久）")
     @CommonLog("数据服务下线")
     @PostMapping("/lh/dataapi/retire")
     public CommonResult<Map<String, Object>> retire(@RequestBody @Valid DataapiIdParam param) {
         return CommonResult.data(dataapiService.retire(param));
+    }
+
+    @Operation(summary = "发布版本列表（SQLREST version/list）")
+    @GetMapping("/lh/dataapi/versions")
+    public CommonResult<Map<String, Object>> versions(@RequestParam String id) {
+        return CommonResult.data(dataapiService.listVersions(id));
+    }
+
+    @Operation(summary = "回退到历史版本并 deploy")
+    @CommonLog("数据服务版本回退")
+    @PostMapping("/lh/dataapi/rollback")
+    public CommonResult<Map<String, Object>> rollback(@RequestBody @Valid DataapiIdParam param) {
+        return CommonResult.data(dataapiService.rollback(param));
     }
 
     @Operation(summary = "删除绑定")

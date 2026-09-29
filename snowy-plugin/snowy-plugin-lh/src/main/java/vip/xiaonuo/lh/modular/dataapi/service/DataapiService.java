@@ -32,7 +32,19 @@ public interface DataapiService {
 
     Map<String, Object> publish(DataapiIdParam param);
 
+    /**
+     * 取消发布：Gateway/SQLREST 下线，绑定回草稿；须重新申请发布后才能再上线。
+     * 与 retire（永久下线）不同。
+     */
+    Map<String, Object> unpublish(DataapiIdParam param);
+
     Map<String, Object> retire(DataapiIdParam param);
+
+    /** SQLREST 版本列表（含 commitId / version / description） */
+    Map<String, Object> listVersions(String id);
+
+    /** 回退到历史 commit 并 deploy；已发布时立即切流量，草稿仅更新指针 */
+    Map<String, Object> rollback(DataapiIdParam param);
 
     void delete(DataapiIdParam param);
 

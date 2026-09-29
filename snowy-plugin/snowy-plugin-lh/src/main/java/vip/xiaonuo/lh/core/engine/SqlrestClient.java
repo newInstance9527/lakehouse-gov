@@ -247,8 +247,12 @@ public class SqlrestClient {
         return postJson("/sqlrest/manager/api/v1/assignment/debug", body);
     }
 
-    /** 兼容旧 trial(apiId)：拉详情后用其 SQL 调试 */
+    /** 兼容旧 trial(apiId)：拉详情后用其 SQL 调试；可带门户 params → paramValues */
     public Map<String, Object> trial(String sqlrestApiId) {
+        return trial(sqlrestApiId, null);
+    }
+
+    public Map<String, Object> trial(String sqlrestApiId, List<Map<String, Object>> portalParams) {
         try {
             Map<String, Object> detail = detail(sqlrestApiId);
             if (Boolean.TRUE.equals(detail.get("degraded")) || detail.get("data") == null) {
@@ -268,7 +272,7 @@ public class SqlrestClient {
             req.put("namingStrategy", StrUtil.blankToDefault(data.getStr("namingStrategy"), "CAMEL_CASE"));
             req.put("formatMap", data.get("formatMap") != null ? data.get("formatMap") : List.of());
             req.put("contextList", sqls);
-            req.put("paramValues", List.of());
+            req.put("paramValues", toDebugParamValues(portalParams));
             return debug(req);
         } catch (Exception e) {
             return degraded("SQLREST trial: " + e.getMessage());
@@ -504,7 +508,10 @@ public class SqlrestClient {
             if (p == null || StrUtil.isBlank(String.valueOf(p.getOrDefault("name", "")))) {
                 continue;
             }
-            Object example = p.get("example");
+            Object example = p.get("value");
+            if (example == null || StrUtil.isBlank(String.valueOf(example))) {
+                example = p.get("example");
+            }
             if (example == null || StrUtil.isBlank(String.valueOf(example))) {
                 example = p.get("defaultValue") != null ? p.get("defaultValue") : p.get("default");
             }

@@ -271,11 +271,11 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 && !LhLoginUsers.isSuperAdmin()) {
             throw new CommonException("无权删除该会话");
         }
-        session.setDeleteFlag("DELETED");
+        // CommonEntity.deleteFlag 带 @TableLogic：updateById 不会写 delete_flag，须 deleteById 软删
         session.setStatus("deleted");
-        session.setUpdateTime(new Date());
         session.setRevision(session.getRevision() == null ? 1 : session.getRevision() + 1);
         sessionMapper.updateById(session);
+        sessionMapper.deleteById(sessionId);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", true);
         out.put("id", sessionId);
