@@ -47,9 +47,10 @@ public class LhTrinoPrincipalServiceImpl implements LhTrinoPrincipalService {
         if (row == null) {
             throw new CommonException(
                     "门户账号 " + StrUtil.blankToDefault(user.getAccount(), user.getId())
-                            + " 未映射 Gravitino 主体，拒绝以服务账号执行。"
-                            + "请超管 POST /lh/sec/principals/bind-me {\"trinoUser\":\"你的Trino人类主体\"}；"
-                            + "禁止填服务账号 admin。表权限不在门户");
+                            + " 未映射查询主体，拒绝以服务账号执行。"
+                            + "请超管在「系统用户」绑定 Trino 主体，或 POST /lh/sec/principals"
+                            + " {\"portalUserId\":\"…\",\"portalAccount\":\"…\",\"trinoUser\":\"人类主体\"}；"
+                            + "禁止填服务账号 admin。表权限仍在 Grav");
         }
         assertNotServiceAccount(row.getTrinoUser());
         return row;

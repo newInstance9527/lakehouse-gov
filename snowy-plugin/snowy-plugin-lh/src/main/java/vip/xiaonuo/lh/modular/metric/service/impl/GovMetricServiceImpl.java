@@ -113,6 +113,10 @@ public class GovMetricServiceImpl implements GovMetricService {
     private vip.xiaonuo.lh.modular.domain.service.GovDomainService govDomainService;
     @Resource
     private vip.xiaonuo.lh.modular.metric.support.GovMetricBindLookup metricBindLookup;
+    @Resource
+    private vip.xiaonuo.lh.modular.sec.mapper.SecAuthGrantMapper secAuthGrantMapper;
+    @Resource
+    private vip.xiaonuo.lh.modular.apply.mapper.ApplyTicketMapper applyTicketMapper;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -195,6 +199,7 @@ public class GovMetricServiceImpl implements GovMetricService {
     @Override
     public GovMetricVo detail(String metricCode, String ws) {
         GovMetric head = requireMetric(metricCode, ws);
+        assertDraftReadable(head);
         return toVo(head, true);
     }
 
@@ -271,6 +276,186 @@ public class GovMetricServiceImpl implements GovMetricService {
         sqlMapper.delete(new QueryWrapper<GovMetricSql>().lambda().eq(GovMetricSql::getVerId, ver.getId()));
         appendHistory(head.getId(), head.getStatus(), "编辑口径");
         return toVo(requireMetric(head.getMetricCode(), head.getWs()), true);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> delete(String metricCode, String ws) {
+        String home = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        GovMetric head = requireMetric(metricCode, home);
+        secAuthGrantService.assertCanDeleteMetric(head);
+        String status = StrUtil.blankToDefault(head.getStatus(), "");
+        if ("active".equals(status)) {
+            throw new CommonException("已启用指标不可直接删除，请先「废弃」后再删除");
+        }
+        if ("version_review".equals(status)) {
+            throw new CommonException("变更审批中不可删除，请先取消变更，或待审批结束后再废弃/删除");
+        }
+        if (!"draft".equals(status) && !"review".equals(status) && !"deprecated".equals(status)) {
+            throw new CommonException("当前状态不允许删除: " + status);
+        }
+        String code = head.getMetricCode();
+        List<GovMetricDep> downEdges = depMapper.selectList(new QueryWrapper<GovMetricDep>().lambda()
+                .eq(GovMetricDep::getDepCode, code));
+        if (downEdges != null && !downEdges.isEmpty()) {
+            Set<String> downCodes = new java.util.LinkedHashSet<>();
+            for (GovMetricDep e : downEdges) {
+                if (e == null || StrUtil.isBlank(e.getVerId())) {
+                    continue;
+                }
+                GovMetricVer v = verMapper.selectById(e.getVerId());
+                if (v == null || StrUtil.isBlank(v.getMetricId())) {
+                    continue;
+                }
+                GovMetric child = metricMapper.selectById(v.getMetricId());
+                if (child != null && NOT_DELETE.equals(child.getDeleteFlag())
+                        && !head.getId().equals(child.getId())) {
+                    downCodes.add(child.getMetricCode());
+                }
+            }
+            if (!downCodes.isEmpty()) {
+                throw new CommonException("指标仍被下游引用，无法删除: " + String.join(", ", downCodes)
+                        + "。请先解除依赖或先废弃下游");
+            }
+        }
+        List<Map<String, Object>> apis = metricBindLookup.apiBindingsForMetric(code, head.getWs());
+        List<String> liveApis = new java.util.ArrayList<>();
+        for (Map<String, Object> a : apis) {
+            if (a == null) {
+                continue;
+            }
+            String st = String.valueOf(a.getOrDefault("state", a.getOrDefault("status", ""))).toLowerCase(Locale.ROOT);
+            if (st.contains("retire") || st.contains("offline") || "disabled".equals(st) || "deleted".equals(st)) {
+                continue;
+            }
+            Object name = a.get("name");
+            Object path = a.get("publicPath");
+            liveApis.add(StrUtil.blankToDefault(name != null ? String.valueOf(name) : null,
+                    path != null ? String.valueOf(path) : String.valueOf(a.get("id"))));
+        }
+        if (!liveApis.isEmpty()) {
+            throw new CommonException("指标仍被数据服务 API 引用，无法删除: "
+                    + String.join(", ", liveApis.subList(0, Math.min(5, liveApis.size())))
+                    + "。请先下线/解绑 API");
+        }
+
+        int matRetired = retireMaterializeRows(code);
+        int grantsRevoked = revokeMetricGrants(head.getId());
+        int ticketsCancelled = cancelPendingMetricTickets(code);
+        int depsCleared = clearOwnDepsAndSql(head.getId());
+
+        String freed = code + "__del_" + head.getId();
+        if (freed.length() > 64) {
+            freed = freed.substring(0, 64);
+        }
+        head.setMetricCode(freed);
+        head.setDeleteFlag("DELETED");
+        head.setRevision(head.getRevision() == null ? 1 : head.getRevision() + 1);
+        metricMapper.updateById(head);
+        appendHistory(head.getId(), status, "删除指标（软删）");
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", head.getId());
+        out.put("metricCode", code);
+        out.put("deleted", true);
+        out.put("materializeRetired", matRetired);
+        out.put("grantsRevoked", grantsRevoked);
+        out.put("ticketsCancelled", ticketsCancelled);
+        out.put("depsCleared", depsCleared);
+        return out;
+    }
+
+    /** 物化登记软下线，避免删除后仍被路由命中 */
+    private int retireMaterializeRows(String metricCode) {
+        if (StrUtil.isBlank(metricCode)) {
+            return 0;
+        }
+        List<GovMetricMaterialize> rows = materializeMapper.selectList(new QueryWrapper<GovMetricMaterialize>().lambda()
+                .eq(GovMetricMaterialize::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetricMaterialize::getMetricCode, metricCode));
+        int n = 0;
+        Date now = new Date();
+        for (GovMetricMaterialize m : rows) {
+            m.setStatus("retired");
+            m.setDeleteFlag("DELETED");
+            m.setRemark(StrUtil.blankToDefault(m.getRemark(), "") + " · metric deleted");
+            m.setUpdateTime(now);
+            materializeMapper.updateById(m);
+            n++;
+        }
+        return n;
+    }
+
+    /** 吊销该指标上的查询/运维授权 */
+    private int revokeMetricGrants(String metricId) {
+        if (StrUtil.isBlank(metricId)) {
+            return 0;
+        }
+        List<vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant> grants = secAuthGrantMapper.selectList(
+                new QueryWrapper<vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant>().lambda()
+                        .eq(vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant::getDeleteFlag, NOT_DELETE)
+                        .eq(vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant::getResourceType, "metric")
+                        .eq(vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant::getResourceId, metricId)
+                        .ne(vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant::getStatus, "revoked"));
+        int n = 0;
+        Date now = new Date();
+        for (vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant g : grants) {
+            g.setStatus("revoked");
+            g.setRemark(StrUtil.blankToDefault(g.getRemark(), "") + " · metric deleted");
+            g.setUpdateTime(now);
+            secAuthGrantMapper.updateById(g);
+            n++;
+        }
+        return n;
+    }
+
+    /** 关闭在途指标工单，避免审批落在已删资源上 */
+    private int cancelPendingMetricTickets(String metricCode) {
+        if (StrUtil.isBlank(metricCode) || applyTicketMapper == null) {
+            return 0;
+        }
+        List<vip.xiaonuo.lh.modular.apply.entity.ApplyTicket> tickets = applyTicketMapper.selectList(
+                new QueryWrapper<vip.xiaonuo.lh.modular.apply.entity.ApplyTicket>().lambda()
+                        .eq(vip.xiaonuo.lh.modular.apply.entity.ApplyTicket::getDeleteFlag, NOT_DELETE)
+                        .eq(vip.xiaonuo.lh.modular.apply.entity.ApplyTicket::getTicketType, "metric")
+                        .in(vip.xiaonuo.lh.modular.apply.entity.ApplyTicket::getStatus,
+                                "pending", "pending_security")
+                        .like(vip.xiaonuo.lh.modular.apply.entity.ApplyTicket::getPayload, metricCode));
+        int n = 0;
+        Date now = new Date();
+        for (vip.xiaonuo.lh.modular.apply.entity.ApplyTicket t : tickets) {
+            String payload = StrUtil.blankToDefault(t.getPayload(), "");
+            if (!payload.contains("\"metricCode\":\"" + metricCode + "\"")
+                    && !payload.contains("\"metricCode\": \"" + metricCode + "\"")) {
+                continue;
+            }
+            t.setStatus("rejected");
+            t.setRemark(StrUtil.blankToDefault(t.getRemark(), "") + " · 指标已删除，自动驳回");
+            t.setApprovedBy("system");
+            t.setApprovedAt(now);
+            t.setUpdateTime(now);
+            applyTicketMapper.updateById(t);
+            n++;
+        }
+        return n;
+    }
+
+    /** 清理本指标各版本出边依赖与编译缓存 */
+    private int clearOwnDepsAndSql(String metricId) {
+        if (StrUtil.isBlank(metricId)) {
+            return 0;
+        }
+        List<GovMetricVer> vers = verMapper.selectList(new QueryWrapper<GovMetricVer>().lambda()
+                .eq(GovMetricVer::getMetricId, metricId));
+        int n = 0;
+        for (GovMetricVer v : vers) {
+            if (v == null || StrUtil.isBlank(v.getId())) {
+                continue;
+            }
+            n += depMapper.delete(new QueryWrapper<GovMetricDep>().lambda().eq(GovMetricDep::getVerId, v.getId()));
+            sqlMapper.delete(new QueryWrapper<GovMetricSql>().lambda().eq(GovMetricSql::getVerId, v.getId()));
+        }
+        return n;
     }
 
     @Override
@@ -1036,6 +1221,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         vo.setStatusLabel(STATUS_LABEL.getOrDefault(head.getStatus(), head.getStatus()));
         vo.setUnit(head.getUnit());
         vo.setOwner(head.getOwner());
+        vo.setCreateUser(head.getCreateUser());
         vo.setVer(head.getCurrentVer());
         vo.setCurrentVerId(head.getCurrentVerId());
         vo.setOmFqn(head.getOmFqn());
@@ -1117,6 +1303,21 @@ public class GovMetricServiceImpl implements GovMetricService {
         h.setNote(note);
         h.setCreateTime(new Date());
         historyMapper.insert(h);
+    }
+
+    /** 草稿与列表 forceMineOnly 对齐：非特权不可窥探他人草稿详情 */
+    private void assertDraftReadable(GovMetric head) {
+        if (head == null || !"draft".equals(head.getStatus())) {
+            return;
+        }
+        if (!vip.xiaonuo.lh.core.ws.LhDataScope.forceMineOnly()) {
+            return;
+        }
+        vip.xiaonuo.auth.core.pojo.SaBaseLoginUser user = vip.xiaonuo.lh.core.auth.LhLoginUsers.requireUser();
+        if (vip.xiaonuo.lh.core.auth.LhOwnerGuard.isOwner(user, head.getCreateUser(), head.getOwner())) {
+            return;
+        }
+        throw new CommonException("无权查看他人草稿指标");
     }
 
     private GovMetric requireMetric(String code, String ws) {

@@ -629,10 +629,14 @@ public class GovWsServiceImpl implements GovWsService {
         return out;
     }
 
-    /** 超管 / 成员 / 创建人视为协作方可无确认切换 */
+    /** 超管 / 成员 / 创建人 / 平台 default（全员开放）视为协作方 */
     private boolean isWsCollaborator(GovWs w) {
         if (w == null) {
             return false;
+        }
+        // 平台默认空间：全员可切、可协作上下文；不要求写入 gov_ws_member
+        if (WS_DEFAULT.equals(w.getWsCode())) {
+            return true;
         }
         if (LhLoginUsers.isSuperAdmin()) {
             return true;
@@ -786,7 +790,14 @@ public class GovWsServiceImpl implements GovWsService {
                     .eq(GovWsMember::getSubjectType, "user")
                     .and(w -> w.eq(GovWsMember::getSubjectId, u.getId())
                             .or().eq(GovWsMember::getSubjectId, u.getAccount())));
-            return list.isEmpty() ? null : list.get(0).getRoleCode();
+            if (!list.isEmpty()) {
+                return list.get(0).getRoleCode();
+            }
+            // 平台 default：无成员行时仍视为全员可用（顶栏勿标「非成员」）
+            if (WS_DEFAULT.equals(StrUtil.trim(wsCode))) {
+                return "Member";
+            }
+            return null;
         } catch (Exception e) {
             rethrowIfInTransaction(e);
             return null;

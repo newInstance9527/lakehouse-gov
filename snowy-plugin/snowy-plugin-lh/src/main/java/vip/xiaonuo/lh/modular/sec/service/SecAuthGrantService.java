@@ -61,6 +61,9 @@ public interface SecAuthGrantService {
     /** 指标写：超管、拥有者或 EDIT/MANAGE */
     void assertCanEditMetric(GovMetric metric);
 
+    /** 指标删除：超管或拥有者（本人） */
+    void assertCanDeleteMetric(GovMetric metric);
+
     /** 指标试跑/查询：见 {@link #canReadMetric} */
     void assertCanReadMetric(GovMetric metric);
 

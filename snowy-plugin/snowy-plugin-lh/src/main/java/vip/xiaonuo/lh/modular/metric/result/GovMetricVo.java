@@ -43,6 +43,8 @@ public class GovMetricVo {
     private String time;
     private String unit;
     private String owner;
+    /** 创建人用户 id（CommonEntity），前端草稿归属与按钮 ACL 用 */
+    private String createUser;
     private String ver;
     private String currentVerId;
     private String omFqn;

@@ -53,7 +53,11 @@ public interface DataapiService {
     /** 回退到历史 commit 并 deploy；已发布时立即切流量，草稿仅更新指针 */
     Map<String, Object> rollback(DataapiIdParam param);
 
-    void delete(DataapiIdParam param);
+    /**
+     * 删除绑定（软删）：仅创建人/负责人或超管。
+     * 已发布须先取消发布；同步 SQLREST retire、订阅 Key 软删、清 APISIX 路由（若有）。
+     */
+    Map<String, Object> delete(DataapiIdParam param);
 
     Map<String, Object> routes();
 

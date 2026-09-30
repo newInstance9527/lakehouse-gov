@@ -226,6 +226,23 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
     }
 
     @Override
+    public void assertCanDeleteMetric(GovMetric metric) {
+        if (metric == null) {
+            throw new CommonException("指标不存在");
+        }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return;
+        }
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        if (isMetricOwner(metric, user)) {
+            return;
+        }
+        throw new CommonException(
+                "指标「" + StrUtil.blankToDefault(metric.getMetricCode(), metric.getId())
+                        + "」仅创建人或超管可删除");
+    }
+
+    @Override
     public void assertCanReadMetric(GovMetric metric) {
         if (metric == null) {
             throw new CommonException("指标不存在");

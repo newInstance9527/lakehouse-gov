@@ -130,12 +130,11 @@ public class DataapiController {
         return CommonResult.data(dataapiService.rollback(param));
     }
 
-    @Operation(summary = "删除绑定")
+    @Operation(summary = "删除绑定（本人/超管；已发布须先取消发布；同步 SQLREST/Key）")
     @CommonLog("数据服务删除绑定")
     @PostMapping("/lh/dataapi/delete")
-    public CommonResult<String> delete(@RequestBody @Valid DataapiIdParam param) {
-        dataapiService.delete(param);
-        return CommonResult.ok();
+    public CommonResult<Map<String, Object>> delete(@RequestBody @Valid DataapiIdParam param) {
+        return CommonResult.data(dataapiService.delete(param));
     }
 
     @Operation(summary = "已发布入口一览（Gateway；历史路径名 routes）")

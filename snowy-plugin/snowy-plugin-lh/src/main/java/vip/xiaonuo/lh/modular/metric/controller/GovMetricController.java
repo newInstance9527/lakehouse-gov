@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
 import jakarta.validation.Valid;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -84,6 +85,15 @@ public class GovMetricController {
             @RequestBody @Valid GovMetricUpsertParam param) {
         param.setMetricCode(code);
         return CommonResult.data(govMetricService.update(param));
+    }
+
+    @Operation(summary = "删除指标（软删；本人或超管；仅草稿/待发布/已废弃；同步清理物化·授权·在途工单）")
+    @CommonLog("删除指标")
+    @DeleteMapping("/lh/metric/{code}")
+    public CommonResult<Map<String, Object>> delete(
+            @PathVariable("code") String code,
+            @RequestParam(required = false) String ws) {
+        return CommonResult.data(govMetricService.delete(code, ws));
     }
 
     @Operation(summary = "状态流转")

@@ -9,9 +9,12 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
+import vip.xiaonuo.lh.core.auth.LhOwnerGuard;
 import vip.xiaonuo.lh.core.engine.ApisixClient;
 import vip.xiaonuo.lh.core.engine.SqlrestClient;
 import vip.xiaonuo.lh.core.user.LhUserNameResolver;
@@ -726,13 +729,90 @@ public class DataapiServiceImpl implements DataapiService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void delete(DataapiIdParam param) {
+    public Map<String, Object> delete(DataapiIdParam param) {
         DataapiApiBinding b = requireBinding(param.getId());
+        assertCanDeleteBinding(b);
         if ("published".equals(b.getState())) {
-            throw new CommonException("已发布接口请先取消发布或下线再删除");
+            throw new CommonException("已发布接口请先「取消发布」回草稿后再删除（或先永久下线）");
         }
+        Map<String, Object> sr = Map.of("ok", true, "skipped", true);
+        if (StrUtil.isNotBlank(b.getSqlrestApiId())) {
+            // 同步 SQLREST：retire 下线接口定义，避免网关/Manager 残留可调用入口
+            try {
+                sr = sqlrestClient.retire(Long.parseLong(b.getSqlrestApiId()));
+            } catch (Exception e) {
+                sr = new LinkedHashMap<>();
+                sr.put("ok", false);
+                sr.put("degraded", true);
+                sr.put("message", "SQLREST retire 失败: " + e.getMessage());
+            }
+        }
+        Map<String, Object> ax = Map.of("ok", true, "skipped", true, "edgeMode", sqlrestClient.edgeMode());
+        if (sqlrestClient.useApisixEdge() && StrUtil.isNotBlank(b.getApisixRouteId())) {
+            ax = apisixClient.deleteRoute(b.getApisixRouteId());
+            b.setApisixRouteId(null);
+        }
+        int keysRevoked = softDeleteKeysForBinding(b.getId());
+        Date now = new Date();
+        String uid = LhLoginUsers.requireUserId();
         b.setDeleteFlag("DELETED");
+        b.setState("retired");
+        b.setStatus("deleted");
+        b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
+        b.setUpdateTime(now);
+        b.setUpdateUser(uid);
+        b.setLastError(null);
         bindingMapper.updateById(b);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        boolean ok = Boolean.TRUE.equals(sr.get("ok")) && Boolean.TRUE.equals(ax.get("ok"));
+        result.put("ok", ok);
+        result.put("degraded", Boolean.TRUE.equals(sr.get("degraded")) || Boolean.TRUE.equals(ax.get("degraded")));
+        result.put("id", b.getId());
+        result.put("name", b.getName());
+        result.put("sqlrest", sr);
+        result.put("apisix", ax);
+        result.put("keysRevoked", keysRevoked);
+        result.put("message", ok
+                ? "已删除门户绑定，并同步下线 SQLREST" + (keysRevoked > 0 ? "；已吊销 " + keysRevoked + " 个订阅 Key" : "")
+                : "门户已软删，但下游同步部分失败，请到 SQLREST/网关核对");
+        return result;
+    }
+
+    /** 本人（createUser / ownerUser）或超管可删 */
+    private void assertCanDeleteBinding(DataapiApiBinding b) {
+        if (LhLoginUsers.isSuperAdmin()) {
+            return;
+        }
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        if (LhOwnerGuard.isOwner(user, b.getCreateUser(), b.getOwnerUser())) {
+            return;
+        }
+        throw new CommonException("仅创建人/负责人或超管可删除该 API 绑定");
+    }
+
+    private int softDeleteKeysForBinding(String bindingId) {
+        if (StrUtil.isBlank(bindingId)) {
+            return 0;
+        }
+        List<DataapiApiKeyMeta> keys = keyMetaMapper.selectList(new QueryWrapper<DataapiApiKeyMeta>().lambda()
+                .eq(DataapiApiKeyMeta::getBindingId, bindingId)
+                .eq(DataapiApiKeyMeta::getDeleteFlag, NOT_DELETE));
+        if (keys.isEmpty()) {
+            return 0;
+        }
+        Date now = new Date();
+        String uid = LhLoginUsers.requireUserId();
+        int n = 0;
+        for (DataapiApiKeyMeta k : keys) {
+            k.setDeleteFlag("DELETED");
+            k.setStatus("revoked");
+            k.setUpdateTime(now);
+            k.setUpdateUser(uid);
+            keyMetaMapper.updateById(k);
+            n++;
+        }
+        return n;
     }
 
     @Override
@@ -1571,6 +1651,16 @@ public class DataapiServiceImpl implements DataapiService {
         b.setState("draft");
         b.setDeleteFlag(NOT_DELETE);
         applyParam(b, param);
+        if (StrUtil.isBlank(b.getOwnerUser())) {
+            try {
+                SaBaseLoginUser u = LhLoginUsers.currentUserOrNull();
+                if (u != null) {
+                    b.setOwnerUser(StrUtil.blankToDefault(u.getAccount(), u.getId()));
+                }
+            } catch (Exception ignored) {
+                // soft
+            }
+        }
         ensureProjectionExtId(b);
         return b;
     }
@@ -1644,6 +1734,8 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("state", b.getState());
         m.put("auth", b.getAuthMode());
         m.put("owner", b.getOwnerUser());
+        m.put("createUser", b.getCreateUser());
+        m.put("canDelete", canCurrentUserDelete(b));
         m.put("publishEnv", b.getPublishEnv());
         m.put("qps", b.getQpsLimit() == null ? "—" : String.valueOf(b.getQpsLimit()));
         m.put("burst", b.getBurstLimit());
@@ -1786,6 +1878,24 @@ public class DataapiServiceImpl implements DataapiService {
         return new QueryWrapper<DataapiApiBinding>()
                 .eq("ws", ws)
                 .eq("delete_flag", NOT_DELETE);
+    }
+
+    private boolean canCurrentUserDelete(DataapiApiBinding b) {
+        if (b == null) {
+            return false;
+        }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return true;
+        }
+        try {
+            SaBaseLoginUser user = LhLoginUsers.currentUserOrNull();
+            if (user == null) {
+                return false;
+            }
+            return LhOwnerGuard.isOwner(user, b.getCreateUser(), b.getOwnerUser());
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private DataapiApiBinding requireBinding(String id) {

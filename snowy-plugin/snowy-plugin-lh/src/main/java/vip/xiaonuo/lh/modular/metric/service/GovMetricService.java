@@ -28,6 +28,9 @@ public interface GovMetricService {
 
     GovMetricVo update(GovMetricUpsertParam param);
 
+    /** 软删除：本人或超管；有下游依赖时拒绝 */
+    Map<String, Object> delete(String metricCode, String ws);
+
     GovMetricVo transition(GovMetricTransitionParam param);
 
     Map<String, Object> compile(GovMetricCompileParam param);
