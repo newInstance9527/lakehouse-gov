@@ -37,6 +37,7 @@ public enum LhDatasourceTypeEnum {
     SQLSERVER("sqlserver", "SQL Server", LhDatasourceCategoryEnum.RDB),
     CLICKHOUSE("clickhouse", "ClickHouse", LhDatasourceCategoryEnum.DW),
     DORIS("doris", "Doris", LhDatasourceCategoryEnum.DW),
+    STARROCKS("starrocks", "StarRocks", LhDatasourceCategoryEnum.DW),
     HIVE("hive", "Hive", LhDatasourceCategoryEnum.DW),
     ICEBERG("iceberg", "Iceberg", LhDatasourceCategoryEnum.DW),
     HBASE("hbase", "HBase", LhDatasourceCategoryEnum.DW),
@@ -116,6 +117,6 @@ public enum LhDatasourceTypeEnum {
      */
     public boolean isJdbc() {
         return this == MYSQL || this == PG || this == POSTGRESQL || this == ORACLE || this == SQLSERVER
-                || this == CLICKHOUSE || this == DORIS || this == TRINO;
+                || this == CLICKHOUSE || this == DORIS || this == STARROCKS || this == TRINO;
     }
 }

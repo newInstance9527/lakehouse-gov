@@ -12,6 +12,8 @@ public class DataapiPageParam {
     private String keyword;
     private String state;
     private String domain;
+    /** 按自定义标签过滤（tags_json 包含该字符串） */
+    private String tag;
     private String ws;
     private String sortField;
     private String sortOrder;

@@ -1,5 +1,6 @@
 package vip.xiaonuo.lh.modular.dataapi.service.impl;
 
+import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
@@ -13,6 +14,7 @@ import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.ApisixClient;
 import vip.xiaonuo.lh.core.engine.SqlrestClient;
+import vip.xiaonuo.lh.core.user.LhUserNameResolver;
 import vip.xiaonuo.lh.core.ws.ExternalBindingGuard;
 import vip.xiaonuo.lh.core.ws.ExternalName;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
@@ -23,9 +25,12 @@ import vip.xiaonuo.lh.modular.dataapi.mapper.DataapiApiKeyMetaMapper;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiBindingParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiGatewayProbeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiKeyRevealParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiTagsParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
+import vip.xiaonuo.lh.modular.dataapi.service.DataapiKeyIssueService;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
 import vip.xiaonuo.lh.modular.dataapi.support.DataapiCallStatsSupport;
 import vip.xiaonuo.lh.modular.dataapi.support.DataapiOpenApiBuilder;
@@ -39,8 +44,10 @@ import cn.hutool.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 public class DataapiServiceImpl implements DataapiService {
@@ -68,6 +75,10 @@ public class DataapiServiceImpl implements DataapiService {
     private LhProperties lhProperties;
     @Resource
     private ExternalBindingGuard externalBindingGuard;
+    @Resource
+    private DataapiKeyIssueService keyIssueService;
+    @Resource
+    private LhUserNameResolver userNameResolver;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -117,6 +128,16 @@ public class DataapiServiceImpl implements DataapiService {
         }
         if (StrUtil.isNotBlank(param.getDomain())) {
             qw.eq("domain_code", param.getDomain());
+        }
+        if (StrUtil.isNotBlank(param.getTag())) {
+            // tags_json 存 JSON 字符串数组；用 quoted token 近似匹配，避免子串误命中
+            String token = param.getTag().trim();
+            qw.like("tags_json", "\"" + token.replace("\"", "") + "\"");
+        }
+        // 草稿默认仅创建人可见（非特权）
+        if (vip.xiaonuo.lh.core.ws.LhDataScope.forceMineOnly()) {
+            String uid = vip.xiaonuo.lh.core.auth.LhLoginUsers.requireUserId();
+            qw.and(w -> w.ne("state", "draft").or().eq("create_user", uid));
         }
         qw.orderByDesc("update_time");
         return bindingMapper.selectPage(CommonPageRequest.defaultPage(), qw);
@@ -195,6 +216,21 @@ public class DataapiServiceImpl implements DataapiService {
         b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
         bindingMapper.updateById(b);
         return b;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> updateTags(DataapiTagsParam param) {
+        DataapiApiBinding b = requireBinding(param.getId());
+        b.setTagsJson(serializeTags(normalizeTags(param.getTags())));
+        b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
+        bindingMapper.updateById(b);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("message", "标签已更新");
+        result.put("binding", toPortalCard(b, true));
+        result.put("tags", parseTags(b.getTagsJson()));
+        return result;
     }
 
     @Override
@@ -612,7 +648,7 @@ public class DataapiServiceImpl implements DataapiService {
                 row.put("commitId", commitId);
                 row.put("version", version);
                 row.put("description", v.getStr("description"));
-                row.put("createTime", v.get("createTime"));
+                row.put("createTime", fmtDateTimeValue(v.get("createTime")));
                 boolean current = (commitId != null && curCommit.equals(String.valueOf(commitId)))
                         || (version != null && curVer != null && version.equals(curVer));
                 row.put("current", current);
@@ -794,13 +830,31 @@ public class DataapiServiceImpl implements DataapiService {
     @Override
     public List<Map<String, Object>> keys(String ws) {
         String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);
-        List<DataapiApiKeyMeta> metas = keyMetaMapper.selectList(new QueryWrapper<DataapiApiKeyMeta>().lambda()
+        String uid = vip.xiaonuo.lh.core.auth.LhLoginUsers.requireUserId();
+        var qw = new QueryWrapper<DataapiApiKeyMeta>().lambda()
                 .eq(DataapiApiKeyMeta::getWs, workspace)
                 .eq(DataapiApiKeyMeta::getDeleteFlag, NOT_DELETE)
-                .orderByDesc(DataapiApiKeyMeta::getCreateTime));
+                .orderByDesc(DataapiApiKeyMeta::getCreateTime);
+        if (vip.xiaonuo.lh.core.ws.LhDataScope.forceMineOnly()) {
+            qw.and(w -> w.eq(DataapiApiKeyMeta::getApplicant, uid)
+                    .or().eq(DataapiApiKeyMeta::getCreateUser, uid));
+        }
+        List<DataapiApiKeyMeta> metas = keyMetaMapper.selectList(qw);
+        Set<String> applicantIds = new LinkedHashSet<>();
+        for (DataapiApiKeyMeta k : metas) {
+            if (StrUtil.isNotBlank(k.getApplicant())) {
+                applicantIds.add(k.getApplicant().trim());
+            }
+        }
+        Map<String, String> applicantNames = userNameResolver.resolveNames(applicantIds);
         List<Map<String, Object>> list = new ArrayList<>();
         for (DataapiApiKeyMeta k : metas) {
             DataapiApiBinding b = bindingMapper.selectById(k.getBindingId());
+            String applicantId = k.getApplicant();
+            String applicantName = StrUtil.isNotBlank(applicantId)
+                    ? applicantNames.get(applicantId.trim())
+                    : null;
+            String applicantLabel = StrUtil.blankToDefault(applicantName, applicantId);
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", k.getId());
             row.put("name", k.getConsumerName());
@@ -810,8 +864,9 @@ public class DataapiServiceImpl implements DataapiService {
             row.put("apiName", b != null ? b.getName() : null);
             row.put("method", b != null ? b.getMethod() : "-");
             row.put("bindingId", k.getBindingId());
-            row.put("user", k.getApplicant());
-            row.put("applicant", k.getApplicant());
+            row.put("user", applicantLabel);
+            row.put("applicant", applicantId);
+            row.put("applicantName", applicantName);
             row.put("status", k.getStatus());
             row.put("cls", statusTag(k.getStatus()));
             row.put("keyHint", k.getKeyHint());
@@ -819,14 +874,22 @@ public class DataapiServiceImpl implements DataapiService {
             row.put("qpsLimit", k.getQpsLimit());
             row.put("ticketId", k.getTicketId());
             row.put("ticketNo", ticketNoFromKeyRemark(k.getRemark()));
-            row.put("expireAt", k.getExpireAt() == null ? null : k.getExpireAt().toString());
-            row.put("createTime", k.getCreateTime() == null ? null : k.getCreateTime().toString());
+            row.put("expireAt", fmtDateTime(k.getExpireAt()));
+            row.put("createTime", fmtDateTime(k.getCreateTime()));
             row.put("remark", k.getRemark());
             row.put("description", "末位 ···" + StrUtil.blankToDefault(k.getKeyHint(), "????")
                     + (k.getQpsLimit() != null ? " · " + k.getQpsLimit() + " QPS" : ""));
             list.add(row);
         }
         return list;
+    }
+
+    @Override
+    public Map<String, Object> revealKey(DataapiKeyRevealParam param) {
+        if (param == null || StrUtil.isBlank(param.getId())) {
+            throw new CommonException("订阅 Key id 不能为空");
+        }
+        return keyIssueService.revealSecret(param.getId(), param.getReason());
     }
 
     /** remark 约定：api_subscribe {ticketNo} */
@@ -1165,7 +1228,7 @@ public class DataapiServiceImpl implements DataapiService {
             m.put("ok", ok);
             m.put("httpStatus", status);
             m.put("latencyMs", System.currentTimeMillis() - t0);
-            m.put("bodyPreview", body == null ? "" : body.substring(0, Math.min(800, body.length())));
+            putProbeBody(m, body);
             applyProbeDiagnosis(m, status, null);
             if ((status == 401 || status == 403) && StrUtil.isBlank(appKey) && StrUtil.isBlank(bearer)) {
                 m.put("suggestion", "在线调试中填写 X-App-Key 与 Bearer Secret，或将接口设为 open");
@@ -1177,6 +1240,31 @@ public class DataapiServiceImpl implements DataapiService {
             applyProbeDiagnosis(m, null, e.getMessage());
         }
         return m;
+    }
+
+    /** 在线调试响应体：默认回传完整 JSON；超大时截断并标记，避免撑爆门户响应 */
+    private static final int PROBE_BODY_MAX_CHARS = 2 * 1024 * 1024;
+
+    private static void putProbeBody(Map<String, Object> m, String body) {
+        if (body == null) {
+            m.put("body", "");
+            m.put("bodyPreview", "");
+            m.put("bodyLength", 0);
+            m.put("bodyTruncated", false);
+            return;
+        }
+        int len = body.length();
+        m.put("bodyLength", len);
+        boolean truncated = len > PROBE_BODY_MAX_CHARS;
+        m.put("bodyTruncated", truncated);
+        String preview = truncated ? body.substring(0, PROBE_BODY_MAX_CHARS) : body;
+        m.put("body", preview);
+        // 兼容旧前端字段名
+        m.put("bodyPreview", preview);
+        if (truncated) {
+            m.put("hint", "响应体过大（" + len + " 字符），已截断至 " + PROBE_BODY_MAX_CHARS
+                    + " 字符；格式化可能失败，请缩小结果集或加 LIMIT 后重试");
+        }
     }
 
     /** 从门户/调试入参提取 name→value（value / example / defaultValue） */
@@ -1287,7 +1375,7 @@ public class DataapiServiceImpl implements DataapiService {
             }
         } else if (httpStatus != null) {
             hint = "Gateway HTTP " + httpStatus;
-            suggestion = "查看 bodyPreview；确认接口已发布且方法正确";
+            suggestion = "查看响应体；确认接口已发布且方法正确";
         } else {
             hint = "探针未得到 HTTP 状态";
             suggestion = "检查 Gateway 配置";
@@ -1531,6 +1619,9 @@ public class DataapiServiceImpl implements DataapiService {
                         ? "application/x-www-form-urlencoded"
                         : "application/json"));
         b.setRemark(param.getRemark());
+        if (param.getTags() != null) {
+            b.setTagsJson(serializeTags(normalizeTags(param.getTags())));
+        }
         if (param.getParams() != null) {
             b.setParamJson(JSONUtil.toJsonStr(param.getParams()));
         }
@@ -1570,14 +1661,15 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("rt", "—");
         m.put("level", levelOf(b));
         m.put("levelCls", levelCls(b));
-        m.put("publishedAt", b.getLastPublishAt() == null ? null : b.getLastPublishAt().toString());
-        m.put("createTime", b.getCreateTime() == null ? null : b.getCreateTime().toString());
-        m.put("updateTime", b.getUpdateTime() == null ? null : b.getUpdateTime().toString());
+        m.put("publishedAt", fmtDateTime(b.getLastPublishAt()));
+        m.put("createTime", fmtDateTime(b.getCreateTime()));
+        m.put("updateTime", fmtDateTime(b.getUpdateTime()));
         m.put("lastError", b.getLastError());
         m.put("publishTicketNo", b.getPublishTicketNo());
         m.put("revision", b.getRevision() == null ? 1 : b.getRevision());
         m.put("sqlrestVersion", b.getSqlrestVersion());
         m.put("sqlrestCommitId", b.getSqlrestCommitId());
+        m.put("tags", parseTags(b.getTagsJson()));
         if (detail) {
             if (StrUtil.isNotBlank(b.getParamJson())) {
                 m.put("params", JSONUtil.parseArray(b.getParamJson()));
@@ -1590,6 +1682,50 @@ public class DataapiServiceImpl implements DataapiService {
             }
         }
         return m;
+    }
+
+    /** 规范化标签：去空白、去重、单标签最长 32、最多 20 个 */
+    private static List<String> normalizeTags(List<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of();
+        }
+        Set<String> seen = new LinkedHashSet<>();
+        for (String t : raw) {
+            if (t == null) {
+                continue;
+            }
+            String s = t.trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (s.length() > 32) {
+                s = s.substring(0, 32);
+            }
+            seen.add(s);
+            if (seen.size() >= 20) {
+                break;
+            }
+        }
+        return new ArrayList<>(seen);
+    }
+
+    private static String serializeTags(List<String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return null;
+        }
+        return JSONUtil.toJsonStr(tags);
+    }
+
+    private static List<String> parseTags(String tagsJson) {
+        if (StrUtil.isBlank(tagsJson)) {
+            return List.of();
+        }
+        try {
+            List<String> list = JSONUtil.toList(tagsJson, String.class);
+            return list == null ? List.of() : normalizeTags(list);
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     private static String levelOf(DataapiApiBinding b) {
@@ -1664,6 +1800,49 @@ public class DataapiServiceImpl implements DataapiService {
     private static void assertEditable(DataapiApiBinding b) {
         if (b != null && "published".equals(b.getState())) {
             throw new CommonException("已发布接口请先取消发布后再编辑；改完后需重新申请发布");
+        }
+    }
+
+    /** 统一时间字段：yyyy-MM-dd HH:mm:ss */
+    private static String fmtDateTime(Date d) {
+        return d == null ? null : DateUtil.formatDateTime(d);
+    }
+
+    private static String fmtDateTimeValue(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Date) {
+            return fmtDateTime((Date) v);
+        }
+        if (v instanceof Number) {
+            return fmtDateTime(new Date(((Number) v).longValue()));
+        }
+        String s = String.valueOf(v).trim();
+        if (s.isEmpty() || "null".equalsIgnoreCase(s)) {
+            return null;
+        }
+        s = s.replace('T', ' ');
+        int dot = s.indexOf('.');
+        if (dot > 0) {
+            s = s.substring(0, dot);
+        }
+        if (s.endsWith("Z") || s.endsWith("z")) {
+            s = s.substring(0, s.length() - 1).trim();
+        }
+        if (s.length() >= 19) {
+            return s.substring(0, 19);
+        }
+        if (s.length() == 16 && s.charAt(10) == ' ') {
+            return s + ":00";
+        }
+        if (s.length() == 10) {
+            return s + " 00:00:00";
+        }
+        try {
+            return DateUtil.formatDateTime(DateUtil.parse(s));
+        } catch (Exception e) {
+            return s;
         }
     }
 }

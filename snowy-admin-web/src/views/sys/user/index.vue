@@ -517,9 +517,16 @@
 		}
 		userApi.grantRole(params).then(() => {})
 	}
-	// 重置用户密码
+	// 重置用户密码（需手动输入新密码）
 	const resetPassword = (record) => {
-		userApi.userResetPassword(record).then(() => {})
+		const password = window.prompt('请输入新密码')
+		if (password == null) return
+		const pwd = String(password).trim()
+		if (!pwd) {
+			message.warning('新密码不能为空')
+			return
+		}
+		userApi.userResetPassword({ id: record.id, password: pwd }).then(() => {})
 	}
 	// 导出用户信息
 	const exportUserInfo = (record) => {

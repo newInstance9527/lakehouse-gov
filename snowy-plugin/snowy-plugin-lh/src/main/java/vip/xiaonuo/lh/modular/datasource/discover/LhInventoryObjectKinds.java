@@ -48,7 +48,7 @@ public final class LhInventoryObjectKinds {
             case "rabbitmq" -> QUEUE;
             case "elasticsearch" -> INDEX;
             case "redis" -> KEY_PREFIX;
-            case "s3", "minio" -> BUCKET;
+            case "s3", "minio", "s3_minio" -> BUCKET;
             case "hdfs", "file", "ftp" -> PATH;
             case "mongodb" -> COLLECTION;
             case "http_api" -> ENDPOINT;

@@ -20,6 +20,10 @@ import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.mapper.IgEtlDagMapper;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMapper;
+import vip.xiaonuo.lh.modular.compute.entity.CpScriptIndex;
+import vip.xiaonuo.lh.modular.compute.mapper.CpScriptIndexMapper;
+import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
+import vip.xiaonuo.lh.modular.dataapi.mapper.DataapiApiBindingMapper;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
 import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
@@ -59,6 +63,10 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
     private IgEtlDagMapper etlDagMapper;
     @Resource
     private GovMetricMapper metricMapper;
+    @Resource
+    private CpScriptIndexMapper scriptIndexMapper;
+    @Resource
+    private DataapiApiBindingMapper dataapiBindingMapper;
     @Resource
     private CbGravAssetRefMapper gravAssetRefMapper;
     @Resource
@@ -294,6 +302,14 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         if (LhOpsResourceTypeEnum.METRIC.getValue().equals(type)) {
             GovMetric metric = metricMapper.selectById(resourceId);
             return metric != null && isMetricOwner(metric, user);
+        }
+        if (LhOpsResourceTypeEnum.SCRIPT.getValue().equals(type)) {
+            CpScriptIndex script = scriptIndexMapper.selectById(resourceId);
+            return script != null && LhOwnerGuard.isOwner(user, script.getCreateUser());
+        }
+        if (LhOpsResourceTypeEnum.DATASERVICE.getValue().equals(type)) {
+            DataapiApiBinding binding = dataapiBindingMapper.selectById(resourceId);
+            return binding != null && LhOwnerGuard.isOwner(user, binding.getCreateUser());
         }
         return false;
     }

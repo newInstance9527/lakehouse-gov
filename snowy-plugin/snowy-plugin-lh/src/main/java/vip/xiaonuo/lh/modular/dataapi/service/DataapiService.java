@@ -5,8 +5,10 @@ import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiBindingParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiGatewayProbeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiKeyRevealParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiTagsParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 
 import java.util.List;
@@ -25,6 +27,11 @@ public interface DataapiService {
     DataapiApiBinding add(DataapiBindingParam param);
 
     DataapiApiBinding edit(DataapiBindingParam param);
+
+    /**
+     * 全量替换自定义标签（已发布亦可；仅改 tags_json，不触碰定义）。
+     */
+    Map<String, Object> updateTags(DataapiTagsParam param);
 
     Map<String, Object> build(DataapiBindingParam param);
 
@@ -53,6 +60,9 @@ public interface DataapiService {
     Map<String, Object> syncApisix(String ws);
 
     List<Map<String, Object>> keys(String ws);
+
+    /** 订阅 Key 二次查看：从 Vault 读取 Bearer 密文（权限 + 审计） */
+    Map<String, Object> revealKey(DataapiKeyRevealParam param);
 
     Map<String, Object> embedUrl();
 

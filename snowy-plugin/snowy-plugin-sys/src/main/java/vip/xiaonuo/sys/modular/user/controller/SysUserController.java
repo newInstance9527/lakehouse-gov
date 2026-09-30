@@ -162,8 +162,8 @@ public class SysUserController {
     @Operation(summary = "重置用户密码")
     @CommonLog("重置用户密码")
     @PostMapping("/sys/user/resetPassword")
-    public CommonResult<String> resetPassword(@RequestBody @Valid SysUserIdParam sysUserIdParam) {
-        sysUserService.resetPassword(sysUserIdParam);
+    public CommonResult<String> resetPassword(@RequestBody @Valid SysUserResetPasswordParam sysUserResetPasswordParam) {
+        sysUserService.resetPassword(sysUserResetPasswordParam);
         return CommonResult.ok();
     }
 

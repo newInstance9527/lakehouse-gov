@@ -235,7 +235,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         entity.setVaultPath("datasource/" + typeCode + "/" + entity.getId());
         entity.setContentHash(SecureUtil.sha256(entity.getConnMasked()));
         Map<String, Object> secret = connNormalizer.secretPayload(conn, n);
-        secret.put("jdbcUrl", buildJdbcUrl(typeCode, n, conn));
+        String jdbcUrl = buildJdbcUrl(typeCode, n, conn);
+        if (StrUtil.isNotBlank(jdbcUrl)) {
+            secret.put("jdbcUrl", jdbcUrl);
+        }
         vaultClient.write(entity.getVaultPath(), secret);
         this.save(entity);
         seedTablesFromSummary(entity);
@@ -326,7 +329,12 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             entity.setConnMasked(JSONUtil.toJsonStr(connNormalizer.masked(conn)));
             entity.setContentHash(SecureUtil.sha256(entity.getConnMasked()));
             Map<String, Object> secret = connNormalizer.secretPayload(conn, n);
-            secret.put("jdbcUrl", buildJdbcUrl(typeCode, n, conn));
+            String jdbcUrl = buildJdbcUrl(typeCode, n, conn);
+            if (StrUtil.isNotBlank(jdbcUrl)) {
+                secret.put("jdbcUrl", jdbcUrl);
+            } else {
+                secret.remove("jdbcUrl");
+            }
             vaultClient.write(entity.getVaultPath(), secret);
             markBindingsStale(entity.getId());
         } else if (StrUtil.isNotBlank(param.getAccess())) {
@@ -1238,7 +1246,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             b.path = "fallback";
             b.objectKind = LhInventoryObjectKinds.ofType(type);
             b.hint = "????????????? schemaSummary ??????";
-            b.metas = parseSchemaSummary(ds.getSchemaSummary()).stream().map(n -> {
+            b.metas = parseSchemaSummary(ds.getSchemaSummary(), ds.getType()).stream().map(n -> {
                 RemoteTableMeta m = new RemoteTableMeta();
                 m.name = n;
                 return m;
@@ -1275,7 +1283,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             b.path = "fallback";
             b.objectKind = LhInventoryObjectKinds.TABLE;
             b.hint = "JDBC ???????? schemaSummary?" + e.getMessage();
-            b.metas = parseSchemaSummary(ds.getSchemaSummary()).stream().map(n -> {
+            b.metas = parseSchemaSummary(ds.getSchemaSummary(), ds.getType()).stream().map(n -> {
                 RemoteTableMeta m = new RemoteTableMeta();
                 m.name = n;
                 m.comment = "fallback";
@@ -1720,46 +1728,13 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
 
     private String buildJdbcUrl(String type, LhDatasourceConnNormalizer.NormalizedConn n,
                                 Map<String, Object> conn) {
-        Object jdbc = conn != null ? conn.get("jdbcUrl") : null;
-        if (jdbc != null && StrUtil.isNotBlank(String.valueOf(jdbc))) {
-            return String.valueOf(jdbc);
-        }
-        String host = n.host;
-        String port = n.port;
-        String db = n.database;
-        String extra = n.extra;
-        if ("mysql".equals(type)) {
-            return "jdbc:mysql://" + host + ":" + port + "/" + db
-                    + "?useSSL=false&allowPublicKeyRetrieval=true"
-                    + (StrUtil.isNotBlank(extra) ? "&" + extra : "");
-        }
-        if ("pg".equals(type) || "postgresql".equals(type)) {
-            return "jdbc:postgresql://" + host + ":" + port + "/" + db
-                    + (StrUtil.isNotBlank(extra) ? "?" + extra : "");
-        }
-        if ("oracle".equals(type)) {
-            // SID ? :??????????? SID?? /
-            if (StrUtil.isNotBlank(db) && (db.contains(".") || db.contains("/") || db.toLowerCase().contains("service"))) {
-                String svc = db.replace("service:", "").replace("SERVICE:", "");
-                return "jdbc:oracle:thin:@//" + host + ":" + port + "/" + svc;
-            }
-            return "jdbc:oracle:thin:@" + host + ":" + port + ":" + db;
-        }
-        if ("sqlserver".equals(type)) {
-            return "jdbc:sqlserver://" + host + ":" + port + ";databaseName=" + db
-                    + (StrUtil.isNotBlank(extra) ? ";" + extra.replace("&", ";") : "");
-        }
-        if ("clickhouse".equals(type)) {
-            return "jdbc:clickhouse://" + host + ":" + port + "/" + StrUtil.blankToDefault(db, "default")
-                    + (StrUtil.isNotBlank(extra) ? "?" + extra : "");
-        }
-        if ("doris".equals(type)) {
-            return "jdbc:mysql://" + host + ":" + port + "/" + db + "?useSSL=false";
-        }
-        if ("trino".equals(type)) {
-            return "jdbc:trino://" + host + ":" + port + "/" + StrUtil.blankToDefault(db, "hive");
-        }
-        return "";
+        return vip.xiaonuo.lh.modular.datasource.support.LhJdbcUrlBuilder.build(
+                type,
+                n != null ? n.host : null,
+                n != null ? n.port : null,
+                n != null ? n.database : null,
+                n != null ? n.extra : null,
+                conn);
     }
 
     private void seedTablesFromSummary(LhDatasource entity) {
@@ -1768,7 +1743,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         if (typeEnum != null && typeEnum.isJdbc()) {
             return;
         }
-        List<String> names = parseSchemaSummary(entity.getSchemaSummary());
+        List<String> names = parseSchemaSummary(entity.getSchemaSummary(), entity.getType());
         Date now = new Date();
         for (String name : names) {
             LhDsTable row = new LhDsTable();
@@ -1783,11 +1758,19 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         }
     }
 
-    private List<String> parseSchemaSummary(String summary) {
+    /** HTTP/路径类清单名称本身含 `/`，不能用斜杠分隔；用逗号/顿号等 */
+    private List<String> parseSchemaSummary(String summary, String typeCode) {
         if (StrUtil.isBlank(summary)) {
             return Collections.emptyList();
         }
-        return Arrays.stream(summary.split("[,;/\\n]+"))
+        String t = StrUtil.blankToDefault(typeCode, "").toLowerCase(Locale.ROOT);
+        boolean pathLike = t.contains("http") || t.equals("hdfs") || t.equals("file")
+                || t.equals("ftp") || t.equals("s3") || t.equals("minio")
+                || t.equals("tableau") || t.equals("superset") || t.equals("airflow")
+                || summary.matches("(?is).*\\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\\s+\\S+.*");
+        // 路径类：逗号、中文逗号、顿号、分号、竖线、换行；禁止 `/`
+        String delim = pathLike ? "[,，、;|\\n\\r]+" : "[,，、;/\\n\\r]+";
+        return Arrays.stream(summary.split(delim))
                 .map(String::trim)
                 .filter(StrUtil::isNotBlank)
                 .distinct()
@@ -1798,7 +1781,8 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         List<LhDsTable> tables = dsTableMapper.selectList(new QueryWrapper<LhDsTable>().lambda()
                 .eq(LhDsTable::getDsId, dsId)
                 .orderByAsc(LhDsTable::getTableName));
-        String summary = tables.stream().map(LhDsTable::getTableName).collect(Collectors.joining(", "));
+        // 各类型清单统一顿号拼接，避免与 path 中的 `/` 混淆
+        String summary = tables.stream().map(LhDsTable::getTableName).collect(Collectors.joining("、"));
         LhDatasource ds = this.getById(dsId);
         if (ds != null) {
             ds.setSchemaSummary(summary);

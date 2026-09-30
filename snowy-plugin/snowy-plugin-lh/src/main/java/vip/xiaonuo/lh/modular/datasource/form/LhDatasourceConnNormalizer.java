@@ -17,6 +17,7 @@ import cn.hutool.json.JSONUtil;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.modular.datasource.param.LhDatasourceAddParam;
 
+import java.net.URI;
 import java.util.*;
 
 /**
@@ -77,16 +78,38 @@ public class LhDatasourceConnNormalizer {
 
     public NormalizedConn normalize(String typeLabel, Map<String, Object> conn, String defaultPort) {
         Map<String, Object> c = conn == null ? Map.of() : conn;
+        String baseUrl = first(c, "baseURL", "httpUrl");
         String host = first(c, "host", "bootstrap", "bootstrapServers", "endpoint",
                 "nameNode", "serviceUrl", "zkQuorum", "baseURL", "httpUrl");
-        if (StrUtil.isNotBlank(host)) {
+        String port = first(c, "port");
+
+        // HTTP API：以 Base URL 为准拆 hostname/port，避免 URL 内端口与表单 port 冲突
+        HttpEndpoint http = parseHttpEndpoint(StrUtil.isNotBlank(baseUrl) ? baseUrl : null);
+        if (http == null) {
+            http = parseHttpEndpoint(host);
+        }
+        if (http != null) {
+            host = http.host;
+            // URL 内端口优先，再回落表单 port / defaultPort
+            if (StrUtil.isNotBlank(http.port)) {
+                port = http.port;
+            }
+        } else if (StrUtil.isNotBlank(host)) {
             host = host.replaceFirst("^https?://", "");
             int slash = host.indexOf('/');
             if (slash > 0) {
                 host = host.substring(0, slash);
             }
+            // 单主机 host:port（旧脏数据）；勿拆 Kafka multi-broker
+            if (host.matches("^[^,/\\s]+:\\d{1,5}$")) {
+                int colon = host.lastIndexOf(':');
+                String maybePort = host.substring(colon + 1);
+                if (StrUtil.isBlank(port)) {
+                    port = maybePort;
+                }
+                host = host.substring(0, colon);
+            }
         }
-        String port = first(c, "port");
         if (StrUtil.isBlank(port)) {
             port = defaultPort;
         }
@@ -108,6 +131,45 @@ public class LhDatasourceConnNormalizer {
         n.accessMode = access;
         n.rawConn = new LinkedHashMap<>(c);
         return n;
+    }
+
+    /**
+     * 解析 http(s) URL：hostname（不含端口）+ 显式/默认端口。
+     */
+    static HttpEndpoint parseHttpEndpoint(String raw) {
+        if (StrUtil.isBlank(raw)) {
+            return null;
+        }
+        String s = raw.trim();
+        if (!s.matches("(?i)^https?://.*") && !s.contains("/")) {
+            return null;
+        }
+        try {
+            String withScheme = s.matches("(?i)^https?://.*") ? s : "https://" + s;
+            URI uri = URI.create(withScheme);
+            if (StrUtil.isBlank(uri.getHost())) {
+                return null;
+            }
+            String p;
+            if (uri.getPort() > 0) {
+                p = String.valueOf(uri.getPort());
+            } else {
+                p = "http".equalsIgnoreCase(uri.getScheme()) ? "80" : "443";
+            }
+            return new HttpEndpoint(uri.getHost(), p);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static final class HttpEndpoint {
+        final String host;
+        final String port;
+
+        HttpEndpoint(String host, String port) {
+            this.host = host;
+            this.port = port;
+        }
     }
 
     public Map<String, Object> masked(Map<String, Object> conn) {

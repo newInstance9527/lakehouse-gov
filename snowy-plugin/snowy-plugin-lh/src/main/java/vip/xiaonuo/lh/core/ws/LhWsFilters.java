@@ -3,21 +3,25 @@ package vip.xiaonuo.lh.core.ws;
 import cn.hutool.core.util.StrUtil;
 
 /**
- * 工作空间列表过滤：空 / 空白 = 全局（不过滤）；显式传才筛归属。
- * 写路径仍用 blankToDefault(ws, "default") 绑默认归属。
+ * Workspace list filter: blank = no filter, but logged-in user must have scope=all privilege.
+ * Write paths still use blankToDefault(ws, "default").
  */
 public final class LhWsFilters {
 
     private LhWsFilters() {
     }
 
-    /** 列表用：trim 后空则 null（表示不过滤） */
+    /** List: trim blank -> null (no filter); privilege check when user present */
     public static String listWs(String ws) {
         String t = StrUtil.trim(ws);
-        return StrUtil.isBlank(t) ? null : t;
+        if (StrUtil.isBlank(t)) {
+            LhDataScope.assertBlankWsAllowed();
+            return null;
+        }
+        return t;
     }
 
     public static boolean hasWs(String ws) {
-        return StrUtil.isNotBlank(listWs(ws));
+        return StrUtil.isNotBlank(StrUtil.trim(ws));
     }
 }

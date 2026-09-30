@@ -9,6 +9,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
@@ -26,7 +27,8 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * 订阅 Key 签发：平台 SoT = dataapi_api_key_meta + Vault；密文只在审批当次回传。
+ * 订阅 Key 签发与二次查看：平台 SoT = dataapi_api_key_meta + Vault。
+ * <p>列表只返回脱敏元数据；完整 Bearer 经 {@link #revealSecret} 按权限从 Vault 读取并记审计。</p>
  */
 @Service
 public class DataapiKeyIssueService {
@@ -134,9 +136,65 @@ public class DataapiKeyIssueService {
         out.put("method", binding.getMethod());
         out.put("vaultPath", exist.getVaultPath());
         out.put("expireAt", exist.getExpireAt());
-        out.put("message", "该申请单已签发过 Key；密文仅首次审批返回，请查 Vault 或重新申请");
+        out.put("message", "该申请单已签发过 Key；密文请在运行/API 详情中「查看密钥」，或重新申请");
         out.put("replay", true);
         return out;
+    }
+
+    /**
+     * 按权限从 Vault 回显 Bearer 密文。允许：申请人 / 创建人 / 超管·业务管理员·数据运维。
+     */
+    public Map<String, Object> revealSecret(String keyId, String reason) {
+        if (StrUtil.isBlank(keyId)) {
+            throw new CommonException("订阅 Key id 不能为空");
+        }
+        DataapiApiKeyMeta meta = keyMetaMapper.selectById(keyId);
+        if (meta == null || !NOT_DELETE.equals(meta.getDeleteFlag())) {
+            throw new CommonException("订阅 Key 不存在：" + keyId);
+        }
+        assertCanReveal(meta);
+
+        String vaultPath = StrUtil.blankToDefault(meta.getVaultPath(), LhVaultPaths.dataapiKey(meta.getId()));
+        if (!vaultClient.exists(vaultPath)) {
+            throw new CommonException("Vault 无密钥（未登记或已销毁）：" + vaultPath);
+        }
+        String token = vaultClient.getString(vaultPath, "token");
+        if (StrUtil.isBlank(token)) {
+            throw new CommonException("Vault 条目缺少 token：" + vaultPath);
+        }
+        String appKey = StrUtil.blankToDefault(vaultClient.getString(vaultPath, "appKey"), meta.getAppKey());
+        String useReason = StrUtil.blankToDefault(StrUtil.trim(reason), "查看订阅密钥");
+        if (useReason.length() > 200) {
+            useReason = useReason.substring(0, 200);
+        }
+
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", meta.getId());
+        out.put("appKey", appKey);
+        out.put("token", token);
+        out.put("keyHint", meta.getKeyHint());
+        out.put("vaultPath", vaultPath);
+        out.put("reason", useReason);
+        out.put("operator", user.getId());
+        out.put("operatorName", StrUtil.blankToDefault(user.getName(), user.getAccount()));
+        out.put("revealedAt", new Date());
+        return out;
+    }
+
+    private void assertCanReveal(DataapiApiKeyMeta meta) {
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        String uid = user.getId();
+        if (LhLoginUsers.hasAnyRole("superAdmin", "bizAdmin", "dataOps")) {
+            return;
+        }
+        if (StrUtil.isNotBlank(meta.getApplicant()) && meta.getApplicant().equals(uid)) {
+            return;
+        }
+        if (StrUtil.isNotBlank(meta.getCreateUser()) && meta.getCreateUser().equals(uid)) {
+            return;
+        }
+        throw new CommonException("无权查看该订阅密钥：仅申请人或管理员可二次查看");
     }
 
     private DataapiApiBinding resolveBinding(String bindingId, String publicPath, String method) {

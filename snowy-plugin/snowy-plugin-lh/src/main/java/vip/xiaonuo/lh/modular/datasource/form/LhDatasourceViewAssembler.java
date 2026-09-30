@@ -119,7 +119,19 @@ public class LhDatasourceViewAssembler {
             extra = "";
         }
         vo.setExtra(extra);
-        // 用 conn 补齐 host/port/database
+        // 用 conn 补齐 host/port/database；HTTP API 优先从 baseURL 解析
+        if (StrUtil.isBlank(vo.getHost()) || StrUtil.isBlank(vo.getPort())) {
+            LhDatasourceConnNormalizer.HttpEndpoint http = LhDatasourceConnNormalizer.parseHttpEndpoint(
+                    str(conn.get("baseURL"), conn.get("httpUrl"), ""));
+            if (http != null) {
+                if (StrUtil.isBlank(vo.getHost())) {
+                    vo.setHost(http.host);
+                }
+                if (StrUtil.isBlank(vo.getPort())) {
+                    vo.setPort(http.port);
+                }
+            }
+        }
         if (StrUtil.isBlank(vo.getHost())) {
             vo.setHost(str(conn.get("host"), conn.get("bootstrap"), conn.get("endpoint")));
         }

@@ -129,11 +129,10 @@ public class IgEtlServiceImpl implements IgEtlService {
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
         QueryWrapper<IgEtlDag> qw = new QueryWrapper<>();
-        // 空间优先：缺省 scope=workspace；all=特权巡检
-        String scope = StrUtil.blankToDefault(StrUtil.trim(param.getScope()), "workspace").toLowerCase(Locale.ROOT);
-        String ws = StrUtil.trim(param.getWs());
-        if (!"all".equals(scope)) {
-            qw.lambda().eq(IgEtlDag::getWs, StrUtil.blankToDefault(ws, WS_DEFAULT));
+        // 空间优先：缺省 scope=workspace；all=特权巡检（LhDataScope 硬门禁）
+        String home = vip.xiaonuo.lh.core.ws.LhDataScope.resolveListWs(param.getWs(), param.getScope());
+        if (home != null) {
+            qw.lambda().eq(IgEtlDag::getWs, home);
         }
         if (StrUtil.isNotBlank(param.getStatus())) {
             qw.lambda().eq(IgEtlDag::getStatus, param.getStatus());

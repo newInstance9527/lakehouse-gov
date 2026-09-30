@@ -44,6 +44,10 @@ import vip.xiaonuo.lh.modular.query.param.CpQueryExecParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
 import vip.xiaonuo.lh.modular.workspace.entity.GovWs;
 import vip.xiaonuo.lh.modular.workspace.mapper.GovWsMapper;
+import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
+import vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum;
+import vip.xiaonuo.lh.modular.sec.mapper.SecAuthGrantMapper;
+import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -82,6 +86,10 @@ public class CpDevelopService {
     @Resource
     private GovWsMapper govWsMapper;
     @Resource
+    private SecAuthGrantService secAuthGrantService;
+    @Resource
+    private SecAuthGrantMapper secAuthGrantMapper;
+    @Resource
     private CpScriptGitStore gitStore;
     @Resource
     private CpGiteaClient giteaClient;
@@ -105,10 +113,21 @@ public class CpDevelopService {
 
     public Map<String, Object> tree(String ws) {
         String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
-        List<CpScriptIndex> rows = scriptMapper.selectList(new QueryWrapper<CpScriptIndex>().lambda()
+        String uid = vip.xiaonuo.lh.core.auth.LhLoginUsers.requireUserId();
+        var sqw = new QueryWrapper<CpScriptIndex>().lambda()
                 .eq(StrUtil.isNotBlank(workspace), CpScriptIndex::getWs, workspace)
                 .eq(CpScriptIndex::getDeleteFlag, "NOT_DELETE")
-                .orderByAsc(CpScriptIndex::getPath));
+                .orderByAsc(CpScriptIndex::getPath);
+        if (vip.xiaonuo.lh.core.ws.LhDataScope.forceMineOnly()) {
+            java.util.List<String> granted = listGrantedScriptIds(uid);
+            if (granted.isEmpty()) {
+                sqw.eq(CpScriptIndex::getCreateUser, uid);
+            } else {
+                sqw.and(w -> w.eq(CpScriptIndex::getCreateUser, uid)
+                        .or().in(CpScriptIndex::getId, granted));
+            }
+        }
+        List<CpScriptIndex> rows = scriptMapper.selectList(sqw);
         List<Map<String, Object>> nodes = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         for (CpScriptIndex row : rows) {
@@ -806,26 +825,67 @@ public class CpDevelopService {
         run.setResultJson(json);
     }
 
+    /**
+     * 拉 DS 任务日志。提交后立刻查常得到「task instance host is null」
+     * （Worker 尚未认领 / host 未写入），短暂重试；仍空则返回可读提示，不把原文当引擎日志。
+     */
     private String pullDsLog(String processInstanceId) {
-        Map<String, Object> listed = dsClient.listTaskInstances(processInstanceId);
-        Object tasks = listed.get("tasks");
-        if (!(tasks instanceof List<?> list) || list.isEmpty()) {
-            return "";
+        String lastHint = "";
+        for (int attempt = 0; attempt < 4; attempt++) {
+            if (attempt > 0) {
+                try {
+                    Thread.sleep(800L * attempt);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            Map<String, Object> listed = dsClient.listTaskInstances(processInstanceId);
+            Object tasks = listed.get("tasks");
+            if (!(tasks instanceof List<?> list) || list.isEmpty()) {
+                lastHint = "DS 实例 " + processInstanceId + " 尚无 taskInstance（调度排队或 Worker 未接单）";
+                continue;
+            }
+            Object first = list.get(0);
+            if (!(first instanceof Map<?, ?> task)) {
+                lastHint = "DS 任务列表解析失败";
+                continue;
+            }
+            String taskId = str(task.get("id"));
+            String host = str(task.get("host"));
+            String state = str(task.get("state"));
+            if (StrUtil.isBlank(taskId)) {
+                lastHint = "taskInstanceId 为空 · state=" + StrUtil.blankToDefault(state, "?");
+                continue;
+            }
+            if (StrUtil.isBlank(host)) {
+                lastHint = "任务未分配 Worker（host 为空）· state=" + StrUtil.blankToDefault(state, "?")
+                        + " · taskInstanceId=" + taskId
+                        + "。请确认 DS Worker 在线且 workerGroup=default；稍后刷新试跑详情。";
+                // 终态且无 host：不必再等，直接说明
+                String st = state.toUpperCase(Locale.ROOT);
+                if (st.contains("FAIL") || st.contains("KILL") || st.contains("STOP")) {
+                    return lastHint;
+                }
+                continue;
+            }
+            Map<String, Object> log = dsClient.queryTaskInstanceLog(taskId, 0, 400);
+            String text = str(log.get("content"));
+            if (StrUtil.isBlank(text)) {
+                text = str(log.get("message"));
+            }
+            if (StrUtil.isBlank(text)) {
+                lastHint = "Worker=" + host + " · state=" + state + " · 暂无日志内容";
+                continue;
+            }
+            if (StrUtil.containsIgnoreCase(text, "host is null")) {
+                lastHint = "DS 返回 host is null（Worker 尚未写入）· state=" + StrUtil.blankToDefault(state, "?")
+                        + " · host=" + host + " · 稍后刷新";
+                continue;
+            }
+            return StrUtil.maxLength(text, TRIAL_LOG_CHARS);
         }
-        Object first = list.get(0);
-        if (!(first instanceof Map<?, ?> task)) {
-            return "";
-        }
-        String taskId = str(task.get("id"));
-        if (StrUtil.isBlank(taskId)) {
-            return "";
-        }
-        Map<String, Object> log = dsClient.queryTaskInstanceLog(taskId, 0, 400);
-        String text = str(log.get("content"));
-        if (StrUtil.isBlank(text)) {
-            text = str(log.get("message"));
-        }
-        return StrUtil.maxLength(text, TRIAL_LOG_CHARS);
+        return lastHint;
     }
 
     private boolean refreshDsIfNeeded(CpScriptRun run) {
@@ -1419,7 +1479,46 @@ public class CpDevelopService {
         if (row == null || "DELETE".equals(row.getDeleteFlag())) {
             throw new CommonException("脚本不存在");
         }
+        if (vip.xiaonuo.lh.core.ws.LhDataScope.forceMineOnly()) {
+            String uid = vip.xiaonuo.lh.core.auth.LhLoginUsers.requireUserId();
+            if (!uid.equals(row.getCreateUser()) && !canAccessScript(uid, row.getId())) {
+                throw new CommonException("无权访问该脚本：仅创建人或已授权用户可见");
+            }
+        }
         return row;
+    }
+
+    private boolean canAccessScript(String userId, String scriptId) {
+        try {
+            if (secAuthGrantService != null
+                    && secAuthGrantService.hasOpsPrivilege("script", scriptId, LhOpsPrivilegeEnum.EDIT)) {
+                return true;
+            }
+            if (secAuthGrantService != null && secAuthGrantService.hasManageGrant("script", scriptId)) {
+                return true;
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return listGrantedScriptIds(userId).contains(scriptId);
+    }
+
+    private java.util.List<String> listGrantedScriptIds(String userId) {
+        if (secAuthGrantMapper == null || StrUtil.isBlank(userId)) {
+            return java.util.List.of();
+        }
+        java.util.List<SecAuthGrant> grants = secAuthGrantMapper.selectList(new QueryWrapper<SecAuthGrant>().lambda()
+                .eq(SecAuthGrant::getDeleteFlag, "NOT_DELETE")
+                .eq(SecAuthGrant::getStatus, "active")
+                .eq(SecAuthGrant::getSubjectId, userId)
+                .eq(SecAuthGrant::getResourceType, "script"));
+        java.util.List<String> ids = new java.util.ArrayList<>();
+        for (SecAuthGrant g : grants) {
+            if (StrUtil.isNotBlank(g.getResourceId())) {
+                ids.add(g.getResourceId());
+            }
+        }
+        return ids;
     }
 
     private CpRelease requireRelease(String id) {

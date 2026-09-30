@@ -17,8 +17,10 @@ import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiBindingParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiGatewayProbeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiKeyRevealParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiTagsParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
 
@@ -71,6 +73,13 @@ public class DataapiController {
     @PostMapping("/lh/dataapi/edit")
     public CommonResult<DataapiApiBinding> edit(@RequestBody @Valid DataapiBindingParam param) {
         return CommonResult.data(dataapiService.edit(param));
+    }
+
+    @Operation(summary = "全量替换自定义标签（已发布亦可）")
+    @CommonLog("数据服务更新 API 标签")
+    @PostMapping("/lh/dataapi/updateTags")
+    public CommonResult<Map<String, Object>> updateTags(@RequestBody @Valid DataapiTagsParam param) {
+        return CommonResult.data(dataapiService.updateTags(param));
     }
 
     @Operation(summary = "向导构建：SQLREST create/update + 绑定")
@@ -146,6 +155,13 @@ public class DataapiController {
     @GetMapping("/lh/dataapi/keys")
     public CommonResult<List<Map<String, Object>>> keys(@RequestParam(required = false) String ws) {
         return CommonResult.data(dataapiService.keys(ws));
+    }
+
+    @Operation(summary = "订阅 Key 二次查看密文（Vault；申请人/管理员；写审计）")
+    @CommonLog("数据服务查看订阅密钥")
+    @PostMapping("/lh/dataapi/keys/reveal")
+    public CommonResult<Map<String, Object>> revealKey(@RequestBody @Valid DataapiKeyRevealParam param) {
+        return CommonResult.data(dataapiService.revealKey(param));
     }
 
     @Operation(summary = "外链 / 深链")

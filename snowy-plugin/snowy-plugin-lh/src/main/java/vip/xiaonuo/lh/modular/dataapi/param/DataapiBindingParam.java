@@ -48,6 +48,8 @@ public class DataapiBindingParam {
     private String responseShape;
     private String namingStrategy;
     private String description;
+    /** 自定义标签（字符串列表）；写入 tags_json；null=不改 */
+    private List<String> tags;
     /** SQL 或 GROOVY；写入 SQLREST assignment.engine */
     private String engine = "SQL";
     private Boolean open;

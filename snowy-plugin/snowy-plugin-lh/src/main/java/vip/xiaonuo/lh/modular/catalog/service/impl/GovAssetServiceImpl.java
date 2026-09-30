@@ -822,18 +822,10 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
      * 企业共享 scope=enterprise 已废除，按本空间处理。
      */
     private void applyListScope(QueryWrapper<GovAsset> qw, GovAssetPageParam param) {
-        String scope = StrUtil.trim(param.getScope());
-        String ws = StrUtil.trim(param.getWs());
-        if (StrUtil.isBlank(scope)) {
-            scope = "workspace";
+        String home = vip.xiaonuo.lh.core.ws.LhDataScope.resolveListWs(param.getWs(), param.getScope());
+        if (home != null) {
+            qw.lambda().eq(GovAsset::getWs, home);
         }
-        String s = scope.toLowerCase(Locale.ROOT);
-        if ("all".equals(s)) {
-            return;
-        }
-        // enterprise 等历史 scope 一律按本空间
-        String home = StrUtil.blankToDefault(ws, "default");
-        qw.lambda().eq(GovAsset::getWs, home);
     }
 
     private Map<String, Object> buildDriftExtra(GovAsset asset) {

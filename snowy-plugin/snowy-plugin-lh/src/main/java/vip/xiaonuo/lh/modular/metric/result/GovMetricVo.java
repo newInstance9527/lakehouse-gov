@@ -22,6 +22,8 @@ public class GovMetricVo {
     private String name;
     private String kind;
     private String type;
+    /** 归属协作空间 */
+    private String ws;
     private String domain;
     private String domainCode;
     private String status;

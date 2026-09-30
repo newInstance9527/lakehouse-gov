@@ -16,6 +16,7 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhConsumerBinding;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.enums.LhDatasourceStatusEnum;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhConsumerBindingMapper;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcUrlBuilder;
 
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -33,11 +34,17 @@ public class LhDatasourceSqlrestProjector {
 
     public static final String CONSUMER_TYPE = "sqlrest";
 
-    /** SQLREST 原生支持且门户可映射的类型 */
+    /**
+     * SQLREST ProductTypeEnum 可映射的门户类型。
+     * <p>不含 kafka/redis/rabbitmq/minio/hdfs/iceberg/trino 等：现网 SQLREST 无对应 ProductType
+     *（Trino 亦不在枚举内）；这类源走 Grav/OM 或仅门户清单。</p>
+     */
     private static final Set<String> PROJECTABLE = Set.of(
             "mysql", "mariadb", "pg", "postgresql", "oracle", "sqlserver",
             "clickhouse", "doris", "hive", "mongodb", "elasticsearch",
-            "starrocks", "oceanbase");
+            "starrocks", "oceanbase",
+            // RestfulDriver：jdbc:restful:<baseURL>
+            "http_api", "tableau", "superset", "airflow");
 
     @Resource
     private SqlrestClient sqlrestClient;
@@ -73,20 +80,45 @@ public class LhDatasourceSqlrestProjector {
             result.put("ok", false);
             result.put("skipped", true);
             result.put("message", "SQLREST 暂不支持该类型: " + type
-                    + "（湖仓联邦请用可投影的 ADS/CK/Doris，或为 SQLREST 安装 Trino JDBC 驱动后扩展）");
+                    + "（Kafka/Redis/MQ/对象存储/Iceberg/Trino 等无 ProductType；湖表 API 请投 Doris/CK/Hive 或经可投影 JDBC 源）");
             return result;
         }
 
         Map<String, Object> secret = vaultClient.readOrEmpty(ds.getVaultPath());
         String jdbcUrl = str(secret.get("jdbcUrl"));
         if (StrUtil.isBlank(jdbcUrl)) {
+            // ES/Hive/Mongo/HTTP 等登记时曾未写入 jdbcUrl：用 host/port 或 baseURL 回拼并回写 Vault
+            jdbcUrl = LhJdbcUrlBuilder.buildFromSecret(
+                    type, secret, ds.getEndpointHost(), ds.getEndpointPort(), ds.getDatabaseName());
+            if (StrUtil.isNotBlank(jdbcUrl)) {
+                secret.put("jdbcUrl", jdbcUrl);
+                try {
+                    vaultClient.write(ds.getVaultPath(), secret);
+                } catch (Exception ignored) {
+                    // 投影仍可继续，回写失败不阻断
+                }
+            }
+        }
+        if (StrUtil.isBlank(jdbcUrl)) {
             result.put("ok", false);
-            result.put("message", "Vault 缺少 jdbcUrl，无法投影");
-            upsertBindingError(ds.getId(), "Vault 缺少 jdbcUrl");
+            String tip = isHttpFamily(type)
+                    ? "Vault 缺少 baseURL/jdbcUrl，无法投影 HTTP 源（请填写 Base URL）"
+                    : "Vault 缺少 jdbcUrl，无法投影（请检查 host/port 或重新编辑数据源）";
+            result.put("message", tip);
+            upsertBindingError(ds.getId(), tip);
             return result;
         }
         String username = firstNonBlank(secret, "username", "user", "jdbc-user");
-        String password = firstNonBlank(secret, "password", "jdbc-password");
+        String password = firstNonBlank(secret, "password", "jdbc-password", "token", "apiKey", "api_key");
+        if (isHttpFamily(type)) {
+            // SQLREST HTTP 校验 username 非空；无账号时用占位，真实鉴权靠 password/token
+            if (StrUtil.isBlank(username)) {
+                username = "http";
+            }
+            if (StrUtil.isBlank(password)) {
+                password = "-";
+            }
+        }
         SqlrestTypeMapping mapped = mapType(type);
         String version = pickDriverVersion(mapped.sqlrestType());
         if (StrUtil.isBlank(version)) {
@@ -183,6 +215,11 @@ public class LhDatasourceSqlrestProjector {
             return switch (sqlrestType) {
                 case "MYSQL" -> "mysql-8.4";
                 case "POSTGRESQL" -> "postgresql-13";
+                case "ELASTICSEARCH" -> "elasticsearch";
+                case "HIVE" -> "hive";
+                case "MONGODB" -> "mongodb";
+                case "HTTP" -> "http-1.0";
+                case "STARROCKS", "DORIS" -> "mysql-8";
                 case "CLICKHOUSE" -> null;
                 default -> null;
             };
@@ -275,18 +312,27 @@ public class LhDatasourceSqlrestProjector {
 
     private static SqlrestTypeMapping mapType(String portalType) {
         return switch (portalType) {
-            case "mysql", "mariadb" -> new SqlrestTypeMapping("MYSQL", "com.mysql.jdbc.Driver");
+            case "mysql" -> new SqlrestTypeMapping("MYSQL", "com.mysql.jdbc.Driver");
+            case "mariadb" -> new SqlrestTypeMapping("MARIADB", "org.mariadb.jdbc.Driver");
             case "pg", "postgresql" -> new SqlrestTypeMapping("POSTGRESQL", "org.postgresql.Driver");
             case "oracle" -> new SqlrestTypeMapping("ORACLE", "oracle.jdbc.driver.OracleDriver");
             case "sqlserver" -> new SqlrestTypeMapping("SQLSERVER", "com.microsoft.sqlserver.jdbc.SQLServerDriver");
             case "clickhouse" -> new SqlrestTypeMapping("CLICKHOUSE", "com.clickhouse.jdbc.ClickHouseDriver");
-            case "doris", "starrocks" -> new SqlrestTypeMapping("DORIS", "com.mysql.jdbc.Driver");
+            case "doris" -> new SqlrestTypeMapping("DORIS", "com.mysql.jdbc.Driver");
+            case "starrocks" -> new SqlrestTypeMapping("STARROCKS", "com.mysql.jdbc.Driver");
             case "hive" -> new SqlrestTypeMapping("HIVE", "org.apache.hive.jdbc.HiveDriver");
             case "mongodb" -> new SqlrestTypeMapping("MONGODB", "com.gitee.jdbc.mongodb.JdbcDriver");
             case "elasticsearch" -> new SqlrestTypeMapping("ELASTICSEARCH", "com.gitee.esdriver.driver.EsDriver");
             case "oceanbase" -> new SqlrestTypeMapping("OCEANBASE", "com.oceanbase.jdbc.Driver");
+            case "http_api", "tableau", "superset", "airflow" ->
+                    new SqlrestTypeMapping("HTTP", "com.gitee.restfuldriver.driver.RestfulDriver");
             default -> throw new CommonException("无法映射到 SQLREST 类型: " + portalType);
         };
+    }
+
+    private static boolean isHttpFamily(String portalType) {
+        String t = StrUtil.blankToDefault(portalType, "").toLowerCase(Locale.ROOT);
+        return "http_api".equals(t) || "tableau".equals(t) || "superset".equals(t) || "airflow".equals(t);
     }
 
     private static String firstNonBlank(Map<String, Object> secret, String... keys) {

@@ -61,7 +61,7 @@ public class LhManualSummaryInventoryDiscoverer implements LhInventoryDiscoverer
         String type = normalize(ds.getType());
         String kind = objectKind(type);
         String kindLabel = LhInventoryObjectKinds.labelOf(kind);
-        List<LhRemoteInventoryItem> items = parseSummary(ds.getSchemaSummary()).stream()
+        List<LhRemoteInventoryItem> items = parseSummary(ds.getSchemaSummary(), type).stream()
                 .map(n -> {
                     LhRemoteInventoryItem m = LhRemoteInventoryItem.of(n);
                     m.comment = "manual:" + kind;
@@ -82,7 +82,7 @@ public class LhManualSummaryInventoryDiscoverer implements LhInventoryDiscoverer
                             + "失败时请检查 host/port/password 或维护 Key 前缀清单。";
             case "rabbitmq" ->
                     "RabbitMQ 请先保存后同步（path=rabbitmq_mgmt，Management /api/queues，默认端口 15672）。";
-            case "s3", "minio" ->
+            case "s3", "minio", "s3_minio" ->
                     "S3/MinIO 请先保存后同步（path=minio_s3，ListBuckets；已填 bucket 时可列顶层前缀）。";
             case "mongodb" ->
                     "MongoDB 暂不自动拉取集合清单，请维护「集合清单」后同步回填。";
@@ -97,11 +97,21 @@ public class LhManualSummaryInventoryDiscoverer implements LhInventoryDiscoverer
         };
     }
 
-    private static List<String> parseSummary(String summary) {
+    /** HTTP/路径类清单名称本身含 `/`，不能用斜杠分隔；用逗号/顿号等 */
+    private static final Set<String> PATH_LIKE_TYPES = Set.of(
+            "http_api", "hdfs", "file", "ftp", "s3", "minio",
+            "tableau", "superset", "airflow"
+    );
+
+    private static List<String> parseSummary(String summary, String typeCode) {
         if (StrUtil.isBlank(summary)) {
             return Collections.emptyList();
         }
-        return Arrays.stream(summary.split("[,;/\\n]+"))
+        boolean pathLike = PATH_LIKE_TYPES.contains(normalize(typeCode))
+                || summary.matches("(?is).*\\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\\s+\\S+.*");
+        // 路径类：逗号、中文逗号、顿号、分号、竖线、换行；禁止 `/`
+        String delim = pathLike ? "[,，、;|\\n\\r]+" : "[,，、;/\\n\\r]+";
+        return Arrays.stream(summary.split(delim))
                 .map(String::trim)
                 .filter(StrUtil::isNotBlank)
                 .distinct()

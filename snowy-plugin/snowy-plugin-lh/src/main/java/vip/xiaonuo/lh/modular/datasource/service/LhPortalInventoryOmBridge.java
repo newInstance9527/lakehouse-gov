@@ -378,7 +378,7 @@ public class LhPortalInventoryOmBridge {
         return switch (t) {
             case "rabbitmq", "redis", "elasticsearch", "es",
                  "kafka", "pulsar",
-                 "s3", "minio", "hdfs",
+                 "s3", "minio", "s3_minio", "hdfs",
                  "mongodb", "http_api", "file", "ftp",
                  "trino", "tableau", "superset", "airflow",
                  "iceberg", "hbase" -> true;

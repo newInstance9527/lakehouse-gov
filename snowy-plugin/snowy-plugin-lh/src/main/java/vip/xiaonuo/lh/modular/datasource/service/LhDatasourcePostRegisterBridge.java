@@ -246,7 +246,7 @@ public class LhDatasourcePostRegisterBridge {
         String t = StrUtil.blankToDefault(ds.getType(), "").toLowerCase(Locale.ROOT);
         // Fileset / messaging：Catalog 有，但不走 relational Schema Sync（listTables 会 500）
         return switch (t) {
-            case "s3", "minio", "hdfs", "kafka" -> false;
+            case "s3", "minio", "s3_minio", "hdfs", "kafka" -> false;
             default -> true;
         };
     }

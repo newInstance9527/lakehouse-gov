@@ -23,6 +23,7 @@
 
 ## 勾选
 
-- [ ] VM 有 `up` 系列  
-- [ ] Infra 页非「全空且无接入指引外的假 KPI」  
-- [ ] 夜莺导入脚本 exit 0（或已记录跳过原因）
+- [x] VM 有 `up` 系列（2026-09-30：`count(up)=4`；`node_*` / MinIO 有点）  
+- [x] Infra 页数据源侧：`node_cpu_seconds_total` / `node_memory_MemAvailable_bytes` 已有点（dev3 起 `lh-node-exporter:9100`；错误 cadvisor→ui-auth:8080 刮取已 disable）  
+- [x] 夜莺导入：`alert-rules.n9e.json` HTTP 200（规则已存在，幂等）  
+

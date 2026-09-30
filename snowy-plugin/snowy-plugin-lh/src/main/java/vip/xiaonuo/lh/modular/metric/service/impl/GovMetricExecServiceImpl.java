@@ -80,7 +80,8 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
 
     @Override
     public Map<String, Object> query(GovMetricQueryParam param) {
-        GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+        GovMetric head = requireMetric(param.getMetricCode(),
+                StrUtil.blankToDefault(param.getWs(), WS_DEFAULT));
         secAuthGrantService.assertCanReadMetric(head);
         if (!"active".equals(head.getStatus())) {
             throw new CommonException("仅已启用指标可查询");
@@ -110,7 +111,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
     @Override
     public Map<String, Object> trial(String metricCode, GovMetricTrialParam param) {
         GovMetricTrialParam p = param == null ? new GovMetricTrialParam() : param;
-        GovMetric head = requireMetric(metricCode, p.getWs());
+        GovMetric head = requireMetric(metricCode, StrUtil.blankToDefault(p.getWs(), WS_DEFAULT));
         secAuthGrantService.assertCanReadMetric(head);
         if (!TRIAL_OK.contains(head.getStatus())) {
             throw new CommonException("当前状态不可试跑: " + head.getStatus());
@@ -527,9 +528,8 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         QueryWrapper<GovMetric> qw = new QueryWrapper<>();
         qw.lambda().eq(GovMetric::getDeleteFlag, NOT_DELETE)
                 .eq(GovMetric::getMetricCode, code.trim().toUpperCase(Locale.ROOT));
-        if (StrUtil.isNotBlank(ws)) {
-            qw.lambda().eq(GovMetric::getWs, ws);
-        }
+        // 始终按空间过滤，缺省 default，避免跨空间同 code 误命中
+        qw.lambda().eq(GovMetric::getWs, StrUtil.blankToDefault(StrUtil.trim(ws), WS_DEFAULT));
         return metricMapper.selectOne(qw.last("LIMIT 1"));
     }
 

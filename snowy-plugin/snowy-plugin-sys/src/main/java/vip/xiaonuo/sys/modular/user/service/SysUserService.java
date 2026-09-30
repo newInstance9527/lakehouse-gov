@@ -141,7 +141,7 @@ public interface SysUserService extends IService<SysUser> {
      * @author xuyuxiang
      * @date 2022/7/5 18:22
      **/
-    void resetPassword(SysUserIdParam sysUserIdParam);
+    void resetPassword(SysUserResetPasswordParam sysUserResetPasswordParam);
 
     /**
      * 获取图片验证码

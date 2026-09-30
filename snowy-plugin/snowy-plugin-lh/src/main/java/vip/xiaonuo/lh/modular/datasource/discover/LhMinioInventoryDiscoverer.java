@@ -51,7 +51,7 @@ public class LhMinioInventoryDiscoverer implements LhInventoryDiscoverer {
     @Override
     public boolean supports(String typeCode) {
         String t = StrUtil.blankToDefault(typeCode, "").toLowerCase(Locale.ROOT);
-        return "s3".equals(t) || "minio".equals(t);
+        return "s3".equals(t) || "minio".equals(t) || "s3_minio".equals(t);
     }
 
     @Override

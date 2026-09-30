@@ -453,6 +453,11 @@ public class CpQueryServiceImpl implements CpQueryService {
         int limit = param.getLimit() == null || param.getLimit() <= 0
                 ? HISTORY_DEFAULT : Math.min(param.getLimit(), 100);
         boolean mineOnly = param.getMineOnly() == null || Boolean.TRUE.equals(param.getMineOnly());
+        if (!mineOnly) {
+            vip.xiaonuo.lh.core.ws.LhDataScope.requireScopeAll();
+        } else if (vip.xiaonuo.lh.core.ws.LhDataScope.forceMineOnly()) {
+            mineOnly = true;
+        }
         UserSnap user = currentUser();
         QueryWrapper<CpQueryExec> qw = new QueryWrapper<CpQueryExec>()
                 .eq("delete_flag", "NOT_DELETE")

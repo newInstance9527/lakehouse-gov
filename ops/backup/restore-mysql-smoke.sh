@@ -25,7 +25,7 @@ gunzip -c "$DUMP" | mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"
 
 echo "== smoke SELECT =="
 mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$SMOKE_DB" \
-  -e "SELECT 1 AS ok; SHOW TABLES LIMIT 5;"
+  -e "SELECT 1 AS ok; SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() LIMIT 5;"
 
 echo "OK restore smoke. Optional cleanup:"
 echo "  mysql ... -e \"DROP DATABASE \`$SMOKE_DB\`\""

@@ -110,6 +110,9 @@ public class LhDatasourceGravitinoProjector {
                     "Gravitino 无 Trino Catalog（Trino 是查询引擎）；勿投影。";
             case "mongodb" ->
                     "Gravitino 当前无 MongoDB Catalog；门户登记仍可用。";
+            case "oracle", "sqlserver" ->
+                    "Gravitino 1.3 无 Oracle/SQL Server Catalog（尚无 jdbc-generic）；"
+                            + "可投影 SQLREST；门户登记与 JDBC 清单仍可用。";
             default ->
                     "该类型无对应 Gravitino Catalog provider，已跳过投影（非故障）。";
         };
@@ -163,7 +166,8 @@ public class LhDatasourceGravitinoProjector {
             }
             String database = resolveJdbcDatabase(ds, secret, jdbcUrl);
             // Grav MySQL：URL 通常到 host:port；PG：URL 与 jdbc-database 都须带库名
-            if ("jdbc-mysql".equals(p.provider) || "jdbc-doris".equals(p.provider)) {
+            if ("jdbc-mysql".equals(p.provider) || "jdbc-doris".equals(p.provider)
+                    || "jdbc-starrocks".equals(p.provider)) {
                 props.put("jdbc-url", stripMysqlDb(jdbcUrl));
             } else {
                 props.put("jdbc-url", ensurePgUrlHasDatabase(jdbcUrl, database));
@@ -405,7 +409,7 @@ public class LhDatasourceGravitinoProjector {
         String port = first(secret, "port", ds.getEndpointPort());
         String db = first(secret, "database", ds.getDatabaseName());
         return switch (ds.getType()) {
-            case "mysql", "doris" -> "jdbc:mysql://" + host + ":" + port + "/" + db;
+            case "mysql", "doris", "starrocks" -> "jdbc:mysql://" + host + ":" + port + "/" + db;
             case "postgresql", "pg" -> "jdbc:postgresql://" + host + ":" + port + "/" + db;
             case "clickhouse" -> "jdbc:clickhouse://" + host + ":" + port + "/" + db;
             default -> "";
@@ -501,11 +505,13 @@ public class LhDatasourceGravitinoProjector {
                     "org.postgresql.Driver"));
             case "doris" -> Optional.of(new ProviderSpec("relational", "jdbc-doris",
                     "com.mysql.cj.jdbc.Driver"));
+            case "starrocks" -> Optional.of(new ProviderSpec("relational", "jdbc-starrocks",
+                    "com.mysql.cj.jdbc.Driver"));
             case "clickhouse" -> Optional.of(new ProviderSpec("relational", "jdbc-clickhouse",
                     "com.clickhouse.jdbc.ClickHouseDriver"));
             case "hive" -> Optional.of(new ProviderSpec("relational", "hive", ""));
             case "iceberg" -> Optional.of(new ProviderSpec("relational", "lakehouse-iceberg", ""));
-            case "s3", "minio" -> Optional.of(new ProviderSpec("fileset", "hadoop", ""));
+            case "s3", "minio", "s3_minio" -> Optional.of(new ProviderSpec("fileset", "hadoop", ""));
             case "hdfs" -> Optional.of(new ProviderSpec("fileset", "hadoop", ""));
             case "kafka" -> Optional.of(new ProviderSpec("messaging", "kafka", ""));
             // Grav Messaging 仅 kafka；无 Redis / RabbitMQ / ES / Trino / Mongo Catalog

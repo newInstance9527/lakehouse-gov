@@ -8,7 +8,7 @@ import java.util.Locale;
 import java.util.Optional;
 
 /**
- * 操作权限资源类型注册表：启用 asset/datasource/etl/metric；其余 reserved 供扩展。
+ * 操作权限资源类型注册表：启用 asset/datasource/etl/metric/script/dataservice；其余 reserved 供扩展。
  */
 public enum LhOpsResourceTypeEnum {
 
@@ -16,9 +16,10 @@ public enum LhOpsResourceTypeEnum {
     DATASOURCE("datasource", "数据源", true),
     ETL("etl", "ETL任务", true),
     QUALITY("quality", "质量", false),
+    SCRIPT("script", "开发脚本", true),
     STANDARD("standard", "数据标准", false),
     METRIC("metric", "指标", true),
-    DATASERVICE("dataservice", "数据服务", false),
+    DATASERVICE("dataservice", "数据服务", true),
     EXPORT("export", "出湖作业", false);
 
     private final String value;

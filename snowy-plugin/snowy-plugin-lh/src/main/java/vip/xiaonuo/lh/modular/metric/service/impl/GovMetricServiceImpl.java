@@ -151,11 +151,16 @@ public class GovMetricServiceImpl implements GovMetricService {
     public Page<GovMetricVo> page(GovMetricPageParam param) {
         QueryWrapper<GovMetric> qw = new QueryWrapper<GovMetric>().checkSqlInjection();
         qw.lambda().eq(GovMetric::getDeleteFlag, NOT_DELETE);
-        // 空间优先：缺省 scope=workspace；all=特权巡检
-        String scope = StrUtil.blankToDefault(StrUtil.trim(param.getScope()), "workspace").toLowerCase(Locale.ROOT);
-        String ws = StrUtil.trim(param.getWs());
-        if (!"all".equals(scope)) {
-            qw.lambda().eq(GovMetric::getWs, StrUtil.blankToDefault(ws, WS_DEFAULT));
+        // 空间优先：缺省 scope=workspace；all=特权巡检（LhDataScope 硬门禁）
+        String home = vip.xiaonuo.lh.core.ws.LhDataScope.resolveListWs(param.getWs(), param.getScope());
+        if (home != null) {
+            qw.lambda().eq(GovMetric::getWs, home);
+        }
+        // 草稿默认仅创建人可见（非特权）
+        if (vip.xiaonuo.lh.core.ws.LhDataScope.forceMineOnly()) {
+            String uid = vip.xiaonuo.lh.core.auth.LhLoginUsers.requireUserId();
+            qw.lambda().and(w -> w.ne(GovMetric::getStatus, "draft")
+                    .or().eq(GovMetric::getCreateUser, uid));
         }
         if (StrUtil.isNotBlank(param.getDomain()) && !"all".equalsIgnoreCase(param.getDomain())) {
             qw.lambda().eq(GovMetric::getDomainCode, normalizeDomain(param.getDomain()));
@@ -222,7 +227,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         verMapper.insert(ver);
         head.setCurrentVerId(ver.getId());
         metricMapper.updateById(head);
-        replaceDeps(ver.getId(), collectDeps(kind, param, ver));
+        replaceDeps(ver.getId(), ws, collectDeps(kind, param, ver));
         appendHistory(head.getId(), "draft", "新建保存为草稿");
         return toVo(requireMetric(code, ws), true);
     }
@@ -233,7 +238,8 @@ public class GovMetricServiceImpl implements GovMetricService {
         if (StrUtil.isBlank(param.getMetricCode())) {
             throw new CommonException("metricCode 不能为空");
         }
-        GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
+        GovMetric head = requireMetric(param.getMetricCode(), ws);
         secAuthGrantService.assertCanEditMetric(head);
         if (!"draft".equals(head.getStatus()) && !"review".equals(head.getStatus())) {
             throw new CommonException("仅草稿/评审中可直接编辑；已启用请走变更");
@@ -260,7 +266,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         ver.setFingerprint(fingerprint(ver));
         ver.setRevision(ver.getRevision() == null ? 1 : ver.getRevision() + 1);
         verMapper.updateById(ver);
-        replaceDeps(ver.getId(), collectDeps(kind, param, ver));
+        replaceDeps(ver.getId(), head.getWs(), collectDeps(kind, param, ver));
         // 清编译缓存
         sqlMapper.delete(new QueryWrapper<GovMetricSql>().lambda().eq(GovMetricSql::getVerId, ver.getId()));
         appendHistory(head.getId(), head.getStatus(), "编辑口径");
@@ -270,7 +276,8 @@ public class GovMetricServiceImpl implements GovMetricService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public GovMetricVo transition(GovMetricTransitionParam param) {
-        GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+        String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
+        GovMetric head = requireMetric(param.getMetricCode(), ws);
         secAuthGrantService.assertCanEditMetric(head);
         String action = param.getAction().trim();
         String note = StrUtil.blankToDefault(param.getNote(), "");
@@ -339,7 +346,8 @@ public class GovMetricServiceImpl implements GovMetricService {
     public Map<String, Object> compile(GovMetricCompileParam param) {
         String dialect = StrUtil.blankToDefault(param.getDialect(), "trino");
         if (StrUtil.isNotBlank(param.getMetricCode())) {
-            GovMetric head = requireMetric(param.getMetricCode(), param.getWs());
+            GovMetric head = requireMetric(param.getMetricCode(),
+                    StrUtil.blankToDefault(param.getWs(), WS_DEFAULT));
             if (Boolean.TRUE.equals(param.getPersist())) {
                 secAuthGrantService.assertCanEditMetric(head);
             }
@@ -576,7 +584,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         if (param == null) {
             param = new GovMetricMaterializeParam();
         }
-        GovMetric head = requireMetric(metricCode, param.getWs());
+        GovMetric head = requireMetric(metricCode, StrUtil.blankToDefault(param.getWs(), WS_DEFAULT));
         secAuthGrantService.assertCanEditMetric(head);
         if (!"active".equals(head.getStatus()) && !"review".equals(head.getStatus())) {
             throw new CommonException("仅待发布/已启用指标可登记物化");
@@ -805,6 +813,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         if (asset == null) {
             throw new CommonException("绑定表须来自资产目录已登记表: {}", param.getTable());
         }
+        assertMetricQueryableLakeAsset(asset);
         if (StrUtil.isBlank(param.getGravAssetId())) {
             param.setGravAssetId(StrUtil.blankToDefault(asset.getGravAssetId(), asset.getId()));
         }
@@ -815,6 +824,45 @@ public class GovMetricServiceImpl implements GovMetricService {
                 param.setTable(normalized);
             }
         }
+    }
+
+    /**
+     * 指标试跑/查询走 Trino，禁止绑定源端 MySQL 等非湖表资产。
+     */
+    private void assertMetricQueryableLakeAsset(GovAsset asset) {
+        String engine = StrUtil.blankToDefault(asset.getEngine(), "").toLowerCase(Locale.ROOT);
+        String om = StrUtil.blankToDefault(asset.getOmFqn(), "").toLowerCase(Locale.ROOT);
+        String kind = StrUtil.blankToDefault(asset.getAssetKind(), "").toLowerCase(Locale.ROOT);
+        boolean lake = om.startsWith("iceberg.") || om.startsWith("hive.") || om.startsWith("trino.")
+                || containsAny(engine, "iceberg", "hive", "trino", "doris", "starrocks")
+                || containsAny(kind, "iceberg", "hive");
+        if (lake) {
+            return;
+        }
+        boolean sourceLike = containsAny(engine,
+                "mysql", "maria", "postgres", "oracle", "sql server", "sqlserver",
+                "mongodb", "kafka", "redis", "elastic", "clickhouse", "ftp", "s3", "minio", "http");
+        if (sourceLike || StrUtil.isNotBlank(engine)) {
+            throw new CommonException(
+                    "指标只能绑定湖上可经 Trino 查询的表（Iceberg/Hive），不能直连源端「{}」表。"
+                            + "请先入湖，并在资产目录登记湖表后再绑定。",
+                    StrUtil.blankToDefault(asset.getEngine(), asset.getAssetCode()));
+        }
+        // 无引擎且无湖 FQN：仍拒绝，避免误绑裸源表名
+        throw new CommonException(
+                "绑定表缺少湖表标识（engine/omFqn）。请选择 Iceberg/Hive 湖表资产，或先完善资产登记。");
+    }
+
+    private static boolean containsAny(String haystack, String... needles) {
+        if (StrUtil.isBlank(haystack) || needles == null) {
+            return false;
+        }
+        for (String n : needles) {
+            if (n != null && haystack.contains(n)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private GovAsset findAssetByBindTable(String table, String ws) {
@@ -903,14 +951,14 @@ public class GovMetricServiceImpl implements GovMetricService {
         return deps.stream().filter(StrUtil::isNotBlank).distinct().toList();
     }
 
-    private void replaceDeps(String verId, List<String> deps) {
+    private void replaceDeps(String verId, String ws, List<String> deps) {
         depMapper.delete(new QueryWrapper<GovMetricDep>().lambda().eq(GovMetricDep::getVerId, verId));
         for (String code : deps) {
             GovMetricDep d = new GovMetricDep();
             d.setId(IdUtil.getSnowflakeNextIdStr());
             d.setVerId(verId);
             d.setDepCode(code.trim().toUpperCase(Locale.ROOT));
-            GovMetric dep = findMetric(d.getDepCode(), null);
+            GovMetric dep = findMetric(d.getDepCode(), ws);
             if (dep != null) {
                 d.setDepVer(dep.getCurrentVer());
             }
@@ -981,6 +1029,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         vo.setName(head.getName());
         vo.setKind(head.getKind());
         vo.setType(head.getKind());
+        vo.setWs(head.getWs());
         vo.setDomainCode(head.getDomainCode());
         vo.setDomain(head.getDomainCode());
         vo.setStatus(head.getStatus());
@@ -1086,7 +1135,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         qw.lambda().eq(GovMetric::getDeleteFlag, NOT_DELETE)
                 .eq(GovMetric::getMetricCode, code.trim().toUpperCase(Locale.ROOT));
         if (StrUtil.isNotBlank(ws)) {
-            qw.lambda().eq(GovMetric::getWs, ws);
+            qw.lambda().eq(GovMetric::getWs, ws.trim());
         }
         return metricMapper.selectOne(qw.last("LIMIT 1"));
     }

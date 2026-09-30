@@ -12,8 +12,11 @@
 
 ## 切流勾选
 
-- [ ] `ops/backup/backup-core.sh` 已跑通当日 dump  
+- [x] `ops/backup/backup-core.sh` 已跑通当日 dump（2026-09-30 演练）  
 - [ ] migrate 干跑 / 正式写入 KV 成功  
 - [ ] 门户 `lh.vault.backend=hashicorp` + addr/token  
 - [ ] 数据源测连通过  
-- [ ] 回切 aes 预案（未删 MySQL 密文）
+- [ ] 回切 aes 预案（未删 MySQL 密文）  
+
+> **O+5（2026-09-30）**：试点 **不切** HashiCorp，继续 **aes**；上表 HashiCorp 项保留给正式对外前。
+

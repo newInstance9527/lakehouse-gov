@@ -519,15 +519,23 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
     }
 
     @Override
-    public void resetPassword(SysUserIdParam sysUserIdParam) {
+    public void resetPassword(SysUserResetPasswordParam sysUserResetPasswordParam) {
         // 获取用户
-        SysUser sysUser = this.queryEntity(sysUserIdParam.getId());
-        // 获取默认密码
-        String defaultPassword = SysPasswordUtil.getDefaultPassword();
+        SysUser sysUser = this.queryEntity(sysUserResetPasswordParam.getId());
+        // 管理员手动指定的新密码
+        String newPassword = StrUtil.trim(sysUserResetPasswordParam.getPassword());
+        if (ObjectUtil.isEmpty(newPassword)) {
+            throw new CommonException("新密码不能为空");
+        }
+        // 校验密码规则
+        SysPasswordUtil.validNewPassword(sysUser, newPassword);
         // 修改密码
         this.update(new LambdaUpdateWrapper<SysUser>().eq(SysUser::getId,
-                sysUserIdParam.getId()).set(SysUser::getPassword,
-                CommonCryptogramUtil.doHashValue(defaultPassword)));
+                sysUserResetPasswordParam.getId()).set(SysUser::getPassword,
+                CommonCryptogramUtil.doHashValue(newPassword)));
+        // 更新最近改密时间与历史
+        sysUserExtService.updatePasswordLastTime(sysUser.getId());
+        sysUserPasswordService.insertUserPasswordHistory(sysUser.getId(), newPassword);
         // 获取手机号
         String phone = sysUser.getPhone();
         // 手机号不为空则发送密码重置成功短信
@@ -539,7 +547,7 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
                 // 模板内容转为JSONObject
                 JSONObject contentJSONObject = JSONUtil.parseObj(smsTemplateCode);
                 // 定义变量参数
-                JSONObject paramMap = JSONUtil.createObj().set("userPhone", phone).set("userNewPassword", defaultPassword);
+                JSONObject paramMap = JSONUtil.createObj().set("userPhone", phone).set("userNewPassword", newPassword);
                 // 获取编码
                 String codeValue = contentJSONObject.getStr("code");
                 // 编码不为空
@@ -553,9 +561,9 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
                 }
             }
         }
-        // 获取手机号
+        // 获取邮箱
         String email = sysUser.getEmail();
-        // 密码不为空则发送密码重置成功邮件
+        // 邮箱不为空则发送密码重置成功邮件
         if(ObjectUtil.isNotEmpty(email)){
             // 重置密码成功邮件消息模板内容
             String emailTemplateContent = devConfigApi.getValueByKey(SNOWY_EMAIL_TEMPLATE_NOTICE_PASSWORD_RESET_SUCCESS_FOR_B_KEY);
@@ -564,7 +572,7 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
                 // 模板内容转为JSONObject
                 JSONObject contentJSONObject = JSONUtil.parseObj(emailTemplateContent);
                 // 定义变量参数
-                JSONObject paramMap = JSONUtil.createObj().set("userEmail", email).set("userNewPassword", defaultPassword);
+                JSONObject paramMap = JSONUtil.createObj().set("userEmail", email).set("userNewPassword", newPassword);
                 // 获取格式化后的主题
                 String subject = SysEmailFormatUtil.format(contentJSONObject.getStr("subject"), paramMap);;
                 // 获取格式化后的内容

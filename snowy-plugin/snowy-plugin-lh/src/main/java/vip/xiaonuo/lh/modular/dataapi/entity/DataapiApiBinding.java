@@ -50,4 +50,6 @@ public class DataapiApiBinding extends CommonEntity {
     private String lastError;
     /** 发布审批单号 API-xxx */
     private String publishTicketNo;
+    /** 自定义标签 JSON 字符串数组，如 ["核心","报表"] */
+    private String tagsJson;
 }
