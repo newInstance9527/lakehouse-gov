@@ -40,6 +40,7 @@ import vip.xiaonuo.lh.modular.etl.param.IgEtlGraphSaveParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlIdParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlNodeConfigParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlPageParam;
+import vip.xiaonuo.lh.modular.etl.param.IgEtlRunIdParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlTrialParam;
 import vip.xiaonuo.lh.modular.etl.service.IgEtlService;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlLineageSyncHelper;
@@ -257,7 +258,7 @@ public class IgEtlServiceImpl implements IgEtlService {
                 .eq(IgEtlRun::getDagId, dag.getId())
                 .in(IgEtlRun::getStatus, "running", "submitted", "pending"));
         if (running != null && running > 0) {
-            throw new CommonException("任务运行中，请等待完成或终止后再删除");
+            throw new CommonException("任务运行中，请先在「执行记录」中终止后再删除");
         }
         Map<String, Object> dsSchedule = null;
         if (StrUtil.isNotBlank(dag.getDsWorkflowCode())
@@ -1059,6 +1060,54 @@ public class IgEtlServiceImpl implements IgEtlService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> stopRun(IgEtlRunIdParam param) {
+        String runId = StrUtil.trim(param.getRunId());
+        IgEtlRun run = runMapper.selectOne(new QueryWrapper<IgEtlRun>().lambda().eq(IgEtlRun::getRunId, runId));
+        if (run == null) {
+            throw new CommonException("运行不存在: " + runId);
+        }
+        IgEtlDag dag = requireDag(run.getDagId());
+        assertCanEditDag(dag);
+
+        String st = StrUtil.blankToDefault(run.getStatus(), "");
+        if (Set.of("success", "failed", "cancelled", "blocked").contains(st)) {
+            Map<String, Object> already = runBrief(run);
+            already.put("ok", true);
+            already.put("stopped", false);
+            already.put("message", "运行已终态，无需终止");
+            return already;
+        }
+
+        Map<String, Object> dsStop = null;
+        if (StrUtil.isNotBlank(run.getDsRunId())) {
+            dsStop = dsClient.stopProcessInstance(run.getDsRunId());
+        }
+
+        run.setStatus("cancelled");
+        run.setFinishedAt(new Date());
+        String tip = "用户终止";
+        if (dsStop != null && Boolean.TRUE.equals(dsStop.get("degraded"))) {
+            tip = tip + "（DS STOP 降级: " + str(dsStop.get("message"), "degraded") + "）";
+        } else if (dsStop == null) {
+            tip = tip + "（无 DS 实例，仅门户收口）";
+        }
+        run.setMessage(StrUtil.isBlank(run.getMessage()) ? tip
+                : run.getMessage() + " · " + tip);
+        runMapper.updateById(run);
+        finishPendingRunNodes(run.getRunId(), "cancelled");
+        onRunTerminal(run, "cancelled");
+
+        Map<String, Object> out = runBrief(run);
+        out.put("ok", true);
+        out.put("stopped", true);
+        if (dsStop != null) {
+            out.put("dsStop", dsStop);
+        }
+        return out;
+    }
+
+    @Override
     public Map<String, Object> runResultPreview(String runId, String nodeKey, Integer limit) {
         return resultPreviewHelper.preview(runId, nodeKey, limit);
     }
@@ -1441,7 +1490,8 @@ public class IgEtlServiceImpl implements IgEtlService {
             return null;
         }
         String status = StrUtil.blankToDefault(run.getStatus(), "");
-        boolean terminal = "success".equals(status) || "failed".equals(status) || "blocked".equals(status);
+        boolean terminal = "success".equals(status) || "failed".equals(status)
+                || "blocked".equals(status) || "cancelled".equals(status);
         String dsId = run.getDsRunId().trim();
         if (dsId.startsWith("WF_") || !dsId.matches("\\d+")) {
             return null;
@@ -1682,7 +1732,7 @@ public class IgEtlServiceImpl implements IgEtlService {
         String s = state.trim().toUpperCase();
         return switch (s) {
             case "SUCCESS", "FINISHED", "COMPLETE", "COMPLETED" -> "success";
-            case "FAILURE", "FAIL", "FAILED", "STOP", "STOPPED", "KILL", "KILLED" -> "failed";
+            case "FAILURE", "FAIL", "FAILED", "STOP", "STOPPED", "KILL", "KILLED", "CANCEL", "CANCELLED" -> "failed";
             case "RUNNING_EXECUTION", "RUNNING", "SUBMITTED_SUCCESS", "ACCEPT", "DELAY_EXECUTION" -> "running";
             case "PAUSE", "PAUSED" -> "paused";
             default -> null;

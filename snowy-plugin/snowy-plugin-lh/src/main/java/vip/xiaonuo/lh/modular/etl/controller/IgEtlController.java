@@ -23,6 +23,7 @@ import vip.xiaonuo.lh.modular.etl.param.IgEtlGraphSaveParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlIdParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlNodeConfigParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlPageParam;
+import vip.xiaonuo.lh.modular.etl.param.IgEtlRunIdParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlTrialParam;
 import vip.xiaonuo.lh.modular.etl.service.IgEtlService;
 
@@ -134,6 +135,13 @@ public class IgEtlController {
     @GetMapping("/lh/etl/dags/runs/detail")
     public CommonResult<Map<String, Object>> runDetail(@RequestParam String runId) {
         return CommonResult.data(igEtlService.runDetail(runId));
+    }
+
+    @Operation(summary = "终止运行（DS STOP + 门户 cancelled）")
+    @CommonLog("ETL终止运行")
+    @PostMapping("/lh/etl/dags/runs/stop")
+    public CommonResult<Map<String, Object>> stopRun(@RequestBody @Valid IgEtlRunIdParam param) {
+        return CommonResult.data(igEtlService.stopRun(param));
     }
 
     @Operation(summary = "单节点执行日志（拉 DS task instance log，可续拉）")

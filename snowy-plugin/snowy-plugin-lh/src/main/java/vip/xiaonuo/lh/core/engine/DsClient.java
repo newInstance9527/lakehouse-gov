@@ -1153,6 +1153,60 @@ public class DsClient {
     }
 
     /**
+     * 终止流程实例（DS 3.2 {@code executors/execute} · executeType=STOP；soft-fail）。
+     */
+    public Map<String, Object> stopProcessInstance(String processInstanceId) {
+        String id = StrUtil.blankToDefault(processInstanceId, "");
+        String projectCode = StrUtil.blankToDefault(lhProperties.getDs().getProjectCode(), "1");
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("engine", "dolphinscheduler");
+        out.put("processInstanceId", id);
+        out.put("projectCode", projectCode);
+        out.put("executeType", "STOP");
+        if (StrUtil.isBlank(id)) {
+            out.put("ok", false);
+            out.put("degraded", true);
+            out.put("message", "无 processInstanceId");
+            return out;
+        }
+        String base = trim(lhProperties.getDs().getUrl());
+        if (StrUtil.isBlank(base)) {
+            out.put("ok", false);
+            out.put("degraded", true);
+            out.put("message", "lh.ds.url 未配置");
+            return out;
+        }
+        try {
+            Map<String, Object> form = new LinkedHashMap<>();
+            form.put("processInstanceId", id);
+            form.put("executeType", "STOP");
+            String url = base + "/projects/" + projectCode + "/executors/execute";
+            String body = executeWithAuth(() -> HttpRequest.post(url)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .form(form)
+                    .timeout(15000));
+            out.put("resp", truncate(body, 1000));
+            JSONObject jo = JSONUtil.parseObj(body);
+            int code = jo.getInt("code", -1);
+            if (code != 0) {
+                out.put("ok", false);
+                out.put("degraded", true);
+                out.put("message", jo.getStr("msg", "DS STOP 返回非 0 code"));
+                return out;
+            }
+            out.put("ok", true);
+            out.put("degraded", false);
+            return out;
+        } catch (Exception e) {
+            log.warn("DS stopProcessInstance soft-fail id={}: {}", id, e.getMessage());
+            out.put("ok", false);
+            out.put("degraded", true);
+            out.put("message", e.getMessage());
+            return out;
+        }
+    }
+
+    /**
      * 查询流程实例下任务实例列表（soft-fail），用于按节点回写 run_node。
      */
     public Map<String, Object> listTaskInstances(String processInstanceId) {

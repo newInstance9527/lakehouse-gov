@@ -10,6 +10,7 @@ import vip.xiaonuo.lh.modular.etl.param.IgEtlGraphSaveParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlIdParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlNodeConfigParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlPageParam;
+import vip.xiaonuo.lh.modular.etl.param.IgEtlRunIdParam;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlTrialParam;
 
 import java.util.List;
@@ -52,6 +53,9 @@ public interface IgEtlService {
     Page<Map<String, Object>> pageRuns(String dagId, String ws);
 
     Map<String, Object> runDetail(String runId);
+
+    /** 终止运行中实例（调 DS STOP + 门户态 cancelled；无 dsRunId 时仅本地收口） */
+    Map<String, Object> stopRun(IgEtlRunIdParam param);
 
     /**
      * 单节点执行日志（对齐 DS 任务实例日志；可分页/续拉）。

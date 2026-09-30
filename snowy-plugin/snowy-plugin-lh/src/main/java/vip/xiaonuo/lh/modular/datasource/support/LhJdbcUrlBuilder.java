@@ -24,13 +24,17 @@ public final class LhJdbcUrlBuilder {
      */
     public static String build(String type, String host, String port, String database,
                                String extra, Map<String, Object> conn) {
+        String t = StrUtil.blankToDefault(type, "").toLowerCase(Locale.ROOT);
         if (conn != null) {
             Object jdbc = conn.get("jdbcUrl");
             if (jdbc != null && StrUtil.isNotBlank(String.valueOf(jdbc))) {
-                return String.valueOf(jdbc).trim();
+                String existing = String.valueOf(jdbc).trim();
+                // 旧版曾写入 jdbc:es://http://…，SQLREST ProductType 只认 jdbc:esdriver://
+                if (isTrustedJdbcUrl(t, existing)) {
+                    return existing;
+                }
             }
         }
-        String t = StrUtil.blankToDefault(type, "").toLowerCase(Locale.ROOT);
         String h = StrUtil.blankToDefault(host, "").trim();
         String p = StrUtil.blankToDefault(port, "").trim();
         String db = StrUtil.blankToDefault(database, "").trim();
@@ -59,7 +63,7 @@ public final class LhJdbcUrlBuilder {
             case "mongodb" -> "jdbc:mongodb://" + h + ":"
                     + StrUtil.blankToDefault(p, "27017") + "/"
                     + StrUtil.blankToDefault(db, "admin");
-            case "elasticsearch", "es" -> buildElasticsearch(h, p, conn);
+            case "elasticsearch", "es" -> buildElasticsearch(h, p);
             case "http_api", "tableau", "superset", "airflow" -> buildHttpRestful(conn, h, p);
             default -> "";
         };
@@ -86,9 +90,11 @@ public final class LhJdbcUrlBuilder {
     }
 
     /**
-     * SQLREST EsDriver / Elastic SQL JDBC：{@code jdbc:es://http(s)://host:port}
+     * SQLREST {@code com.gitee.esdriver.driver.EsDriver}：
+     * {@code jdbc:esdriver://host:port}（见 ProductTypeEnum.ELASTICSEARCH）。
+     * 认证走 SQLREST body 的 username/password，不写进 URL。
      */
-    private static String buildElasticsearch(String host, String port, Map<String, Object> conn) {
+    private static String buildElasticsearch(String host, String port) {
         if (StrUtil.isBlank(host)) {
             return "";
         }
@@ -106,16 +112,18 @@ public final class LhJdbcUrlBuilder {
                 }
             }
         }
-        String scheme = useHttps(conn) ? "https" : "http";
-        StringBuilder url = new StringBuilder("jdbc:es://")
-                .append(scheme).append("://").append(h).append(":").append(p);
-        String apiKey = firstNonBlank(
-                conn != null ? conn.get("apiKey") : null,
-                conn != null ? conn.get("api_key") : null);
-        if (StrUtil.isNotBlank(apiKey)) {
-            url.append("/?apiKey=").append(apiKey);
+        return "jdbc:esdriver://" + h + ":" + p;
+    }
+
+    /** Vault 里已有 jdbcUrl 是否可直接交给 SQLREST（避免旧错误前缀卡住重试）。 */
+    private static boolean isTrustedJdbcUrl(String type, String jdbcUrl) {
+        if (StrUtil.isBlank(jdbcUrl)) {
+            return false;
         }
-        return url.toString();
+        if ("elasticsearch".equals(type) || "es".equals(type)) {
+            return jdbcUrl.regionMatches(true, 0, "jdbc:esdriver://", 0, "jdbc:esdriver://".length());
+        }
+        return true;
     }
 
     /**

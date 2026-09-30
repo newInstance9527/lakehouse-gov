@@ -86,17 +86,16 @@ public class LhDatasourceSqlrestProjector {
 
         Map<String, Object> secret = vaultClient.readOrEmpty(ds.getVaultPath());
         String jdbcUrl = str(secret.get("jdbcUrl"));
-        if (StrUtil.isBlank(jdbcUrl)) {
-            // ES/Hive/Mongo/HTTP 等登记时曾未写入 jdbcUrl：用 host/port 或 baseURL 回拼并回写 Vault
-            jdbcUrl = LhJdbcUrlBuilder.buildFromSecret(
-                    type, secret, ds.getEndpointHost(), ds.getEndpointPort(), ds.getDatabaseName());
-            if (StrUtil.isNotBlank(jdbcUrl)) {
-                secret.put("jdbcUrl", jdbcUrl);
-                try {
-                    vaultClient.write(ds.getVaultPath(), secret);
-                } catch (Exception ignored) {
-                    // 投影仍可继续，回写失败不阻断
-                }
+        // 缺 jdbcUrl，或 ES 旧错误格式（jdbc:es://…）：按 host/port 重拼并回写 Vault
+        String rebuilt = LhJdbcUrlBuilder.buildFromSecret(
+                type, secret, ds.getEndpointHost(), ds.getEndpointPort(), ds.getDatabaseName());
+        if (StrUtil.isNotBlank(rebuilt) && !rebuilt.equals(jdbcUrl)) {
+            jdbcUrl = rebuilt;
+            secret.put("jdbcUrl", jdbcUrl);
+            try {
+                vaultClient.write(ds.getVaultPath(), secret);
+            } catch (Exception ignored) {
+                // 投影仍可继续，回写失败不阻断
             }
         }
         if (StrUtil.isBlank(jdbcUrl)) {
