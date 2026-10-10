@@ -6,9 +6,9 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Component;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricMaterialize;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMaterializeMapper;
-import vip.xiaonuo.lh.modular.metric.support.MetricMaterializeRewrite;
 import vip.xiaonuo.lh.modular.metric.support.MetricPartitionReconGate;
 import vip.xiaonuo.lh.modular.recon.entity.ReconPartition;
 import vip.xiaonuo.lh.modular.recon.mapper.ReconPartitionMapper;
@@ -35,6 +35,10 @@ public class ReconPartitionService {
     private ReconPartitionMapper reconPartitionMapper;
     @Resource
     private GovMetricMaterializeMapper materializeMapper;
+    @Resource
+    private ReconEngineCounter reconEngineCounter;
+    @Resource
+    private LhProperties lhProperties;
 
     public Map<String, Object> listRecent(String metricCode, String status, int limit) {
         int n = Math.max(1, Math.min(limit <= 0 ? 50 : limit, 200));
@@ -122,7 +126,9 @@ public class ReconPartitionService {
     }
 
     /**
-     * 对指定指标物化登记跑一轮「登记式」对账（无引擎时用入参行数；缺省视为一致以保持种子可用）。
+     * 对指定指标物化登记跑一轮对账。
+     * 无显式行数时经 Trino/CK 实查 COUNT（{@code lh.metric.recon-live-count}）；
+     * 引擎失败记 -1 → skipped，禁止伪造 1/1。
      */
     public Map<String, Object> runForMetric(String metricCode, Map<String, Object> param) {
         String code = upper(metricCode);
@@ -144,10 +150,34 @@ public class ReconPartitionService {
                 body.put("lakeTable", "iceberg." + mat.getTargetTable());
             }
         }
-        if (body.get("lakeRows") == null && body.get("ckRows") == null && body.get("lakeMetric") == null) {
-            // 无外部度量时默认对齐（联调）；显式传差异则 fail
-            body.put("lakeRows", 1L);
-            body.put("ckRows", 1L);
+        if (StrUtil.isBlank(str(body.get("partitionKey"))) && StrUtil.isBlank(str(body.get("partitionDt")))) {
+            body.put("partitionKey", "dt=" + today());
+        }
+        boolean needLive = body.get("lakeRows") == null && body.get("ckRows") == null
+                && body.get("lakeMetric") == null && body.get("ckMetric") == null;
+        boolean liveEnabled = lhProperties.getMetric() == null || lhProperties.getMetric().isReconLiveCount();
+        if (needLive && liveEnabled) {
+            String ckTable = str(body.get("ckTable"));
+            String ckDb = str(body.get("ckDatabase"));
+            if (StrUtil.isBlank(ckDb) && StrUtil.isNotBlank(ckTable) && ckTable.contains(".")) {
+                int dot = ckTable.lastIndexOf('.');
+                ckDb = ckTable.substring(0, dot);
+                ckTable = ckTable.substring(dot + 1);
+                body.put("ckDatabase", ckDb);
+                body.put("ckTable", ckTable);
+            }
+            String partitionKey = StrUtil.blankToDefault(str(body.get("partitionKey")),
+                    "dt=" + StrUtil.blankToDefault(str(body.get("partitionDt")), today()));
+            Map<String, Object> counts = reconEngineCounter.countPartition(
+                    str(body.get("lakeTable")), ckDb, ckTable, partitionKey);
+            body.put("lakeRows", counts.get("lakeRows"));
+            body.put("ckRows", counts.get("ckRows"));
+            body.put("engineCount", counts);
+        } else if (needLive) {
+            // 关闭实查：显式 skipped，不再伪造对齐
+            body.put("lakeRows", -1L);
+            body.put("ckRows", -1L);
+            body.put("engineCount", Map.of("skipped", true, "reason", "recon-live-count=false"));
         }
         return record(body);
     }

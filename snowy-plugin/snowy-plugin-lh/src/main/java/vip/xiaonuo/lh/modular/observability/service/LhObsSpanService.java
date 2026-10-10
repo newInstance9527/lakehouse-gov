@@ -23,4 +23,11 @@ public interface LhObsSpanService {
     /** ETL/质量失败同源写 span（soft-fail 调用方） */
     void recordComponentSpan(String ws, String linkId, String service, String op, String status,
                              String runId, String eventId, String error, String attrsJson);
+
+    /**
+     * 带 {@code traceId} 写 span（合规链路 K：trace_id=工单号）。
+     * {@code traceId} 为空时回退为自动生成。
+     */
+    void recordComponentSpan(String ws, String linkId, String service, String op, String status,
+                             String runId, String eventId, String error, String attrsJson, String traceId);
 }

@@ -26,6 +26,10 @@ public class ReconGoldenEvent {
     private String status;
     private String note;
     private String traceId;
+    /** DS workflow / processInstance 引用 */
+    private String jobRef;
+    /** DS processInstanceId */
+    private String dsInstanceId;
     private Date createTime;
     private String createUser;
 }

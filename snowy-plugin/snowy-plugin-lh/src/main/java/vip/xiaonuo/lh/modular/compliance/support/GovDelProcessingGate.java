@@ -6,12 +6,15 @@ import jakarta.annotation.Resource;
 import org.springframework.stereotype.Component;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelRequest;
+import vip.xiaonuo.lh.modular.compliance.entity.GovDelSuppression;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelTarget;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelRequestMapper;
+import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSuppressionMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelTargetMapper;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -21,9 +24,8 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * E7 处理门禁：ETL 补数命中已删分区须二次确认；出湖命中 restricted 直接拒绝。
- * <p>
- * 不引入抑制名单表（P1）；仅读 {@code gov_del_target} / {@code gov_del_request}。
+ * 处理门禁：ETL 补数命中已删分区须二次确认；出湖命中 restricted 直接拒绝；
+ * 抑制名单命中时回填过滤载荷供作业套用。
  */
 @Component
 public class GovDelProcessingGate {
@@ -34,6 +36,8 @@ public class GovDelProcessingGate {
     private GovDelTargetMapper targetMapper;
     @Resource
     private GovDelRequestMapper requestMapper;
+    @Resource
+    private GovDelSuppressionMapper suppressionMapper;
 
     /**
      * 查已执行删除（status=done）且 scope 对齐 mark_key=mark_value 的命中项。
@@ -146,12 +150,57 @@ public class GovDelProcessingGate {
         return toHitMaps(matched);
     }
 
+    /**
+     * 活跃抑制名单命中（表 FQN 或主体级 {@code *}）。
+     * 供 ETL / CDC 启动时加载过滤；不阻断作业，只返回载荷。
+     */
+    public List<Map<String, Object>> findSuppressionHits(Collection<String> tableFqns) {
+        Date now = new Date();
+        List<GovDelSuppression> active = suppressionMapper.selectList(new QueryWrapper<GovDelSuppression>().lambda()
+                .eq(GovDelSuppression::getDeleteFlag, NOT_DELETE)
+                .eq(GovDelSuppression::getStatus, "active")
+                .le(GovDelSuppression::getEffectiveAt, now)
+                .and(w -> w.isNull(GovDelSuppression::getExpiresAt)
+                        .or().gt(GovDelSuppression::getExpiresAt, now)));
+        if (active.isEmpty()) {
+            return List.of();
+        }
+        boolean filterByTable = tableFqns != null && !tableFqns.isEmpty();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (GovDelSuppression s : active) {
+            String fqn = StrUtil.blankToDefault(s.getObjectFqn(), "*").trim();
+            boolean subjectLevel = "*".equals(fqn) || fqn.isEmpty();
+            if (filterByTable && !subjectLevel && !anyTableMatch(tableFqns, fqn)) {
+                continue;
+            }
+            if (filterByTable && subjectLevel) {
+                // 主体级：作业侧按 subject_id_hash 全量过滤；仍回传
+            }
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", s.getId());
+            m.put("ws", s.getWs());
+            m.put("subjectType", s.getSubjectType());
+            m.put("subjectIdHash", s.getSubjectIdHash());
+            m.put("objectFqn", fqn);
+            m.put("reqId", s.getReqId());
+            m.put("effectiveAt", s.getEffectiveAt());
+            m.put("expiresAt", s.getExpiresAt());
+            m.put("source", s.getSource());
+            m.put("subjectLevel", subjectLevel);
+            out.add(m);
+        }
+        return out;
+    }
+
     public Map<String, Object> backfillCheck(
             Collection<String> tableFqns, String markKey, String markValue) {
         List<Map<String, Object>> hits = findDeletedPartitionHits(tableFqns, markKey, markValue);
+        List<Map<String, Object>> suppressions = findSuppressionHits(tableFqns);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("blocked", !hits.isEmpty());
         out.put("hits", hits);
+        out.put("suppressions", suppressions);
+        out.put("suppressionCount", suppressions.size());
         out.put("markKey", markKey);
         out.put("markValue", markValue);
         out.put("suggestConfirmReqNos", hits.stream()
@@ -261,7 +310,6 @@ public class GovDelProcessingGate {
         if (compact.equalsIgnoreCase(scopeWantedCompact)) {
             return true;
         }
-        // 精确 key=value（忽略大小写 key）
         String exact = compactScope(markKey + "=" + markValue);
         return compact.equalsIgnoreCase(exact);
     }

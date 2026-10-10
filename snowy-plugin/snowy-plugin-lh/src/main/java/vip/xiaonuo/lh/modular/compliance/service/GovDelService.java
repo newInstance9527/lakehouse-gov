@@ -6,6 +6,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelDekRegisterParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelExportReceiptParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelIntakeParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
@@ -14,6 +15,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRestrictParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRevealParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelSubjectMapUpsertParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelSuppressionUpsertParam;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelRequestVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
 
@@ -95,6 +97,27 @@ public interface GovDelService {
 
     /** E7：出湖预检——源表是否命中 restricted。 */
     Map<String, Object> exportGateCheck(GovDelExportGateParam param);
+
+    /**
+     * SLA 黄/红扫描：剩余 ≤1/3 → 夜莺 P1；超期 → P0。
+     * 同级 24h 内已推过则跳过。{@code ws} 空则扫全部工作空间开放单。
+     */
+    Map<String, Object> scanSlaAlerts(String ws);
+
+    /**
+     * 抑制名单列表（ETL / CDC 拉取过滤；仅 hash，无主体明文）。
+     * {@code activeOnly=true} 时仅返回未过期 active。
+     */
+    List<Map<String, Object>> listSuppressions(String ws, String subjectIdHash, String objectFqn, Boolean activeOnly);
+
+    /** 抑制名单登记 / 更新（manual 或由执行自动写入）。 */
+    Map<String, Object> upsertSuppression(GovDelSuppressionUpsertParam param);
+
+    /**
+     * 出湖副本回执：{@code received} / {@code residual_statement} / {@code timeout_statement}；
+     * 将 {@code pending_receipt} → {@code done}，并写证据。
+     */
+    GovDelRequestVo registerExportReceipt(GovDelExportReceiptParam param);
 
     /**
      * J3：外部 DSR webhook 送单。须校验 {@code X-Lh-Intake-Signature}；

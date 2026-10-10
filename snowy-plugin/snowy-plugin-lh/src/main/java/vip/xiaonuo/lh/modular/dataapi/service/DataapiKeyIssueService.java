@@ -119,8 +119,14 @@ public class DataapiKeyIssueService {
         out.put("method", binding.getMethod());
         out.put("vaultPath", vaultPath);
         out.put("expireAt", meta.getExpireAt());
-        out.put("curl", "curl -H \"X-App-Key: " + appKey + "\" -H \"Authorization: Bearer " + secret
-                + "\" \"{gateway}" + binding.getPublicPath() + "\"");
+        String path = StrUtil.blankToDefault(binding.getPublicPath(), "/api");
+        out.put("curl", "curl -X POST \"{portal}/lh/dataapi/runtime/invoke\" "
+                + "-H \"Content-Type: application/json\" "
+                + "-H \"X-App-Key: " + appKey + "\" "
+                + "-H \"Authorization: Bearer " + secret + "\" "
+                + "-d \"{\\\"bindingId\\\":\\\"" + binding.getId() + "\\\",\\\"path\\\":\\\"" + path + "\\\"}\"");
+        out.put("curlGateway", "curl -H \"X-App-Key: " + appKey + "\" -H \"Authorization: Bearer " + secret
+                + "\" \"{gateway}" + path + "\"  # 直连 Gateway 旁路门户行级注入，仅受信网络");
         return out;
     }
 

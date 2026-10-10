@@ -54,6 +54,7 @@ import vip.xiaonuo.lh.modular.contract.service.ContractService;
 import vip.xiaonuo.lh.modular.etl.support.IgEtlVaultInjector;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
+import vip.xiaonuo.lh.modular.datasource.support.ConsumerBindingSyncGate;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import java.util.ArrayList;
@@ -61,6 +62,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -126,6 +128,8 @@ public class IgEtlServiceImpl implements IgEtlService {
     private LhProperties lhProperties;
     @Resource
     private ContractService contractService;
+    @Resource
+    private ConsumerBindingSyncGate consumerBindingSyncGate;
 
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
@@ -789,6 +793,7 @@ public class IgEtlServiceImpl implements IgEtlService {
         List<String> tableFqns = collectDagTableFqns(dag.getId());
         List<Map<String, Object>> delHits = govDelProcessingGate.assertBackfillAllowed(
                 tableFqns, markKey, markValue, param.getConfirmReqNo());
+        List<Map<String, Object>> suppressions = govDelProcessingGate.findSuppressionHits(tableFqns);
 
         String runId = "bf-" + IdUtil.getSnowflakeNextIdStr();
         Date now = new Date();
@@ -811,6 +816,11 @@ public class IgEtlServiceImpl implements IgEtlService {
         startParams.put("dag_code", dag.getDagCode());
         if (!delHits.isEmpty()) {
             startParams.put("compliance_ack_req_no", StrUtil.trim(param.getConfirmReqNo()));
+        }
+        if (!suppressions.isEmpty()) {
+            // 作业侧按 subject_id_hash × object_fqn 过滤，防已删主体复活
+            startParams.put("compliance_suppressions", suppressions);
+            startParams.put("compliance_suppression_count", suppressions.size());
         }
         Map<String, Object> dsResp = dsClient.startProcessInstance(dag.getDsWorkflowCode(), startParams);
         String instanceId = str(dsResp.get("processInstanceId"), null);
@@ -925,6 +935,11 @@ public class IgEtlServiceImpl implements IgEtlService {
             if (Boolean.TRUE.equals(qualityFxEarly.get("blocked"))) {
                 throw new CommonException("质量门禁未通过，已阻止发布（lh.etl.hard-fail-quality-on-deploy=true）");
             }
+        }
+
+        // 数据源投影同步门禁：rotate/改密后 sync_state=stale 不得发布
+        if (lhProperties.getEtl() == null || lhProperties.getEtl().isHardFailStaleBindingOnDeploy()) {
+            consumerBindingSyncGate.assertSyncedForDsIds(collectNodeDsIds(nodes));
         }
 
         List<Map<String, Object>> plan = new ArrayList<>();
@@ -1786,6 +1801,32 @@ public class IgEtlServiceImpl implements IgEtlService {
             }
         }
         return obj.toString();
+    }
+
+    /** 从图节点 conf 收集门户数据源 id（source/sink 等）。 */
+    private Set<String> collectNodeDsIds(List<IgEtlNode> nodes) {
+        Set<String> ids = new LinkedHashSet<>();
+        if (nodes == null) {
+            return ids;
+        }
+        for (IgEtlNode n : nodes) {
+            if (StrUtil.isBlank(n.getConfJson())) {
+                continue;
+            }
+            try {
+                JSONObject conf = JSONUtil.parseObj(n.getConfJson());
+                String dsId = conf.getStr("dsId");
+                if (StrUtil.isBlank(dsId)) {
+                    dsId = conf.getStr("datasourceId");
+                }
+                if (StrUtil.isNotBlank(dsId)) {
+                    ids.add(dsId.trim());
+                }
+            } catch (Exception ignored) {
+                // conf 非 JSON 时跳过，validate 阶段另报
+            }
+        }
+        return ids;
     }
 
     private List<Map<String, Object>> validateNodeConf(IgEtlNode n) {

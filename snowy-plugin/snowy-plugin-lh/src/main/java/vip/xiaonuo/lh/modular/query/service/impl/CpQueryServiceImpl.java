@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.auth.core.util.StpLoginUserUtil;
 import vip.xiaonuo.common.exception.CommonException;
+import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.modular.query.entity.CpQueryDataset;
@@ -82,6 +83,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private SecAuthGrantService secAuthGrantService;
     @Resource
     private CpQueryDatasetObjectStore datasetObjectStore;
+    @Resource
+    private LhProperties lhProperties;
 
     @Override
     public Map<String, Object> exec(CpQueryExecParam param) {
@@ -215,6 +218,22 @@ public class CpQueryServiceImpl implements CpQueryService {
         CpQueryRowFilterInjector.InjectResult rowFilter =
                 rowFilterInjector.inject(sql, subjectForPolicy);
         String sqlOriginal = sql;
+        if (rowFilter.policyFailed
+                && (lhProperties.getQuery() == null || !lhProperties.getQuery().isAllowRowFilterDegraded())) {
+            row.setStatus("blocked");
+            row.setStatusLabel("⚠ 行级策略未生效");
+            row.setErrorMsg(StrUtil.maxLength(rowFilter.message, 1000));
+            row.setUpdateTime(new Date());
+            execMapper.updateById(row);
+            Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(
+                    StrUtil.blankToDefault(rowFilter.message, "row_filter 策略未能注入 SQL"));
+            blocked.put("queryId", queryId);
+            blocked.put("id", row.getId());
+            blocked.put("errorCode", "ROW_FILTER_POLICY_FAILED");
+            blocked.put("rowFilterDegraded", true);
+            blocked.put("rowFilterPolicyFailed", true);
+            return blocked;
+        }
         if (rowFilter.applied && StrUtil.isNotBlank(rowFilter.sql) && !rowFilter.sql.equals(sql)) {
             sql = rowFilter.sql;
             row.setSqlText(sql);
@@ -317,6 +336,28 @@ public class CpQueryServiceImpl implements CpQueryService {
                 StrUtil.blankToDefault(user.id, principal.trinoUser),
                 CpQueryColumnMaskResolver.engineMaskColsFromExec(exec));
         List<String> maskCols = mask.maskCols;
+        boolean allowMaskDegraded = lhProperties.getQuery() == null
+                || lhProperties.getQuery().isAllowMaskDegraded();
+        if (mask.maskDegraded && !allowMaskDegraded && columns != null && !columns.isEmpty()) {
+            row.setStatus("blocked");
+            row.setStatusLabel("⚠ 列脱敏策略缺失");
+            row.setErrorMsg(StrUtil.maxLength(mask.maskMessage, 1000));
+            row.setUpdateTime(new Date());
+            execMapper.updateById(row);
+            Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(
+                    StrUtil.blankToDefault(mask.maskMessage, "无列级 mask 策略"));
+            blocked.put("queryId", queryId);
+            blocked.put("id", row.getId());
+            blocked.put("errorCode", "MASK_DEGRADED");
+            blocked.put("maskDegraded", true);
+            blocked.put("rows", List.of());
+            blocked.put("rowCount", 0);
+            return blocked;
+        }
+        boolean redact = lhProperties.getQuery() == null || lhProperties.getQuery().isRedactMaskedCells();
+        if (redact && maskCols != null && !maskCols.isEmpty() && rows != null) {
+            rows = redactMaskedCells(rows, maskCols);
+        }
 
         String trinoQid = str(exec.get("trinoQueryId"));
         Long scanBytes = asLong(exec.get("scanBytes"));
@@ -391,6 +432,7 @@ public class CpQueryServiceImpl implements CpQueryService {
         out.put("rowFilterApplied", rowFilter.applied);
         out.put("rowFilterSource", rowFilter.source);
         out.put("rowFilterDegraded", rowFilter.degraded);
+        out.put("rowFilterPolicyFailed", rowFilter.policyFailed);
         out.put("rowFilterPredicates", rowFilter.predicates);
         if (StrUtil.isNotBlank(rowFilter.message)) {
             out.put("rowFilterMessage", rowFilter.message);
@@ -1107,6 +1149,33 @@ public class CpQueryServiceImpl implements CpQueryService {
     private static String summarize(String sql) {
         String one = sql.replaceAll("\\s+", " ").trim();
         return one.length() > 80 ? one.substring(0, 80) + "…" : one;
+    }
+
+    /** 服务端脱敏：mask 列单元格替换为 ***（保留 null）。 */
+    public static List<Map<String, Object>> redactMaskedCells(
+            List<Map<String, Object>> rows, List<String> maskCols) {
+        if (rows == null || rows.isEmpty() || maskCols == null || maskCols.isEmpty()) {
+            return rows;
+        }
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            if (row == null) {
+                out.add(null);
+                continue;
+            }
+            Map<String, Object> copy = new LinkedHashMap<>(row);
+            for (String col : maskCols) {
+                if (col == null || !copy.containsKey(col)) {
+                    continue;
+                }
+                Object v = copy.get(col);
+                if (v != null) {
+                    copy.put(col, "***");
+                }
+            }
+            out.add(copy);
+        }
+        return out;
     }
 
     private static List<Map<String, Object>> columnMeta(List<String> columns, List<String> maskCols) {

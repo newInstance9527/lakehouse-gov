@@ -1,5 +1,6 @@
 package vip.xiaonuo.lh.modular.recon.controller;
 
+import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -9,10 +10,14 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
+import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.pojo.CommonResult;
+import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.modular.recon.support.GovReconCallbackAuth;
 import vip.xiaonuo.lh.modular.recon.support.ReconRuleService;
 
 import java.util.Map;
@@ -28,6 +33,8 @@ public class LhReconController {
 
     @Resource
     private ReconRuleService reconRuleService;
+    @Resource
+    private LhProperties lhProperties;
 
     @Operation(summary = "对账规则列表（空列表合法）")
     @GetMapping({
@@ -138,6 +145,40 @@ public class LhReconController {
         String note = str(param.get("note"));
         String ws = str(param.get("ws"));
         return CommonResult.data(reconRuleService.goldenAction(lakeTable, "rewrite_ck", note, ws));
+    }
+
+    @Operation(summary = "DS/Worker 推送 rewrite_ck 完成回调")
+    @CommonLog("对账黄金回调")
+    @PostMapping({
+            "/lh/recon/golden/callback",
+            "/lh/governance/reconcile/golden/callback",
+            "/api/governance/reconcile/golden/callback"
+    })
+    public CommonResult<Map<String, Object>> goldenCallback(
+            @RequestBody Map<String, Object> body,
+            @RequestHeader(value = GovReconCallbackAuth.HEADER, required = false) String callbackToken) {
+        assertCallbackAllowed(callbackToken);
+        return CommonResult.data(reconRuleService.applyGoldenCallback(body));
+    }
+
+    /** 放行：共享 token 匹配，或已登录门户用户（联调兜底）。 */
+    private void assertCallbackAllowed(String presentedToken) {
+        String configured = lhProperties.getRecon() != null
+                ? lhProperties.getRecon().getCallbackToken() : null;
+        if (GovReconCallbackAuth.tokenMatches(configured, presentedToken)) {
+            return;
+        }
+        try {
+            if (StpUtil.isLogin()) {
+                return;
+            }
+        } catch (Exception ignored) {
+            /* not login */
+        }
+        if (StrUtil.isBlank(configured)) {
+            throw new CommonException("对账回调未配置 token，且当前未登录");
+        }
+        throw new CommonException("对账回调鉴权失败（检查 " + GovReconCallbackAuth.HEADER + "）");
     }
 
     private Map<String, Object> invokeGolden(String action, Map<String, Object> body) {

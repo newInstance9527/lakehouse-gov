@@ -63,7 +63,8 @@ mvn -pl snowy-web-app -am package -DskipTests
 
 ## 数据库迁移
 
-Flyway 脚本：`snowy-plugin/snowy-plugin-lh/src/main/resources/db/migration/`。
+Flyway 脚本**唯一目录**：`snowy-web-app/src/main/resources/db/migration/`。  
+勿在 `snowy-plugin-lh/.../db/migration/` 放 `V*__*.sql`（与主包同 classpath 路径会撞版本号）。见 `doc/命名与工程约束.md` §6.0。
 
 新增迁移前请先跑版本占用检查（多 Agent 并行时必须）：
 

@@ -10,8 +10,10 @@ import jakarta.annotation.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.engine.FlinkIcebergSinkSqlCompiler;
+import vip.xiaonuo.lh.core.engine.GravitinoAvailability;
 import vip.xiaonuo.lh.core.engine.GravitinoClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
@@ -45,6 +47,8 @@ public class IgEtlSinkTargetChecker {
 
     @Resource
     private GravitinoClient gravitinoClient;
+    @Resource
+    private GravitinoAvailability gravitinoAvailability;
     @Resource
     private LhProperties lhProperties;
     @Resource
@@ -211,6 +215,7 @@ public class IgEtlSinkTargetChecker {
             return r;
         }
         try {
+            gravitinoAvailability.requireUpForRegister("Iceberg 建表");
             List<Map<String, Object>> columns = columnsFromConf(conf);
             if (columns.isEmpty()) {
                 columns = List.of(
@@ -226,6 +231,8 @@ public class IgEtlSinkTargetChecker {
                 upsertGravRef(ref);
                 r.put("registered", true);
             }
+        } catch (CommonException e) {
+            throw e;
         } catch (Exception e) {
             log.warn("Grav createTable soft-fail {}: {}", ref.fqn(), e.getMessage());
             r.put("ok", false);

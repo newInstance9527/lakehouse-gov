@@ -100,7 +100,7 @@ public class CpQueryRowFilterInjector {
         }
 
         if (applied.isEmpty()) {
-            return InjectResult.degraded(original, true,
+            return InjectResult.policyFailed(original,
                     "已有 row_filter 策略但未能改写 SQL 表引用（复杂语法残留）");
         }
         return InjectResult.applied(original, rewritten, applied, SOURCE_GRANT,
@@ -392,33 +392,41 @@ public class CpQueryRowFilterInjector {
         public final String sql;
         public final boolean applied;
         public final boolean degraded;
+        /** 有策略但未能强制注入（应硬失败） */
+        public final boolean policyFailed;
         public final String source;
         public final String message;
         public final List<Map<String, Object>> predicates;
 
         private InjectResult(String originalSql, String sql, boolean applied, boolean degraded,
-                             String source, String message, List<Map<String, Object>> predicates) {
+                             boolean policyFailed, String source, String message,
+                             List<Map<String, Object>> predicates) {
             this.originalSql = originalSql;
             this.sql = sql;
             this.applied = applied;
             this.degraded = degraded;
+            this.policyFailed = policyFailed;
             this.source = source;
             this.message = message;
             this.predicates = predicates == null ? List.of() : List.copyOf(predicates);
         }
 
         public static InjectResult skipped(String sql, String message) {
-            return new InjectResult(sql, sql, false, false, SOURCE_NONE, message, List.of());
+            return new InjectResult(sql, sql, false, false, false, SOURCE_NONE, message, List.of());
         }
 
         public static InjectResult degraded(String sql, boolean hasTables, String message) {
-            return new InjectResult(sql, sql, false, hasTables, SOURCE_NONE, message, List.of());
+            return new InjectResult(sql, sql, false, hasTables, false, SOURCE_NONE, message, List.of());
+        }
+
+        public static InjectResult policyFailed(String sql, String message) {
+            return new InjectResult(sql, sql, false, true, true, SOURCE_NONE, message, List.of());
         }
 
         public static InjectResult applied(String original, String rewritten,
                                            List<Map<String, Object>> predicates,
                                            String source, String message) {
-            return new InjectResult(original, rewritten, true, false, source, message, predicates);
+            return new InjectResult(original, rewritten, true, false, false, source, message, predicates);
         }
     }
 }

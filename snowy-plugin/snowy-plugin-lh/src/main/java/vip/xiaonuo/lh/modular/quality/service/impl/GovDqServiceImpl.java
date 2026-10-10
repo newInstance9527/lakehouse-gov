@@ -132,12 +132,7 @@ public class GovDqServiceImpl implements GovDqService {
         r.put("ruleCount", rules.size());
         r.put("empty", empty);
         r.put("range", StrUtil.blankToDefault(range, "30"));
-        // OM Profiler/Test 抽样（soft-fail；不替代门户 runs）
-        try {
-            r.put("om", omBridge.overviewOm(workspace, 12));
-        } catch (Exception e) {
-            r.put("om", Map.of("available", false, "hint", "OM soft-fail: " + e.getMessage()));
-        }
+        // KPI 只认门户 gov_dq_rule_run；OM Profiler/Test 不进 overview（避免与平均分/通过率混读）
         r.put("stream", summarizeStreamRuns(runs));
         return r;
     }

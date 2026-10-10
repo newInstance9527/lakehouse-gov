@@ -26,6 +26,7 @@ import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.common.page.CommonPageRequest;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
+import vip.xiaonuo.lh.core.engine.GravitinoAvailability;
 import vip.xiaonuo.lh.core.engine.GravitinoClient;
 import vip.xiaonuo.lh.core.engine.LhOmCatalogClassifier;
 import vip.xiaonuo.lh.core.engine.OpenMetadataClient;
@@ -102,6 +103,8 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     private CbGravAssetRefMapper gravAssetRefMapper;
     @Resource
     private GravitinoClient gravitinoClient;
+    @Resource
+    private GravitinoAvailability gravitinoAvailability;
     @Resource
     private OpenMetadataClient openMetadataClient;
     @Resource
@@ -379,6 +382,11 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         String engine = firstNonBlank(param.getEngine(),
                 tableRow == null ? null : tableRow.getEngine(),
                 inferEngine(ds.getType(), assetKind));
+
+        // Grav DOWN：禁止新建可投影类型资产（避免门户行与引擎 Catalog 脑裂）
+        if (gravitinoProjector.supportsGravitino(ds.getType())) {
+            gravitinoAvailability.requireUpForRegister("登记资产");
+        }
 
         GovAsset asset = new GovAsset();
         asset.setId(IdUtil.getSnowflakeNextIdStr());
@@ -1278,9 +1286,11 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
             col.put("comment", c.comment);
             cols.add(col);
         }
+        boolean degraded = StrUtil.isNotBlank(gt.cacheSource);
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("available", true);
-        r.put("source", "gravitino");
+        r.put("source", degraded ? gt.cacheSource : "gravitino");
+        r.put("degraded", degraded);
         r.put("metalake", metalake);
         r.put("catalog", catalog);
         r.put("schema", schema);

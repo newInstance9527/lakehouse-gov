@@ -182,6 +182,14 @@ public class GlobalConfigure implements WebMvcConfigurer {
             "/lh/lifecycle/runs/callback",
             "/api/governance/lifecycle/runs/callback",
 
+            /* 对账 rewrite_ck DS 回调（token 校验，见 GovReconCallbackAuth） */
+            "/lh/recon/golden/callback",
+            "/lh/governance/reconcile/golden/callback",
+            "/api/governance/reconcile/golden/callback",
+
+            /* 数据服务运行时门面（订阅 Key 鉴权，见 DataapiRuntimeAuth） */
+            "/lh/dataapi/runtime/invoke",
+
             /* 可视化大屏插件放行 */
             "/screen/project/releaseDetail",
             "/screen/project/verifyAccessPassword",

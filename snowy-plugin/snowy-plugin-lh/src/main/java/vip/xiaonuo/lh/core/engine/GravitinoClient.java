@@ -29,6 +29,7 @@ import java.util.Locale;
 /**
  * Apache Gravitino REST 客户端（结构 SoT 读取侧）
  * <p>凭证来自 Vault Basic Auth；Accept: application/vnd.gravitino.v1+json。</p>
+ * <p>读路径经 {@link GravitinoSchemaCache}：成功刷新 TTL；失败可降级内存/业务库投影。</p>
  *
  * @author lakehouse
  * @date 2026/3/18
@@ -42,9 +43,11 @@ public class GravitinoClient {
     private LhProperties lhProperties;
     @Resource
     private LhComponentCredentialResolver credentialResolver;
+    @Resource
+    private GravitinoSchemaCache schemaCache;
 
     /**
-     * 健康探测
+     * 健康探测（附带只读 schema 缓存水位，便于 Grav DOWN 时判断可否读降级）
      */
     public Map<String, Object> health() {
         try {
@@ -53,12 +56,18 @@ public class GravitinoClient {
             m.put("component", "gravitino");
             m.put("status", "UP");
             m.put("body", body);
+            m.put("schemaCache", schemaCache.stats());
             return m;
         } catch (Exception e) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("component", "gravitino");
             m.put("status", "DOWN");
             m.put("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            Map<String, Object> cache = schemaCache.stats();
+            m.put("schemaCache", cache);
+            Object live = cache.get("live");
+            int liveN = live instanceof Number n ? n.intValue() : 0;
+            m.put("readDegradedAvailable", liveN > 0 || Boolean.TRUE.equals(cache.get("fallbackWhenDown")));
             return m;
         }
     }
@@ -67,34 +76,84 @@ public class GravitinoClient {
      * 列出 metalake 下 catalog 名
      */
     public List<String> listCatalogs(String metalake) {
-        String path = "/api/metalakes/" + enc(metalake) + "/catalogs";
-        JSONObject root = JSONUtil.parseObj(authGet(path));
-        return extractNames(root);
+        String cacheKey = StrUtil.blankToDefault(metalake, "");
+        try {
+            String path = "/api/metalakes/" + enc(metalake) + "/catalogs";
+            JSONObject root = JSONUtil.parseObj(authGet(path));
+            List<String> names = extractNames(root);
+            schemaCache.putNames("catalogs", cacheKey, names);
+            return names;
+        } catch (RuntimeException e) {
+            List<String> cached = schemaCache.fallbackNames("catalogs", cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+            throw e;
+        }
     }
 
     /**
      * 列出 catalog 下 schema 名
      */
     public List<String> listSchemas(String metalake, String catalog) {
-        String path = "/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog) + "/schemas";
-        JSONObject root = JSONUtil.parseObj(authGet(path));
-        return extractNames(root);
+        String cacheKey = StrUtil.blankToDefault(metalake, "") + "." + StrUtil.blankToDefault(catalog, "");
+        try {
+            String path = "/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog) + "/schemas";
+            JSONObject root = JSONUtil.parseObj(authGet(path));
+            List<String> names = extractNames(root);
+            schemaCache.putNames("schemas", cacheKey, names);
+            return names;
+        } catch (RuntimeException e) {
+            List<String> cached = schemaCache.fallbackNames("schemas", cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+            throw e;
+        }
     }
 
     /**
      * 列出 schema 下表名
      */
     public List<String> listTables(String metalake, String catalog, String schema) {
-        String path = "/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog)
-                + "/schemas/" + enc(schema) + "/tables";
-        JSONObject root = JSONUtil.parseObj(authGet(path));
-        return extractNames(root);
+        String cacheKey = StrUtil.blankToDefault(metalake, "") + "."
+                + StrUtil.blankToDefault(catalog, "") + "."
+                + StrUtil.blankToDefault(schema, "");
+        try {
+            String path = "/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog)
+                    + "/schemas/" + enc(schema) + "/tables";
+            JSONObject root = JSONUtil.parseObj(authGet(path));
+            List<String> names = extractNames(root);
+            schemaCache.putNames("tables", cacheKey, names);
+            return names;
+        } catch (RuntimeException e) {
+            List<String> cached = schemaCache.fallbackNames("tables", cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+            throw e;
+        }
     }
 
     /**
-     * 加载表结构（列名/类型/分区）
+     * 加载表结构（列名/类型/分区）；失败时降级只读缓存 / {@code cb_grav_asset_ref}。
      */
     public GravTable loadTable(String metalake, String catalog, String schema, String table) {
+        try {
+            GravTable gt = loadTableRemote(metalake, catalog, schema, table);
+            gt.cacheSource = null;
+            schemaCache.putTable(gt);
+            return gt;
+        } catch (RuntimeException e) {
+            GravTable cached = schemaCache.fallbackTable(metalake, catalog, schema, table);
+            if (cached != null) {
+                return cached;
+            }
+            throw e;
+        }
+    }
+
+    private GravTable loadTableRemote(String metalake, String catalog, String schema, String table) {
         String path = "/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog)
                 + "/schemas/" + enc(schema) + "/tables/" + enc(table);
         JSONObject root = JSONUtil.parseObj(authGet(path));
@@ -162,6 +221,7 @@ public class GravitinoClient {
             body.set("comment", StrUtil.blankToDefault(comment, "created by lakehouse"));
             authPost("/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog) + "/schemas",
                     body.toString());
+            schemaCache.invalidateSchema(metalake, catalog, schema);
         }
     }
 
@@ -198,6 +258,7 @@ public class GravitinoClient {
         String path = "/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalog)
                 + "/schemas/" + enc(schema) + "/tables";
         authPost(path, body.toString());
+        schemaCache.invalidateTable(metalake, catalog, schema, table);
     }
 
     /**
@@ -578,9 +639,11 @@ public class GravitinoClient {
             JSONObject put = new JSONObject();
             put.set("updates", updates);
             authPut("/api/metalakes/" + enc(metalake) + "/catalogs/" + enc(catalogName), put.toString());
+            schemaCache.invalidateSchema(metalake, catalogName, null);
             return Map.of("created", false, "catalog", catalogName, "metalake", metalake);
         }
         authPost("/api/metalakes/" + enc(metalake) + "/catalogs", body.toString());
+        schemaCache.invalidateSchema(metalake, catalogName, null);
         return Map.of("created", true, "catalog", catalogName, "metalake", metalake);
     }
 
@@ -643,6 +706,8 @@ public class GravitinoClient {
         public long auditVersion;
         public List<GravColumn> columns = new ArrayList<>();
         public List<String> partitionKeys = new ArrayList<>();
+        /** null=实时 Grav；memory_cache / cb_grav_asset_ref 表示只读降级 */
+        public String cacheSource;
     }
 
     /** Grav 列 */

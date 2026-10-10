@@ -31,14 +31,20 @@ import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiKeyRevealParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiRuntimeInvokeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTagsParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiKeyIssueService;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
 import vip.xiaonuo.lh.modular.dataapi.support.DataapiCallStatsSupport;
 import vip.xiaonuo.lh.modular.dataapi.support.DataapiOpenApiBuilder;
+import vip.xiaonuo.lh.modular.dataapi.support.DataapiRuntimeAuth;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
 import vip.xiaonuo.lh.modular.datasource.support.ApiBuildTableAccess;
+import vip.xiaonuo.lh.modular.datasource.support.ConsumerBindingSyncGate;
+import vip.xiaonuo.lh.modular.query.service.impl.CpQueryServiceImpl;
+import vip.xiaonuo.lh.modular.query.support.CpQueryColumnMaskResolver;
+import vip.xiaonuo.lh.modular.query.support.CpQueryRowFilterInjector;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
 import cn.hutool.http.HttpRequest;
@@ -79,9 +85,17 @@ public class DataapiServiceImpl implements DataapiService {
     @Resource
     private ExternalBindingGuard externalBindingGuard;
     @Resource
+    private ConsumerBindingSyncGate consumerBindingSyncGate;
+    @Resource
     private DataapiKeyIssueService keyIssueService;
     @Resource
     private LhUserNameResolver userNameResolver;
+    @Resource
+    private CpQueryRowFilterInjector rowFilterInjector;
+    @Resource
+    private CpQueryColumnMaskResolver columnMaskResolver;
+    @Resource
+    private DataapiRuntimeAuth runtimeAuth;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -121,6 +135,8 @@ public class DataapiServiceImpl implements DataapiService {
     public Page<DataapiApiBinding> page(DataapiPageParam param) {
         String ws = StrUtil.blankToDefault(param.getWs(), WS_DEFAULT);
         QueryWrapper<DataapiApiBinding> qw = baseQw(ws);
+        // 兼容历史：delete 曾只 updateById 设 status=deleted，@TableLogic 未落库，列表仍可见
+        qw.and(w -> w.isNull("status").or().ne("status", "deleted"));
         String q = StrUtil.blankToDefault(param.getQ(), param.getKeyword());
         if (StrUtil.isNotBlank(q)) {
             qw.and(w -> w.like("name", q).or().like("public_path", q).or().like("domain_code", q)
@@ -402,10 +418,17 @@ public class DataapiServiceImpl implements DataapiService {
         List<Map<String, Object>> portalParams = param.getParams();
         Long dsId = param.getDatasourceId();
         String portalDsId = StrUtil.blankToDefault(param.getPortalDsId(), param.getDsId());
-        if (StrUtil.isBlank(portalDsId) && StrUtil.isNotBlank(param.getId())) {
-            DataapiApiBinding early = bindingMapper.selectById(param.getId());
-            if (early != null) {
-                portalDsId = early.getPortalDsId();
+        DataapiApiBinding bound = null;
+        if (StrUtil.isNotBlank(param.getId())) {
+            bound = requireBinding(param.getId());
+            if (StrUtil.isBlank(portalDsId)) {
+                portalDsId = bound.getPortalDsId();
+            }
+            if (portalParams == null && StrUtil.isNotBlank(bound.getParamJson())) {
+                portalParams = new ArrayList<>();
+                for (Object o : JSONUtil.parseArray(bound.getParamJson())) {
+                    portalParams.add(JSONUtil.parseObj(o));
+                }
             }
         }
         if (StrUtil.isNotBlank(portalDsId) && !secAuthGrantService.canUseDatasource(portalDsId)) {
@@ -426,21 +449,21 @@ public class DataapiServiceImpl implements DataapiService {
             engine = "SQL";
         }
 
-        if (StrUtil.isNotBlank(param.getId())) {
-            DataapiApiBinding b = requireBinding(param.getId());
-            if (StrUtil.isBlank(sql) && StrUtil.isNotBlank(b.getSqlrestApiId())) {
-                return enrichTrial(sqlrestClient.trial(b.getSqlrestApiId(), portalParams), null);
-            }
-            if (portalParams == null && StrUtil.isNotBlank(b.getParamJson())) {
-                portalParams = new ArrayList<>();
-                for (Object o : JSONUtil.parseArray(b.getParamJson())) {
-                    portalParams.add(JSONUtil.parseObj(o));
-                }
-            }
-        }
         List<String> contexts = param.getContextList();
         if ((contexts == null || contexts.isEmpty()) && StrUtil.isNotBlank(sql)) {
             contexts = List.of(sql);
+        }
+        // 已发布绑定且未传 SQL：从 SQLREST 详情拉 sqlList 再走门户注入
+        if ((contexts == null || contexts.isEmpty())
+                && bound != null
+                && StrUtil.isNotBlank(bound.getSqlrestApiId())) {
+            contexts = loadSqlrestContexts(bound.getSqlrestApiId());
+            if (dsId == null || dsId <= 0) {
+                Long fromDetail = peekSqlrestDatasourceId(bound.getSqlrestApiId());
+                if (fromDetail != null) {
+                    dsId = fromDetail;
+                }
+            }
         }
         if (contexts == null || contexts.isEmpty()) {
             throw new CommonException("试跑需要 SQL 或 Groovy 脚本");
@@ -449,8 +472,50 @@ public class DataapiServiceImpl implements DataapiService {
         for (String c : contexts) {
             apiBuildTableAccess.assertSqlTablesSelectable(portalDsId, engine, c);
         }
-        List<String> contextList = new ArrayList<>();
+
+        String subjectId = resolveTrialSubjectId();
+        List<String> injectedContexts = new ArrayList<>();
+        List<Map<String, Object>> allPredicates = new ArrayList<>();
+        boolean anyApplied = false;
+        boolean anyDegraded = false;
+        boolean anyPolicyFailed = false;
+        StringBuilder filterMsg = new StringBuilder();
         for (String c : contexts) {
+            if ("GROOVY".equals(engine)) {
+                injectedContexts.add(c);
+                continue;
+            }
+            CpQueryRowFilterInjector.InjectResult rf = rowFilterInjector.inject(c, subjectId);
+            if (rf.policyFailed
+                    && (lhProperties.getQuery() == null || !lhProperties.getQuery().isAllowRowFilterDegraded())) {
+                throw new CommonException("试跑行级策略未生效："
+                        + StrUtil.blankToDefault(rf.message, "row_filter 未能注入 SQL"));
+            }
+            if (rf.applied) {
+                anyApplied = true;
+                injectedContexts.add(rf.sql);
+            } else {
+                injectedContexts.add(c);
+            }
+            if (rf.degraded) {
+                anyDegraded = true;
+            }
+            if (rf.policyFailed) {
+                anyPolicyFailed = true;
+            }
+            if (rf.predicates != null) {
+                allPredicates.addAll(rf.predicates);
+            }
+            if (StrUtil.isNotBlank(rf.message)) {
+                if (filterMsg.length() > 0) {
+                    filterMsg.append("; ");
+                }
+                filterMsg.append(rf.message);
+            }
+        }
+
+        List<String> contextList = new ArrayList<>();
+        for (String c : injectedContexts) {
             contextList.add("GROOVY".equals(engine) ? c : SqlrestClient.toSqlrestSql(c));
         }
         Map<String, Object> req = new LinkedHashMap<>();
@@ -460,7 +525,246 @@ public class DataapiServiceImpl implements DataapiService {
         req.put("formatMap", param.getFormatMap() != null ? param.getFormatMap() : List.of());
         req.put("contextList", contextList);
         req.put("paramValues", sqlrestClient.toDebugParamValues(portalParams));
-        return enrichTrial(sqlrestClient.debug(req), contextList);
+        Map<String, Object> trialOut = enrichTrial(sqlrestClient.debug(req), contextList);
+        trialOut.put("rowFilterApplied", anyApplied);
+        trialOut.put("rowFilterDegraded", anyDegraded);
+        trialOut.put("rowFilterPolicyFailed", anyPolicyFailed);
+        trialOut.put("rowFilterSource", anyApplied ? CpQueryRowFilterInjector.SOURCE_GRANT : CpQueryRowFilterInjector.SOURCE_NONE);
+        trialOut.put("rowFilterPredicates", allPredicates);
+        if (filterMsg.length() > 0) {
+            trialOut.put("rowFilterMessage", filterMsg.toString());
+        }
+
+        // 列级 mask 提示（试跑结果列）；运行时网关仍旁路，此处只打标
+        String sqlForMask = injectedContexts.isEmpty() ? "" : injectedContexts.get(0);
+        List<String> resultCols = trialResultColumns(trialOut);
+        CpQueryColumnMaskResolver.MaskResult mask = columnMaskResolver.resolve(
+                resultCols, sqlForMask, subjectId, null);
+        trialOut.put("maskCols", mask.maskCols);
+        trialOut.put("masked", mask.maskCols != null && !mask.maskCols.isEmpty());
+        trialOut.put("maskSource", mask.maskSource);
+        trialOut.put("maskDegraded", mask.maskDegraded);
+        trialOut.put("maskMessage", mask.maskMessage);
+        return trialOut;
+    }
+
+    @Override
+    public Map<String, Object> runtimeInvoke(
+            DataapiRuntimeInvokeParam param, String appKey, String authorization) {
+        if (lhProperties.getDataapi() != null && !lhProperties.getDataapi().isRuntimeInvokeEnabled()) {
+            throw new CommonException("门户运行时门面已关闭（lh.dataapi.runtime-invoke-enabled=false）");
+        }
+        DataapiRuntimeInvokeParam p = param == null ? new DataapiRuntimeInvokeParam() : param;
+        DataapiRuntimeAuth.AuthResult auth = runtimeAuth.authenticate(
+                appKey, authorization, p.getBindingId(), p.getPath());
+        DataapiApiBinding binding = auth.binding;
+        String subjectId = auth.subjectId;
+
+        if (StrUtil.isBlank(binding.getSqlrestApiId())) {
+            throw new CommonException("绑定缺少 sqlrestApiId，无法运行时调用");
+        }
+
+        List<Map<String, Object>> portalParams = p.getParams();
+        if (portalParams == null && StrUtil.isNotBlank(binding.getParamJson())) {
+            portalParams = new ArrayList<>();
+            for (Object o : JSONUtil.parseArray(binding.getParamJson())) {
+                portalParams.add(JSONUtil.parseObj(o));
+            }
+        }
+
+        Long dsId = null;
+        String portalDsId = binding.getPortalDsId();
+        if (StrUtil.isNotBlank(portalDsId)) {
+            dsId = sqlrestProjector.resolveSqlrestDatasourceId(portalDsId);
+        }
+        List<String> contexts = loadSqlrestContexts(binding.getSqlrestApiId());
+        if (dsId == null || dsId <= 0) {
+            Long fromDetail = peekSqlrestDatasourceId(binding.getSqlrestApiId());
+            if (fromDetail != null) {
+                dsId = fromDetail;
+            }
+        }
+        if (dsId == null) {
+            dsId = sqlrestClient.defaultDatasourceId();
+        }
+        if (contexts == null || contexts.isEmpty()) {
+            throw new CommonException("SQLREST 接口无 SQL，无法运行时调用");
+        }
+
+        String engine = "SQL";
+        List<String> injectedContexts = new ArrayList<>();
+        List<Map<String, Object>> allPredicates = new ArrayList<>();
+        boolean anyApplied = false;
+        boolean anyDegraded = false;
+        boolean anyPolicyFailed = false;
+        StringBuilder filterMsg = new StringBuilder();
+        for (String c : contexts) {
+            CpQueryRowFilterInjector.InjectResult rf = rowFilterInjector.inject(c, subjectId);
+            if (rf.policyFailed
+                    && (lhProperties.getQuery() == null || !lhProperties.getQuery().isAllowRowFilterDegraded())) {
+                throw new CommonException("运行时行级策略未生效："
+                        + StrUtil.blankToDefault(rf.message, "row_filter 未能注入 SQL"));
+            }
+            if (rf.applied) {
+                anyApplied = true;
+                injectedContexts.add(rf.sql);
+            } else {
+                injectedContexts.add(c);
+            }
+            if (rf.degraded) {
+                anyDegraded = true;
+            }
+            if (rf.policyFailed) {
+                anyPolicyFailed = true;
+            }
+            if (rf.predicates != null) {
+                allPredicates.addAll(rf.predicates);
+            }
+            if (StrUtil.isNotBlank(rf.message)) {
+                if (filterMsg.length() > 0) {
+                    filterMsg.append("; ");
+                }
+                filterMsg.append(rf.message);
+            }
+        }
+
+        List<String> contextList = new ArrayList<>();
+        for (String c : injectedContexts) {
+            contextList.add(SqlrestClient.toSqlrestSql(c));
+        }
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("dataSourceId", dsId);
+        req.put("engine", engine);
+        req.put("namingStrategy", StrUtil.blankToDefault(p.getNamingStrategy(), "CAMEL_CASE"));
+        req.put("formatMap", List.of());
+        req.put("contextList", contextList);
+        req.put("paramValues", sqlrestClient.toDebugParamValues(portalParams));
+
+        Map<String, Object> out = enrichTrial(sqlrestClient.debug(req), contextList);
+        out.put("runtimePath", "portal");
+        out.put("bindingId", binding.getId());
+        out.put("publicPath", binding.getPublicPath());
+        out.put("method", StrUtil.blankToDefault(binding.getMethod(), "GET"));
+        out.put("subjectId", subjectId);
+        out.put("keyId", auth.meta.getId());
+        out.put("rowFilterApplied", anyApplied);
+        out.put("rowFilterDegraded", anyDegraded);
+        out.put("rowFilterPolicyFailed", anyPolicyFailed);
+        out.put("rowFilterSource", anyApplied
+                ? CpQueryRowFilterInjector.SOURCE_GRANT : CpQueryRowFilterInjector.SOURCE_NONE);
+        out.put("rowFilterPredicates", allPredicates);
+        if (filterMsg.length() > 0) {
+            out.put("rowFilterMessage", filterMsg.toString());
+        }
+
+        String sqlForMask = injectedContexts.isEmpty() ? "" : injectedContexts.get(0);
+        List<String> resultCols = trialResultColumns(out);
+        CpQueryColumnMaskResolver.MaskResult mask = columnMaskResolver.resolve(
+                resultCols, sqlForMask, subjectId, null);
+        out.put("maskCols", mask.maskCols);
+        out.put("masked", mask.maskCols != null && !mask.maskCols.isEmpty());
+        out.put("maskSource", mask.maskSource);
+        out.put("maskDegraded", mask.maskDegraded);
+        out.put("maskMessage", mask.maskMessage);
+
+        boolean redact = lhProperties.getQuery() == null || lhProperties.getQuery().isRedactMaskedCells();
+        if (redact && mask.maskCols != null && !mask.maskCols.isEmpty()) {
+            Object sample = out.get("sample");
+            if (sample instanceof List<?> rows) {
+                List<Map<String, Object>> asMaps = new ArrayList<>();
+                for (Object row : rows) {
+                    if (row instanceof Map<?, ?> m) {
+                        Map<String, Object> copy = new LinkedHashMap<>();
+                        for (Map.Entry<?, ?> e : m.entrySet()) {
+                            copy.put(String.valueOf(e.getKey()), e.getValue());
+                        }
+                        asMaps.add(copy);
+                    }
+                }
+                if (!asMaps.isEmpty()) {
+                    List<Map<String, Object>> redacted =
+                            CpQueryServiceImpl.redactMaskedCells(asMaps, mask.maskCols);
+                    out.put("sample", redacted);
+                    out.put("maskRedacted", true);
+                }
+            }
+        }
+        return out;
+    }
+
+    private String resolveTrialSubjectId() {
+        try {
+            SaBaseLoginUser u = LhLoginUsers.currentUserOrNull();
+            if (u != null) {
+                return StrUtil.blankToDefault(u.getId(), u.getAccount());
+            }
+        } catch (Exception ignored) {
+            /* soft */
+        }
+        return null;
+    }
+
+    private List<String> loadSqlrestContexts(String sqlrestApiId) {
+        Map<String, Object> detail = sqlrestClient.detail(sqlrestApiId);
+        if (Boolean.TRUE.equals(detail.get("degraded")) || detail.get("data") == null) {
+            throw new CommonException("无法从 SQLREST 拉取 API 详情以试跑");
+        }
+        cn.hutool.json.JSONObject data = JSONUtil.parseObj(detail.get("data"));
+        List<String> sqls = new ArrayList<>();
+        cn.hutool.json.JSONArray sqlList = data.getJSONArray("sqlList");
+        if (sqlList != null) {
+            for (int i = 0; i < sqlList.size(); i++) {
+                String text = sqlList.getJSONObject(i).getStr("sqlText");
+                if (StrUtil.isNotBlank(text)) {
+                    sqls.add(text);
+                }
+            }
+        }
+        return sqls;
+    }
+
+    private Long peekSqlrestDatasourceId(String sqlrestApiId) {
+        try {
+            Map<String, Object> detail = sqlrestClient.detail(sqlrestApiId);
+            if (detail.get("data") == null) {
+                return null;
+            }
+            return JSONUtil.parseObj(detail.get("data")).getLong("datasourceId");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static List<String> trialResultColumns(Map<String, Object> trialOut) {
+        Object types = trialOut.get("types");
+        if (types instanceof List<?> list && !list.isEmpty()) {
+            List<String> cols = new ArrayList<>();
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> m) {
+                    Object name = m.get("name");
+                    if (name == null) {
+                        name = m.get("label");
+                    }
+                    if (name != null) {
+                        cols.add(String.valueOf(name));
+                    }
+                } else if (o != null) {
+                    cols.add(String.valueOf(o));
+                }
+            }
+            if (!cols.isEmpty()) {
+                return cols;
+            }
+        }
+        Object sample = trialOut.get("sample");
+        if (sample instanceof List<?> rows && !rows.isEmpty() && rows.get(0) instanceof Map<?, ?> row) {
+            List<String> cols = new ArrayList<>();
+            for (Object k : ((Map<?, ?>) row).keySet()) {
+                cols.add(String.valueOf(k));
+            }
+            return cols;
+        }
+        return List.of();
     }
 
     @Override
@@ -469,6 +773,9 @@ public class DataapiServiceImpl implements DataapiService {
         DataapiApiBinding b = requireBinding(param.getId());
         if (StrUtil.isBlank(b.getSqlrestApiId())) {
             throw new CommonException("请先构建 SQLREST 接口（build）");
+        }
+        if (lhProperties.getDataapi() == null || lhProperties.getDataapi().isHardFailStaleBindingOnPublish()) {
+            consumerBindingSyncGate.assertSyncedForDs(b.getPortalDsId());
         }
         boolean requireTicket = lhProperties.getDataapi() != null && lhProperties.getDataapi().isRequirePublishTicket();
         String ticketNo = StrUtil.blankToDefault(param.getPublishTicketNo(), b.getPublishTicketNo());
@@ -755,14 +1062,16 @@ public class DataapiServiceImpl implements DataapiService {
         int keysRevoked = softDeleteKeysForBinding(b.getId());
         Date now = new Date();
         String uid = LhLoginUsers.requireUserId();
-        b.setDeleteFlag("DELETED");
+        // @TableLogic：delete_flag 不能靠 updateById 写入，须先落业务态再 deleteById
         b.setState("retired");
         b.setStatus("deleted");
         b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
         b.setUpdateTime(now);
         b.setUpdateUser(uid);
         b.setLastError(null);
+        b.setDeleteFlag(null);
         bindingMapper.updateById(b);
+        bindingMapper.deleteById(b.getId());
 
         Map<String, Object> result = new LinkedHashMap<>();
         boolean ok = Boolean.TRUE.equals(sr.get("ok")) && Boolean.TRUE.equals(ax.get("ok"));
@@ -805,11 +1114,12 @@ public class DataapiServiceImpl implements DataapiService {
         String uid = LhLoginUsers.requireUserId();
         int n = 0;
         for (DataapiApiKeyMeta k : keys) {
-            k.setDeleteFlag("DELETED");
             k.setStatus("revoked");
             k.setUpdateTime(now);
             k.setUpdateUser(uid);
+            k.setDeleteFlag(null);
             keyMetaMapper.updateById(k);
+            keyMetaMapper.deleteById(k.getId());
             n++;
         }
         return n;

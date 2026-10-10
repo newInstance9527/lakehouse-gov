@@ -9,6 +9,7 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
@@ -20,9 +21,11 @@ import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiKeyRevealParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiRuntimeInvokeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTagsParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
+import vip.xiaonuo.lh.modular.dataapi.support.DataapiRuntimeAuth;
 
 import java.util.List;
 import java.util.Map;
@@ -205,6 +208,16 @@ public class DataapiController {
     @PostMapping("/lh/dataapi/gatewayProbe")
     public CommonResult<Map<String, Object>> gatewayProbe(@RequestBody DataapiGatewayProbeParam param) {
         return CommonResult.data(dataapiService.gatewayProbe(param));
+    }
+
+    @Operation(summary = "运行时门面：订阅 Key 鉴权 + row_filter 注入后执行（平台安全路径）")
+    @CommonLog("数据服务运行时调用")
+    @PostMapping("/lh/dataapi/runtime/invoke")
+    public CommonResult<Map<String, Object>> runtimeInvoke(
+            @RequestBody(required = false) DataapiRuntimeInvokeParam param,
+            @RequestHeader(value = DataapiRuntimeAuth.HEADER_APP_KEY, required = false) String appKey,
+            @RequestHeader(value = "Authorization", required = false) String authorization) {
+        return CommonResult.data(dataapiService.runtimeInvoke(param, appKey, authorization));
     }
 
     @Operation(summary = "调用大盘（SQLREST overview 聚合）")

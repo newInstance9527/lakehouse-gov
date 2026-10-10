@@ -20,6 +20,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelDekRegisterParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelExportReceiptParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelIntakeParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
@@ -28,6 +29,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRestrictParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRevealParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelSubjectMapUpsertParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelSuppressionUpsertParam;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelRequestVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
 import vip.xiaonuo.lh.modular.compliance.service.GovDelService;
@@ -204,6 +206,37 @@ public class GovDelController {
     @PostMapping({"/lh/compliance/gate/export-check", "/api/governance/compliance/gate/export-check"})
     public CommonResult<Map<String, Object>> exportGateCheck(@RequestBody @Valid GovDelExportGateParam param) {
         return CommonResult.data(govDelService.exportGateCheck(param));
+    }
+
+    @Operation(summary = "SLA 黄/红扫描并推夜莺（剩余≤1/3→P1；超期→P0）")
+    @CommonLog("合规 SLA 告警扫描")
+    @PostMapping({"/lh/compliance/sla/scan", "/api/governance/compliance/sla/scan"})
+    public CommonResult<Map<String, Object>> scanSla(@RequestParam(required = false) String ws) {
+        return CommonResult.data(govDelService.scanSlaAlerts(ws));
+    }
+
+    @Operation(summary = "抑制名单列表（ETL/CDC 拉取；仅 subject_id_hash）")
+    @GetMapping({"/lh/compliance/suppression", "/api/governance/compliance/suppression"})
+    public CommonResult<List<Map<String, Object>>> listSuppressions(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String subjectIdHash,
+            @RequestParam(required = false) String objectFqn,
+            @RequestParam(required = false, defaultValue = "true") Boolean activeOnly) {
+        return CommonResult.data(govDelService.listSuppressions(ws, subjectIdHash, objectFqn, activeOnly));
+    }
+
+    @Operation(summary = "抑制名单登记 / 更新（防复活）")
+    @CommonLog("合规抑制名单维护")
+    @PostMapping({"/lh/compliance/suppression", "/api/governance/compliance/suppression"})
+    public CommonResult<Map<String, Object>> upsertSuppression(@RequestBody GovDelSuppressionUpsertParam param) {
+        return CommonResult.data(govDelService.upsertSuppression(param));
+    }
+
+    @Operation(summary = "出湖副本删除回执 / 书面残留声明")
+    @CommonLog("合规出湖回执登记")
+    @PostMapping({"/lh/compliance/export/receipt", "/api/governance/compliance/export/receipt"})
+    public CommonResult<GovDelRequestVo> registerExportReceipt(@RequestBody @Valid GovDelExportReceiptParam param) {
+        return CommonResult.data(govDelService.registerExportReceipt(param));
     }
 
     @Operation(summary = "J3 外部 DSR webhook 送单（签名校验；sourceSystem+sourceRef 幂等）")

@@ -44,6 +44,10 @@ import vip.xiaonuo.lh.modular.metric.support.MetricAnomalyCalc;
 import vip.xiaonuo.lh.modular.metric.support.MetricMaterializeJobTemplate;
 import vip.xiaonuo.lh.modular.metric.support.MetricMaterializeRewrite;
 import vip.xiaonuo.lh.modular.metric.support.MetricPartitionReconGate;
+import vip.xiaonuo.lh.modular.recon.entity.ReconPartition;
+import vip.xiaonuo.lh.modular.recon.entity.ReconRule;
+import vip.xiaonuo.lh.modular.recon.mapper.ReconPartitionMapper;
+import vip.xiaonuo.lh.modular.recon.mapper.ReconRuleMapper;
 import vip.xiaonuo.lh.modular.recon.support.ReconPartitionService;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAssetSourceLink;
@@ -107,6 +111,10 @@ public class GovMetricServiceImpl implements GovMetricService {
     private MetricPartitionReconGate partitionReconGate;
     @Resource
     private ReconPartitionService reconPartitionService;
+    @Resource
+    private ReconRuleMapper reconRuleMapper;
+    @Resource
+    private ReconPartitionMapper reconPartitionMapper;
     @Resource
     private LhProperties lhProperties;
     @Resource
@@ -715,6 +723,29 @@ public class GovMetricServiceImpl implements GovMetricService {
             } else {
                 blocked++;
             }
+            // 关联湖表：优先对账规则 lake_table，供摘牌 API 使用
+            String lakeTable = null;
+            ReconRule linkedRule = reconRuleMapper.selectOne(new QueryWrapper<ReconRule>().lambda()
+                    .eq(ReconRule::getDeleteFlag, NOT_DELETE)
+                    .eq(ReconRule::getMetricCode, m.getMetricCode())
+                    .orderByDesc(ReconRule::getUpdateTime)
+                    .last("LIMIT 1"));
+            if (linkedRule != null && StrUtil.isNotBlank(linkedRule.getLakeTable())) {
+                lakeTable = linkedRule.getLakeTable();
+            } else if (mat != null && StrUtil.isNotBlank(mat.getTargetTable())) {
+                lakeTable = mat.getTargetTable();
+            }
+            Integer goldenFlag = null;
+            ReconPartition latestPart = reconPartitionMapper.selectOne(new QueryWrapper<ReconPartition>().lambda()
+                    .eq(ReconPartition::getMetricCode, m.getMetricCode())
+                    .orderByDesc(ReconPartition::getCheckedAt)
+                    .last("LIMIT 1"));
+            if (latestPart != null) {
+                goldenFlag = latestPart.getGoldenFlag();
+                if (StrUtil.isBlank(lakeTable) && StrUtil.isNotBlank(latestPart.getLakeTable())) {
+                    lakeTable = latestPart.getLakeTable();
+                }
+            }
             Map<String, Object> card = new LinkedHashMap<>();
             card.put("metricCode", m.getMetricCode());
             card.put("name", m.getName());
@@ -723,8 +754,10 @@ public class GovMetricServiceImpl implements GovMetricService {
             card.put("statusLabel", boardReady ? "可进看板" : "数据未就绪");
             card.put("reason", reason);
             card.put("reconOk", reconOk);
+            card.put("goldenFlag", goldenFlag);
             card.put("jobRef", mat != null ? mat.getJobRef() : null);
             card.put("targetTable", mat != null ? mat.getTargetTable() : null);
+            card.put("lakeTable", lakeTable);
             cards.add(card);
         }
         Map<String, Object> recon = reconPartitionService.listRecent(null, null, 20);

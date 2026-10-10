@@ -256,6 +256,12 @@ public class LhObsSpanServiceImpl implements LhObsSpanService {
     @Override
     public void recordComponentSpan(String ws, String linkId, String service, String op, String status,
                                     String runId, String eventId, String error, String attrsJson) {
+        recordComponentSpan(ws, linkId, service, op, status, runId, eventId, error, attrsJson, null);
+    }
+
+    @Override
+    public void recordComponentSpan(String ws, String linkId, String service, String op, String status,
+                                    String runId, String eventId, String error, String attrsJson, String traceId) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("ws", ws);
         body.put("linkId", linkId);
@@ -266,6 +272,9 @@ public class LhObsSpanServiceImpl implements LhObsSpanService {
         body.put("eventId", eventId);
         body.put("error", error);
         body.put("attrsJson", attrsJson);
+        if (StrUtil.isNotBlank(traceId)) {
+            body.put("traceId", traceId.trim());
+        }
         Date now = new Date();
         body.put("startTs", now);
         body.put("endTs", now);

@@ -20,6 +20,11 @@ lh.vault.aes-key=
 lh.trino.insecure-ssl=true
 lh.http.insecure-ssl=true
 
+# —— 数据开发发布门禁（本机放宽；prod 保持 application.properties 默认 true）——
+lh.compute.require-mr-merge=false
+lh.compute.require-script-publish-ticket=false
+lh.compute.publish-gate-hard-fail=false
+
 # —— 外部组件 bootstrap（优先 Vault；仅首次种子）——
 lh.trino.password=
 lh.ds.password=

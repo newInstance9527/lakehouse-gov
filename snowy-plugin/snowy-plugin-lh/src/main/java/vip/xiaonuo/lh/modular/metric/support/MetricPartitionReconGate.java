@@ -32,11 +32,35 @@ public class MetricPartitionReconGate {
             return null;
         }
         Date since = new Date(System.currentTimeMillis() - TimeUnit.HOURS.toMillis(Math.max(1, lookbackHours)));
-        var qw = new QueryWrapper<ReconPartition>().lambda()
+        var failQw = baseMetricOrCkQw(metricCode, ckTable)
                 .eq(ReconPartition::getStatus, STATUS_FAIL)
                 .ge(ReconPartition::getCheckedAt, since)
                 .orderByDesc(ReconPartition::getCheckedAt)
                 .last("LIMIT 1");
+        ReconPartition fail = reconPartitionMapper.selectOne(failQw);
+        if (fail != null) {
+            return "分区对账失败 " + fail.getPartitionKey()
+                    + " status=fail"
+                    + (StrUtil.isNotBlank(fail.getTraceId()) ? " trace=" + fail.getTraceId() : "");
+        }
+        // 黄金摘牌：最近流水 golden_flag=0 → 看板未就绪
+        var delistQw = baseMetricOrCkQw(metricCode, ckTable)
+                .eq(ReconPartition::getGoldenFlag, 0)
+                .ge(ReconPartition::getCheckedAt, since)
+                .orderByDesc(ReconPartition::getCheckedAt)
+                .last("LIMIT 1");
+        ReconPartition delisted = reconPartitionMapper.selectOne(delistQw);
+        if (delisted != null) {
+            return "黄金已摘牌 lake=" + StrUtil.blankToDefault(delisted.getLakeTable(), ckTable)
+                    + (StrUtil.isNotBlank(delisted.getPartitionKey())
+                    ? " partition=" + delisted.getPartitionKey() : "");
+        }
+        return null;
+    }
+
+    private com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ReconPartition> baseMetricOrCkQw(
+            String metricCode, String ckTable) {
+        var qw = new QueryWrapper<ReconPartition>().lambda();
         if (StrUtil.isNotBlank(metricCode)) {
             qw.eq(ReconPartition::getMetricCode, metricCode.trim().toUpperCase());
         } else if (StrUtil.isNotBlank(ckTable)) {
@@ -49,13 +73,7 @@ public class MetricPartitionReconGate {
             }
             qw.eq(ReconPartition::getCkTable, tbl);
         }
-        ReconPartition fail = reconPartitionMapper.selectOne(qw);
-        if (fail == null) {
-            return null;
-        }
-        return "分区对账失败 " + fail.getPartitionKey()
-                + " status=fail"
-                + (StrUtil.isNotBlank(fail.getTraceId()) ? " trace=" + fail.getTraceId() : "");
+        return qw;
     }
 
     public boolean hasRecentFail(String metricCode, int lookbackHours) {

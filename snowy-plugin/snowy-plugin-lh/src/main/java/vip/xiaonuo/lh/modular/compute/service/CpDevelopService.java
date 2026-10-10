@@ -487,7 +487,9 @@ public class CpDevelopService {
         releaseMapper.insert(row);
 
         openMrAndTicket(row, script, user);
-        if (row.getPrNumber() == null && giteaClient.enabled()) {
+        // 仅当 require-mr-merge=true 时，开 PR 失败硬阻断建单；local 关掉门禁后允许无 PR 继续走发布
+        boolean requireMr = lhProperties.getCompute() == null || lhProperties.getCompute().isRequireMrMerge();
+        if (requireMr && row.getPrNumber() == null && giteaClient.enabled()) {
             throw new CommonException("Gitea 开 PR 失败（分支已创建但无合并请求）。请检查 Gitea 权限/prod 分支后重试，或打开发布单查看详情。"
                     + (StrUtil.isNotBlank(row.getPrUrl()) ? "" : ""));
         }

@@ -25,6 +25,7 @@ import vip.xiaonuo.lh.core.engine.DsClient;
 import vip.xiaonuo.lh.core.engine.DataxClient;
 import vip.xiaonuo.lh.core.engine.FlinkClient;
 import vip.xiaonuo.lh.core.engine.GravitinoClient;
+import vip.xiaonuo.lh.core.engine.GravitinoSchemaCache;
 import vip.xiaonuo.lh.core.engine.MarquezClient;
 import vip.xiaonuo.lh.core.engine.OpenMetadataClient;
 import vip.xiaonuo.lh.core.engine.SparkClient;
@@ -55,6 +56,8 @@ public class LhEngineController {
     private MarquezClient marquezClient;
     @Resource
     private GravitinoClient gravitinoClient;
+    @Resource
+    private GravitinoSchemaCache gravitinoSchemaCache;
 
     private static void requireLogin() {
         LhLoginUsers.requireUser();
@@ -94,6 +97,13 @@ public class LhEngineController {
                 marquezClient.health(),
                 gravitinoClient.health()
         ));
+    }
+
+    @Operation(summary = "Gravitino 只读 schema 缓存水位（§23 读降级）")
+    @GetMapping("/lh/engine/gravitino/schema-cache")
+    public CommonResult<Map<String, Object>> gravitinoSchemaCache() {
+        requireLogin();
+        return CommonResult.data(gravitinoSchemaCache.stats());
     }
 
     @Operation(summary = "Flink 提交 JAR（soft-fail）")

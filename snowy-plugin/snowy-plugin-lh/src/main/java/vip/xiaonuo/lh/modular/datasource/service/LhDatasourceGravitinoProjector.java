@@ -17,6 +17,7 @@ import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import vip.xiaonuo.lh.config.LhProperties;
+import vip.xiaonuo.lh.core.engine.GravitinoAvailability;
 import vip.xiaonuo.lh.core.engine.GravitinoClient;
 import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
@@ -45,6 +46,8 @@ public class LhDatasourceGravitinoProjector {
     @Resource
     private GravitinoClient gravitinoClient;
     @Resource
+    private GravitinoAvailability gravitinoAvailability;
+    @Resource
     private LhProperties lhProperties;
     @Resource
     private LhVaultClient vaultClient;
@@ -66,6 +69,8 @@ public class LhDatasourceGravitinoProjector {
             out.put("gravSupported", false);
             return out;
         }
+        // Grav DOWN：禁止新建/更新 Catalog 投影（§23）
+        gravitinoAvailability.requireUpForRegister("投影数据源到 Catalog");
         ProviderSpec p = spec.get();
         String metalake = lhProperties.getGravitino().getMetalake();
         String catalogName = catalogNameOf(ds);

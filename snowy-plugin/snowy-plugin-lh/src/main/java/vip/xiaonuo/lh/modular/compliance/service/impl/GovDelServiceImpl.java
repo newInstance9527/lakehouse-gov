@@ -13,8 +13,10 @@ import vip.xiaonuo.auth.core.pojo.SaBaseLoginUser;
 import vip.xiaonuo.auth.core.util.StpLoginUserUtil;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.modular.apply.entity.ApplyTicket;
+import vip.xiaonuo.lh.modular.apply.mapper.ApplyTicketMapper;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketCreateParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.apply.service.impl.ApplyTicketServiceImpl;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelEvidence;
@@ -23,6 +25,7 @@ import vip.xiaonuo.lh.modular.compliance.entity.GovDelHold;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelRequest;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelSubjectDek;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelSubjectMap;
+import vip.xiaonuo.lh.modular.compliance.entity.GovDelSuppression;
 import vip.xiaonuo.lh.modular.compliance.entity.GovDelTarget;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelEvidenceMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelExecMapper;
@@ -30,12 +33,14 @@ import vip.xiaonuo.lh.modular.compliance.mapper.GovDelHoldMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelRequestMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSubjectDekMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSubjectMapMapper;
+import vip.xiaonuo.lh.modular.compliance.mapper.GovDelSuppressionMapper;
 import vip.xiaonuo.lh.modular.compliance.mapper.GovDelTargetMapper;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelActionParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelBackfillGateParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelDekRegisterParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelEvidenceDownloadParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelExportGateParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelExportReceiptParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelHoldParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelIntakeParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelPlanEditParam;
@@ -44,6 +49,7 @@ import vip.xiaonuo.lh.modular.compliance.param.GovDelRequestPageParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRestrictParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelRevealParam;
 import vip.xiaonuo.lh.modular.compliance.param.GovDelSubjectMapUpsertParam;
+import vip.xiaonuo.lh.modular.compliance.param.GovDelSuppressionUpsertParam;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelRequestVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelSubjectMapVo;
 import vip.xiaonuo.lh.modular.compliance.result.GovDelTargetVo;
@@ -53,6 +59,8 @@ import vip.xiaonuo.lh.core.engine.ClickHouseClient;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.core.vault.LhVaultPaths;
+import vip.xiaonuo.lh.core.engine.NightingaleClient;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelAiKbPurgeSupport;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCkSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelCryptoShredSupport;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
@@ -60,7 +68,9 @@ import vip.xiaonuo.lh.modular.compliance.support.GovDelEvidenceObjectStore;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIcebergSql;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelIntakeSignature;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelObjectPurgeExecutor;
+import vip.xiaonuo.lh.modular.compliance.support.GovDelRestrictSupport;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelSinkExecutor;
+import vip.xiaonuo.lh.modular.observability.service.LhObsSpanService;
 import vip.xiaonuo.lh.modular.lifecycle.param.GovLcTableActionParam;
 import vip.xiaonuo.lh.modular.lifecycle.result.GovLcRunVo;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcService;
@@ -95,6 +105,12 @@ public class GovDelServiceImpl implements GovDelService {
     private static final String WS_DEFAULT = "default";
     private static final String NOT_DELETE = "NOT_DELETE";
     private static final int SLA_WORK_DAYS = 15;
+    /** 剩余 ≤1/3 SLA（工作日）→ 黄灯 */
+    private static final int SLA_WARN_DAYS = Math.max(1, SLA_WORK_DAYS / 3);
+    /** 出湖回执超期（天）：无回执可登记 timeout_statement */
+    private static final int EXPORT_RECEIPT_TIMEOUT_DAYS = 14;
+    private static final Set<String> SUPPRESSION_CARRIERS = Set.of("iceberg", "ck", "source", "sink");
+    private static final long SLA_ALERT_DEDUP_MS = 24L * 3600_000L;
     private static final int BACKUP_OBSERVE_DAYS = 30;
     private static final int RESTRICT_REVIEW_DAYS = 90;
 
@@ -182,6 +198,8 @@ public class GovDelServiceImpl implements GovDelService {
     @Resource
     private GovDelHoldMapper holdMapper;
     @Resource
+    private GovDelSuppressionMapper suppressionMapper;
+    @Resource
     private GovDelSubjectMapMapper subjectMapMapper;
     @Resource
     private GovAssetMapper govAssetMapper;
@@ -203,6 +221,16 @@ public class GovDelServiceImpl implements GovDelService {
     private GovDelObjectPurgeExecutor objectPurgeExecutor;
     @Resource
     private GovDelProcessingGate processingGate;
+    @Resource
+    private GovDelRestrictSupport restrictSupport;
+    @Resource
+    private GovDelAiKbPurgeSupport aiKbPurgeSupport;
+    @Resource
+    private LhObsSpanService lhObsSpanService;
+    @Resource
+    private NightingaleClient nightingaleClient;
+    @Resource
+    private ApplyTicketMapper applyTicketMapper;
     @Resource
     private GovDelSubjectDekMapper subjectDekMapper;
     @Resource
@@ -227,7 +255,7 @@ public class GovDelServiceImpl implements GovDelService {
                 && r.getDeadline() != null && r.getDeadline().before(now)).count();
         long dueSoon = all.stream().filter(r -> isOpen(r.getStatus())
                 && r.getDeadline() != null && !r.getDeadline().before(now)
-                && daysBetween(now, r.getDeadline()) <= 3).count();
+                && daysBetween(now, r.getDeadline()) <= SLA_WARN_DAYS).count();
         long restricted = all.stream().filter(r -> "restricted".equals(r.getStatus())).count();
         long pendingDestroy = all.stream().filter(r -> r.getDestroyAfter() != null
                 && !"destroyed".equals(r.getStatus())).count();
@@ -241,12 +269,15 @@ public class GovDelServiceImpl implements GovDelService {
         out.put("executing", byStatus.getOrDefault("executing", 0L) + byStatus.getOrDefault("scheduled", 0L));
         out.put("overdue", overdue);
         out.put("dueSoon", dueSoon);
+        out.put("slaWarn", dueSoon);
+        out.put("slaOverdue", overdue);
         out.put("restricted", restricted);
         out.put("pendingDestroy", pendingDestroy);
         out.put("coverage", coverage(workspace));
         out.put("sla", Map.of(
                 "ackHours", 24,
                 "execWorkDays", SLA_WORK_DAYS,
+                "warnDays", SLA_WARN_DAYS,
                 "backupObserveDays", BACKUP_OBSERVE_DAYS,
                 "restrictReviewDays", RESTRICT_REVIEW_DAYS
         ));
@@ -721,6 +752,21 @@ public class GovDelServiceImpl implements GovDelService {
                         failed++;
                     }
                 }
+                case "ai", "platform" -> {
+                    if ("platform".equals(t.getCarrier())
+                            && !StrUtil.blankToDefault(t.getObjectFqn(), "").toLowerCase(Locale.ROOT)
+                            .contains("ai")
+                            && !StrUtil.blankToDefault(t.getObjectFqn(), "").toLowerCase(Locale.ROOT)
+                            .contains("kb")) {
+                        logExec(req, t, "platform.skip", "skipped", execKey, null,
+                                "平台载体未接 AI/KB 擦除，跳过");
+                        pending++;
+                    } else if (executeAiKbPurge(req, t, execKey)) {
+                        objectDone++;
+                    } else {
+                        failed++;
+                    }
+                }
                 case "export" -> {
                     finishTarget(req, t, "pending_receipt", "export.notify",
                             "已向副本持有方发出删除请求，等待回执归档", null, execKey);
@@ -1029,6 +1075,34 @@ public class GovDelServiceImpl implements GovDelService {
     }
 
     /**
+     * AI 对话 / 知识库按主体擦除（明文仅从 Vault 取用，不落库）。
+     */
+    private boolean executeAiKbPurge(GovDelRequest req, GovDelTarget t, String execKey) {
+        try {
+            String plain = loadSubjectPlain(req);
+            Map<String, Object> r = aiKbPurgeSupport.purge(
+                    req.getWs(), t.getObjectFqn(), req.getSubjectIdHash(), plain);
+            boolean ok = !Boolean.FALSE.equals(r.get("ok"));
+            t.setStatus(ok ? "done" : "failed");
+            t.setRowsVerified(0L);
+            t.setEngineRef("ai-kb:" + (ok ? "purged" : "fail"));
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "ai.purge", ok ? "success" : "failed", execKey, t.getEngineRef(),
+                    StrUtil.maxLength(StrUtil.blankToDefault((String) r.get("message"), JSONUtil.toJsonStr(r)), 500));
+            addEvidence(req, "ai", "AI/知识库擦除 " + t.getObjectFqn(), JSONUtil.toJsonStr(r));
+            return ok;
+        } catch (Exception e) {
+            t.setStatus("failed");
+            t.setUpdateTime(new Date());
+            targetMapper.updateById(t);
+            logExec(req, t, "ai.purge", "failed", execKey, null,
+                    StrUtil.maxLength(StrUtil.blankToDefault(e.getMessage(), "AI/KB 擦除失败"), 500));
+            return false;
+        }
+    }
+
+    /**
      * 独立 DAG 成功后 Trino COUNT=0 才标 done（expire 已在 DAG 内完成）。
      */
     private String advanceIceberg(GovDelRequest req, GovDelTarget t) {
@@ -1104,6 +1178,7 @@ public class GovDelServiceImpl implements GovDelService {
         if (remaining == 0) {
             t.setStatus("done");
             targetMapper.updateById(t);
+            ensureSuppression(req, t, "execute");
             logExec(req, t, "iceberg.verify", "success", null, dagRunId,
                     "反查 0 行，job.compliance.delete.iceberg 已完成");
             return "done";
@@ -1152,6 +1227,7 @@ public class GovDelServiceImpl implements GovDelService {
         if (remaining == 0) {
             t.setStatus("done");
             targetMapper.updateById(t);
+            ensureSuppression(req, t, "execute");
             logExec(req, t, "ck.verify", "success", null, mutationId,
                     "mutation is_done 且反查 0 行");
             return "done";
@@ -1247,6 +1323,7 @@ public class GovDelServiceImpl implements GovDelService {
         if (remaining == 0) {
             t.setStatus("done");
             targetMapper.updateById(t);
+            ensureSuppression(req, t, "execute");
             logExec(req, t, "sink.verify", "success", null, t.getEngineRef(), "反查 0 行");
             return "done";
         }
@@ -1389,6 +1466,9 @@ public class GovDelServiceImpl implements GovDelService {
         t.setUpdateTime(now);
         targetMapper.updateById(t);
         logExec(req, t, step, "pending_receipt".equals(status) ? "queued" : "success", execKey, engineRef, detail);
+        if ("done".equals(status)) {
+            ensureSuppression(req, t, "execute");
+        }
     }
 
     @Override
@@ -1522,14 +1602,29 @@ public class GovDelServiceImpl implements GovDelService {
             req.setUpdateTime(now);
             requestMapper.updateById(req);
         }
+        Map<String, Object> security = Map.of();
+        try {
+            security = restrictSupport.applySecurity(req.getWs(), hit);
+        } catch (Exception e) {
+            security = Map.of("ok", false, "message", StrUtil.blankToDefault(e.getMessage(), "security soft-fail"));
+            logExec(req, null, "restrict.security", "warn", null, null,
+                    "安全联动 soft-fail：" + StrUtil.maxLength(String.valueOf(security.get("message")), 200));
+        }
+        int grants = security.get("grantsRevoked") instanceof Number n ? n.intValue() : 0;
+        int masks = security.get("masksUpserted") instanceof Number n ? n.intValue() : 0;
+        int gravOk = security.get("gravRevoked") instanceof Number n ? n.intValue() : 0;
+        int gravFail = security.get("gravFailed") instanceof Number n ? n.intValue() : 0;
         logExec(req, null, "restrict.apply", "success", null, null,
-                "限制处理 " + hit.size() + " 项：撤 ACL + 强制脱敏 + 禁出湖/API/训练；复查 " + review);
-        addEvidence(req, "statement", "限制处理说明", JSONUtil.toJsonStr(Map.of(
-                "reason", param.getReason(),
-                "targets", hit.size(),
-                "reviewAt", String.valueOf(review),
-                "legalBasis", "个人信息保护法 §47：删除难以实现的，停止除存储与必要安全保护之外的处理"
-        )));
+                "限制处理 " + hit.size() + " 项：撤 grant " + grants + " · mask " + masks
+                        + " · Grav revoke " + gravOk + (gravFail > 0 ? "（soft-fail " + gravFail + "）" : "")
+                        + " · 禁出湖/API/训练门禁；复查 " + review);
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("reason", param.getReason());
+        evidence.put("targets", hit.size());
+        evidence.put("reviewAt", String.valueOf(review));
+        evidence.put("legalBasis", "个人信息保护法 §47：删除难以实现的，停止除存储与必要安全保护之外的处理");
+        evidence.put("security", security);
+        addEvidence(req, "statement", "限制处理说明", JSONUtil.toJsonStr(evidence));
         return detail(req.getId());
     }
 
@@ -1898,8 +1993,22 @@ public class GovDelServiceImpl implements GovDelService {
         list.add(checkItem("删除计划", !targets.isEmpty(), targets.size() + " 个载体"));
         list.add(checkItem("执行流水", true, "gov_del_exec"));
         list.add(checkItem("残留验证", req.getVerifiedAt() != null, String.valueOf(req.getVerifiedAt())));
-        list.add(checkItem("外部回执", targets.stream().noneMatch(t -> "pending_receipt".equals(t.getStatus())),
-                "出湖副本回执"));
+        long pendingExport = targets.stream().filter(t -> "pending_receipt".equals(t.getStatus())).count();
+        long overdueExport = targets.stream()
+                .filter(t -> "pending_receipt".equals(t.getStatus()))
+                .filter(t -> {
+                    Date at = t.getUpdateTime() != null ? t.getUpdateTime() : t.getCreateTime();
+                    if (at == null) {
+                        return false;
+                    }
+                    return System.currentTimeMillis() - at.getTime()
+                            >= EXPORT_RECEIPT_TIMEOUT_DAYS * 24L * 3600_000L;
+                })
+                .count();
+        list.add(checkItem("外部回执", pendingExport == 0,
+                overdueExport > 0
+                        ? "出湖待回执超期 " + overdueExport + " 项，可登记 timeout_statement"
+                        : (pendingExport > 0 ? "待回执 " + pendingExport + " 项" : "出湖副本回执")));
         list.add(checkItem("限制处理说明",
                 targets.stream().noneMatch(t -> "restricted".equals(t.getStatus())) || kinds.contains("statement"),
                 "个保法 §47"));
@@ -1995,6 +2104,7 @@ public class GovDelServiceImpl implements GovDelService {
             mapped.add(shortName(m.getObjectFqn()));
         }
         List<String> gaps = new ArrayList<>();
+        List<Map<String, Object>> gapItems = new ArrayList<>();
         for (GovAsset a : sensitive) {
             String code = StrUtil.blankToDefault(a.getAssetCode(), a.getName());
             if (StrUtil.isBlank(code)) {
@@ -2002,6 +2112,13 @@ public class GovDelServiceImpl implements GovDelService {
             }
             if (!mapped.contains(code) && !mapped.contains(shortName(code))) {
                 gaps.add(code);
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("fqn", code);
+                item.put("assetId", a.getId());
+                item.put("techOwner", a.getTechOwner());
+                item.put("bizOwner", a.getBizOwner());
+                item.put("sensitivity", a.getSensitivity());
+                gapItems.add(item);
             }
         }
         int total = sensitive.size();
@@ -2012,6 +2129,7 @@ public class GovDelServiceImpl implements GovDelService {
         out.put("gapCount", gaps.size());
         out.put("coveragePct", total == 0 ? 100 : Math.round(covered * 100.0 / total));
         out.put("gapTables", gaps.stream().limit(50).toList());
+        out.put("gapItems", gapItems.stream().limit(50).toList());
         return out;
     }
 
@@ -2026,6 +2144,314 @@ public class GovDelServiceImpl implements GovDelService {
     @Override
     public Map<String, Object> exportGateCheck(GovDelExportGateParam param) {
         return processingGate.exportCheck(param.getExportTable());
+    }
+
+    @Override
+    public Map<String, Object> scanSlaAlerts(String ws) {
+        QueryWrapper<GovDelRequest> qw = new QueryWrapper<GovDelRequest>().checkSqlInjection();
+        qw.lambda()
+                .eq(GovDelRequest::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(ws), GovDelRequest::getWs, wsOrDefault(ws))
+                .isNotNull(GovDelRequest::getDeadline);
+        List<GovDelRequest> all = requestMapper.selectList(qw);
+        Date now = new Date();
+        int warnHit = 0;
+        int overdueHit = 0;
+        int warnPushed = 0;
+        int overduePushed = 0;
+        int skipped = 0;
+        for (GovDelRequest r : all) {
+            if (!isOpen(r.getStatus()) || r.getDeadline() == null) {
+                continue;
+            }
+            long left = daysBetween(now, r.getDeadline());
+            String level;
+            if (left < 0) {
+                level = "overdue";
+                overdueHit++;
+            } else if (left <= SLA_WARN_DAYS) {
+                level = "warn";
+                warnHit++;
+            } else {
+                continue;
+            }
+            String step = "sla.alert." + level;
+            if (recentSlaAlert(r.getId(), step)) {
+                skipped++;
+                continue;
+            }
+            String sev = "overdue".equals(level) ? "P0" : "P1";
+            Map<String, Object> evt = new LinkedHashMap<>();
+            evt.put("title", "overdue".equals(level) ? "合规删除超期" : "合规删除 SLA 黄灯");
+            evt.put("message", r.getReqNo() + " " + statusLabel(r.getStatus())
+                    + " · 截止 " + r.getDeadline()
+                    + " · " + ("overdue".equals(level) ? "已超期 " + (-left) + " 天" : "剩余 " + left + " 天（≤1/3 SLA）")
+                    + " · 主体 " + StrUtil.blankToDefault(r.getSubjectMasked(), "—"));
+            evt.put("severity", sev);
+            evt.put("source", "compliance-sla");
+            evt.put("opsPath", "/compliance?reqNo=" + r.getReqNo());
+            evt.put("labels", Map.of(
+                    "reqNo", StrUtil.blankToDefault(r.getReqNo(), ""),
+                    "ws", StrUtil.blankToDefault(r.getWs(), "default"),
+                    "slaLevel", level,
+                    "daysLeft", String.valueOf(left)));
+            boolean pushed = false;
+            try {
+                Map<String, Object> push = nightingaleClient.pushEvent(evt);
+                pushed = Boolean.TRUE.equals(push.get("pushed"));
+            } catch (Exception ignored) {
+                // soft-fail
+            }
+            logExec(r, null, step, pushed ? "success" : "warn", null, null,
+                    sev + " 夜莺" + (pushed ? "已推" : "未推/跳过") + " daysLeft=" + left);
+            if ("overdue".equals(level)) {
+                if (pushed) {
+                    overduePushed++;
+                }
+            } else if (pushed) {
+                warnPushed++;
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("warnHit", warnHit);
+        out.put("overdueHit", overdueHit);
+        out.put("warnPushed", warnPushed);
+        out.put("overduePushed", overduePushed);
+        out.put("skippedDedup", skipped);
+        out.put("warnDays", SLA_WARN_DAYS);
+        out.put("execWorkDays", SLA_WORK_DAYS);
+        return out;
+    }
+
+    private boolean recentSlaAlert(String reqId, String step) {
+        Date since = new Date(System.currentTimeMillis() - SLA_ALERT_DEDUP_MS);
+        Long n = execMapper.selectCount(new QueryWrapper<GovDelExec>().lambda()
+                .eq(GovDelExec::getReqId, reqId)
+                .eq(GovDelExec::getStep, step)
+                .eq(GovDelExec::getDeleteFlag, NOT_DELETE)
+                .ge(GovDelExec::getCreateTime, since));
+        return n != null && n > 0;
+    }
+
+    @Override
+    public List<Map<String, Object>> listSuppressions(
+            String ws, String subjectIdHash, String objectFqn, Boolean activeOnly) {
+        Date now = new Date();
+        QueryWrapper<GovDelSuppression> qw = new QueryWrapper<GovDelSuppression>().checkSqlInjection();
+        qw.lambda()
+                .eq(GovDelSuppression::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(ws), GovDelSuppression::getWs, wsOrDefault(ws))
+                .eq(StrUtil.isNotBlank(subjectIdHash), GovDelSuppression::getSubjectIdHash, StrUtil.trim(subjectIdHash))
+                .eq(StrUtil.isNotBlank(objectFqn), GovDelSuppression::getObjectFqn, StrUtil.trim(objectFqn))
+                .orderByDesc(GovDelSuppression::getEffectiveAt);
+        if (Boolean.TRUE.equals(activeOnly) || activeOnly == null) {
+            qw.lambda()
+                    .eq(GovDelSuppression::getStatus, "active")
+                    .le(GovDelSuppression::getEffectiveAt, now)
+                    .and(w -> w.isNull(GovDelSuppression::getExpiresAt)
+                            .or().gt(GovDelSuppression::getExpiresAt, now));
+        }
+        return suppressionMapper.selectList(qw).stream().map(this::toSuppressionMap).toList();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> upsertSuppression(GovDelSuppressionUpsertParam param) {
+        if (param == null) {
+            throw new CommonException("抑制名单参数不能为空");
+        }
+        String hash = StrUtil.trim(param.getSubjectIdHash());
+        String subjectType = "user";
+        String reqId = null;
+        String workspace = wsOrDefault(param.getWs());
+        if (StrUtil.isNotBlank(param.getReqId())) {
+            GovDelRequest req = requireRequest(param.getReqId());
+            hash = req.getSubjectIdHash();
+            subjectType = StrUtil.blankToDefault(req.getSubjectType(), "user");
+            reqId = req.getId();
+            workspace = StrUtil.blankToDefault(req.getWs(), workspace);
+        }
+        if (StrUtil.isBlank(hash)) {
+            throw new CommonException("须提供 subjectIdHash 或 reqId");
+        }
+        if (StrUtil.isNotBlank(param.getSubjectType())) {
+            subjectType = param.getSubjectType().trim().toLowerCase(Locale.ROOT);
+        }
+        String fqn = StrUtil.blankToDefault(StrUtil.trim(param.getObjectFqn()), "*");
+        if (fqn.isEmpty()) {
+            fqn = "*";
+        }
+        Date now = new Date();
+        Date effective = param.getEffectiveAt() != null ? param.getEffectiveAt() : now;
+        String status = StrUtil.blankToDefault(StrUtil.trim(param.getStatus()), "active");
+        GovDelSuppression exist = suppressionMapper.selectOne(new QueryWrapper<GovDelSuppression>().lambda()
+                .eq(GovDelSuppression::getWs, workspace)
+                .eq(GovDelSuppression::getSubjectIdHash, hash)
+                .eq(GovDelSuppression::getObjectFqn, fqn)
+                .eq(GovDelSuppression::getDeleteFlag, NOT_DELETE)
+                .last("LIMIT 1"));
+        if (exist != null) {
+            exist.setStatus(status);
+            exist.setSubjectType(subjectType);
+            exist.setReqId(StrUtil.blankToDefault(reqId, exist.getReqId()));
+            exist.setEffectiveAt(effective);
+            exist.setExpiresAt(param.getExpiresAt());
+            exist.setSource(StrUtil.blankToDefault(param.getSource(), "manual"));
+            exist.setRemark(param.getRemark());
+            exist.setRevision(nvlInt(exist.getRevision()) + 1);
+            exist.setUpdateTime(now);
+            suppressionMapper.updateById(exist);
+            return toSuppressionMap(exist);
+        }
+        GovDelSuppression s = new GovDelSuppression();
+        s.setId(IdUtil.getSnowflakeNextIdStr());
+        s.setRevision(1);
+        s.setStatus(status);
+        s.setWs(workspace);
+        s.setReqId(reqId);
+        s.setSubjectType(subjectType);
+        s.setSubjectIdHash(hash);
+        s.setObjectFqn(fqn);
+        s.setEffectiveAt(effective);
+        s.setExpiresAt(param.getExpiresAt());
+        s.setSource(StrUtil.blankToDefault(param.getSource(), "manual"));
+        s.setRemark(param.getRemark());
+        s.setDeleteFlag(NOT_DELETE);
+        s.setCreateTime(now);
+        s.setUpdateTime(now);
+        suppressionMapper.insert(s);
+        return toSuppressionMap(s);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GovDelRequestVo registerExportReceipt(GovDelExportReceiptParam param) {
+        GovDelRequest req = requireRequest(param.getReqId());
+        String outcome = StrUtil.blankToDefault(param.getOutcome(), "").trim().toLowerCase(Locale.ROOT);
+        if (!Set.of("received", "residual_statement", "timeout_statement").contains(outcome)) {
+            throw new CommonException("outcome 须为 received / residual_statement / timeout_statement");
+        }
+        List<GovDelTarget> targets = listTargets(req.getId());
+        GovDelTarget hit = null;
+        if (StrUtil.isNotBlank(param.getTargetId())) {
+            hit = targets.stream()
+                    .filter(t -> param.getTargetId().equals(t.getId()))
+                    .findFirst().orElse(null);
+        } else if (StrUtil.isNotBlank(param.getObjectFqn())) {
+            String want = param.getObjectFqn().trim();
+            hit = targets.stream()
+                    .filter(t -> "export".equals(t.getCarrier())
+                            && want.equalsIgnoreCase(StrUtil.blankToDefault(t.getObjectFqn(), "")))
+                    .findFirst().orElse(null);
+        } else {
+            List<GovDelTarget> pending = targets.stream()
+                    .filter(t -> "export".equals(t.getCarrier())
+                            && "pending_receipt".equals(t.getStatus()))
+                    .toList();
+            if (pending.size() == 1) {
+                hit = pending.get(0);
+            } else if (pending.isEmpty()) {
+                throw new CommonException("无待回执的出湖载体");
+            } else {
+                throw new CommonException("存在多个待回执出湖项，请指定 targetId 或 objectFqn");
+            }
+        }
+        if (hit == null) {
+            throw new CommonException("未找到出湖载体");
+        }
+        if (!"export".equals(hit.getCarrier())) {
+            throw new CommonException("目标不是出湖载体（carrier=export）");
+        }
+        if (!"pending_receipt".equals(hit.getStatus()) && !"done".equals(hit.getStatus())) {
+            throw new CommonException("出湖项状态不可登记回执：" + hit.getStatus());
+        }
+        if ("timeout_statement".equals(outcome)) {
+            Date created = hit.getUpdateTime() != null ? hit.getUpdateTime() : hit.getCreateTime();
+            if (created != null) {
+                long ageMs = System.currentTimeMillis() - created.getTime();
+                if (ageMs < EXPORT_RECEIPT_TIMEOUT_DAYS * 24L * 3600_000L) {
+                    throw new CommonException("未满 " + EXPORT_RECEIPT_TIMEOUT_DAYS
+                            + " 天，请用 residual_statement 主动声明或等待超期");
+                }
+            }
+        }
+        if ("residual_statement".equals(outcome) && StrUtil.isBlank(param.getNote())) {
+            throw new CommonException("书面残留声明须填写 note");
+        }
+        Date now = new Date();
+        hit.setStatus("done");
+        hit.setUpdateTime(now);
+        targetMapper.updateById(hit);
+
+        String kind = "received".equals(outcome) ? "receipt" : "statement";
+        String title = switch (outcome) {
+            case "received" -> "出湖副本删除回执";
+            case "timeout_statement" -> "出湖超期无回执残留声明";
+            default -> "出湖副本书面残留声明";
+        };
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("outcome", outcome);
+        body.put("targetId", hit.getId());
+        body.put("objectFqn", hit.getObjectFqn());
+        body.put("receiptRef", param.getReceiptRef());
+        body.put("partner", param.getPartner());
+        body.put("note", StrUtil.blankToDefault(param.getNote(),
+                "timeout_statement".equals(outcome)
+                        ? "超期 " + EXPORT_RECEIPT_TIMEOUT_DAYS + " 天无回执，书面声明副本可能残留于合作方"
+                        : ""));
+        body.put("at", String.valueOf(now));
+        addEvidence(req, kind, title, JSONUtil.toJsonStr(body));
+        logExec(req, hit, "export.receipt", "success", null, param.getReceiptRef(),
+                outcome + (StrUtil.isNotBlank(param.getPartner()) ? " · " + param.getPartner() : ""));
+        return detail(req.getId());
+    }
+
+    /**
+     * 湖内 / 回流载体标 done 后写入抑制名单，防 CDC / 回算复活。
+     */
+    private void ensureSuppression(GovDelRequest req, GovDelTarget t, String source) {
+        if (req == null || t == null || StrUtil.isBlank(req.getSubjectIdHash())) {
+            return;
+        }
+        if (!SUPPRESSION_CARRIERS.contains(StrUtil.blankToDefault(t.getCarrier(), ""))) {
+            return;
+        }
+        String fqn = StrUtil.blankToDefault(t.getObjectFqn(), "*").trim();
+        if (fqn.isEmpty()) {
+            fqn = "*";
+        }
+        try {
+            GovDelSuppressionUpsertParam p = new GovDelSuppressionUpsertParam();
+            p.setWs(req.getWs());
+            p.setReqId(req.getId());
+            p.setSubjectIdHash(req.getSubjectIdHash());
+            p.setSubjectType(req.getSubjectType());
+            p.setObjectFqn(fqn);
+            p.setSource(StrUtil.blankToDefault(source, "execute"));
+            p.setStatus("active");
+            p.setRemark("auto from " + t.getCarrier() + " done");
+            upsertSuppression(p);
+        } catch (Exception e) {
+            logExec(req, t, "suppression.upsert", "warn", null, null,
+                    "抑制名单写入 soft-fail：" + StrUtil.maxLength(
+                            StrUtil.blankToDefault(e.getMessage(), "error"), 200));
+        }
+    }
+
+    private Map<String, Object> toSuppressionMap(GovDelSuppression s) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", s.getId());
+        m.put("ws", s.getWs());
+        m.put("status", s.getStatus());
+        m.put("reqId", s.getReqId());
+        m.put("subjectType", s.getSubjectType());
+        m.put("subjectIdHash", s.getSubjectIdHash());
+        m.put("objectFqn", s.getObjectFqn());
+        m.put("effectiveAt", s.getEffectiveAt());
+        m.put("expiresAt", s.getExpiresAt());
+        m.put("source", s.getSource());
+        m.put("remark", s.getRemark());
+        return m;
     }
 
     @Override
@@ -2307,11 +2733,114 @@ public class GovDelServiceImpl implements GovDelService {
         }
 
         int lineageAdded = expandLineageDownstream(req, seedTables, mapByFqn, keepKeys, confirmedFqns);
+        int exportAdded = expandExportCopies(req, seedTables, keepKeys);
+        int aiKbAdded = expandAiKbCarriers(req, keepKeys);
 
         Map<String, Object> cov = coverage(req.getWs());
-        logExec(req, null, "plan.assess", created + lineageAdded > 0 ? "success" : "warn", null, null,
+        logExec(req, null, "plan.assess", created + lineageAdded + exportAdded + aiKbAdded > 0 ? "success" : "warn", null, null,
                 "命中主体索引 " + created + " 项；lineage.expand 下游 +" + lineageAdded
+                        + "；出湖副本 +" + exportAdded
+                        + "；AI/KB +" + aiKbAdded
                         + "；高敏资产覆盖率 " + cov.get("coveragePct") + "%" + gapNote(cov));
+    }
+
+    /** 评估时确保 AI 会话与知识库载体在计划中（主体索引未登记时补默认项）。 */
+    private int expandAiKbCarriers(GovDelRequest req, Set<String> keepKeys) {
+        int added = 0;
+        String[][] defaults = {
+                {"ai", "gov_ai_session", "对话历史按主体擦除"},
+                {"ai", "gov_kb_entry", "知识库原文 + Milvus 向量擦除"},
+        };
+        for (String[] d : defaults) {
+            String key = d[0] + "|" + d[1];
+            if (keepKeys.contains(key)) {
+                continue;
+            }
+            // 已有等价对象（如 gov_ai_kb_chunk）则跳过同类
+            String hint = d[1].contains("kb") ? "kb" : "session";
+            boolean similar = keepKeys.stream().anyMatch(k ->
+                    k.startsWith("ai|") && k.toLowerCase(Locale.ROOT).contains(hint));
+            if (similar) {
+                continue;
+            }
+            GovDelTarget t = newTarget(req, d[0], d[1], "all", "purge", null);
+            t.setOwner("ai-owner");
+            t.setSensitivity("秘密");
+            t.setLineageConfidence("explicit");
+            t.setLineageConfirmed(true);
+            t.setHasSubjectCol(true);
+            t.setRemark(d[2]);
+            targetMapper.insert(t);
+            keepKeys.add(key);
+            added++;
+        }
+        if (added > 0) {
+            logExec(req, null, "ai.expand", "success", null, null,
+                    "纳入 AI/知识库载体 " + added + " 项");
+        }
+        return added;
+    }
+
+    /**
+     * 已批准的出湖申请（lake_export）命中主体相关表时，纳入 carrier=export 待回执项。
+     */
+    private int expandExportCopies(GovDelRequest req, List<String> seedTables, Set<String> keepKeys) {
+        if (seedTables == null || seedTables.isEmpty()) {
+            return 0;
+        }
+        Set<String> seeds = new LinkedHashSet<>();
+        for (String s : seedTables) {
+            if (StrUtil.isBlank(s)) {
+                continue;
+            }
+            seeds.add(s.trim().toLowerCase(Locale.ROOT));
+            seeds.add(shortName(s).toLowerCase(Locale.ROOT));
+        }
+        List<ApplyTicket> tickets = applyTicketMapper.selectList(new QueryWrapper<ApplyTicket>().lambda()
+                .eq(ApplyTicket::getTicketType, ApplyTicketServiceImpl.TYPE_LAKE_EXPORT)
+                .eq(ApplyTicket::getStatus, "approved")
+                .eq(ApplyTicket::getDeleteFlag, NOT_DELETE)
+                .orderByDesc(ApplyTicket::getApprovedAt)
+                .last("LIMIT 200"));
+        int added = 0;
+        Date now = new Date();
+        for (ApplyTicket ticket : tickets) {
+            if (ticket.getExpiresAt() != null && ticket.getExpiresAt().before(now)) {
+                continue;
+            }
+            cn.hutool.json.JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(ticket.getPayload(), "{}"));
+            String exportTable = StrUtil.trim(payload.getStr("exportTable"));
+            if (StrUtil.isBlank(exportTable)) {
+                continue;
+            }
+            String low = exportTable.toLowerCase(Locale.ROOT);
+            if (!seeds.contains(low) && !seeds.contains(shortName(exportTable).toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            String objectRef = "export:" + ticket.getTicketNo() + ":" + exportTable;
+            String key = "export|" + objectRef;
+            if (keepKeys.contains(key)) {
+                continue;
+            }
+            String target = StrUtil.blankToDefault(payload.getStr("exportTarget"), payload.getStr("target"));
+            GovDelTarget t = newTarget(req, "export", objectRef,
+                    "lake_export " + ticket.getTicketNo()
+                            + (StrUtil.isNotBlank(target) ? " → " + target : ""),
+                    "notify_receipt", null);
+            t.setOwner(ticket.getApplicant());
+            t.setLineageConfidence("explicit");
+            t.setLineageConfirmed(true);
+            t.setHasSubjectCol(true);
+            t.setStatus("pending_receipt");
+            targetMapper.insert(t);
+            keepKeys.add(key);
+            added++;
+        }
+        if (added > 0) {
+            logExec(req, null, "export.expand", "success", null, null,
+                    "纳入已批准出湖副本 " + added + " 项（待回执）");
+        }
+        return added;
     }
 
     private String gapNote(Map<String, Object> cov) {
@@ -2545,7 +3074,47 @@ public class GovDelServiceImpl implements GovDelService {
         e.setCreateTime(now);
         e.setUpdateTime(now);
         execMapper.insert(e);
+        // 链路 K：trace_id = 工单号（soft-fail）
+        try {
+            String spanStatus = switch (StrUtil.blankToDefault(status, "")) {
+                case "failed" -> "error";
+                case "warn", "skipped", "queued" -> "warn";
+                default -> "ok";
+            };
+            String attrs = JSONUtil.toJsonStr(Map.of(
+                    "reqId", StrUtil.blankToDefault(req.getId(), ""),
+                    "reqNo", StrUtil.blankToDefault(req.getReqNo(), ""),
+                    "targetId", target != null ? StrUtil.blankToDefault(target.getId(), "") : "",
+                    "carrier", target != null ? StrUtil.blankToDefault(target.getCarrier(), "") : "",
+                    "detail", StrUtil.maxLength(StrUtil.blankToDefault(detail, ""), 200)
+            ));
+            lhObsSpanService.recordComponentSpan(
+                    req.getWs(),
+                    "K",
+                    "compliance",
+                    step,
+                    spanStatus,
+                    runId,
+                    req.getId(),
+                    "error".equals(spanStatus) ? detail : null,
+                    attrs,
+                    req.getReqNo());
+        } catch (Exception ignored) {
+            // soft-fail span
+        }
         return e;
+    }
+
+    /** 从 Vault 读取主体明文（仅执行路径使用，不落库、不进列表）。 */
+    private String loadSubjectPlain(GovDelRequest req) {
+        if (req == null || StrUtil.isBlank(req.getVaultPath())) {
+            return null;
+        }
+        try {
+            return vaultClient.getString(req.getVaultPath(), "subjectId");
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private GovDelEvidence addEvidence(GovDelRequest req, String kind, String title, String content) {
@@ -2672,7 +3241,9 @@ public class GovDelServiceImpl implements GovDelService {
         if (r.getDeadline() != null) {
             long left = daysBetween(now, r.getDeadline());
             vo.setDaysLeft(left);
-            vo.setSlaLevel(!isOpen(r.getStatus()) ? "ok" : left < 0 ? "overdue" : left <= 3 ? "warn" : "ok");
+            vo.setSlaLevel(!isOpen(r.getStatus()) ? "ok"
+                    : left < 0 ? "overdue"
+                    : left <= SLA_WARN_DAYS ? "warn" : "ok");
         } else {
             vo.setSlaLevel("ok");
         }

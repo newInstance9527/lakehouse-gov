@@ -261,15 +261,33 @@ public class GovDqRuleProbeService {
             if (primary != null && StrUtil.isNotBlank(primary.getDsId())) {
                 ds = datasourceMapper.selectById(primary.getDsId());
             }
+            if (ds == null && primary != null && StrUtil.isNotBlank(primary.getDsCode())) {
+                ds = findDatasourceByIdOrCode(primary.getDsCode());
+            }
         }
 
-        // RDB → JDBC
-        if (ds != null && PreviewAdapterSupport.isJdbcSource(ds) && primary != null
-                && StrUtil.isNotBlank(primary.getObjectName())) {
+        String rawObject = StrUtil.blankToDefault(
+                primary != null ? primary.getObjectName() : null,
+                rule.getTableName());
+        // 门户 FQN 常带 ds_<id|code>.schema.table；不得当作 Trino catalog
+        PortalTableRef portalRef = parsePortalTableRef(rawObject);
+        if (ds == null && portalRef != null && StrUtil.isNotBlank(portalRef.dsKey)) {
+            ds = findDatasourceByIdOrCode(portalRef.dsKey);
+        }
+
+        // RDB → JDBC（含从 ds_* 前缀推断出的源）
+        if (ds != null && PreviewAdapterSupport.isJdbcSource(ds)) {
+            String obj = portalRef != null && StrUtil.isNotBlank(portalRef.tableFqn)
+                    ? portalRef.tableFqn
+                    : StrUtil.blankToDefault(rawObject, rule.getTableName());
+            obj = stripLeadingPortalDsSegment(obj);
+            if (StrUtil.isBlank(obj)) {
+                throw new IllegalArgumentException("JDBC 探数缺少表名（资产主链路 objectName / 规则 tableName）");
+            }
             t.engine = "jdbc";
             t.dialect = jdbcDialect(ds);
             t.vaultPath = ds.getVaultPath();
-            t.qualifiedSql = jdbcTableRef(primary.getObjectName(), ds);
+            t.qualifiedSql = jdbcTableRef(obj, ds);
             return t;
         }
 
@@ -284,7 +302,7 @@ public class GovDqRuleProbeService {
         if (asset != null && StrUtil.isNotBlank(asset.getGravAssetId())) {
             CbGravAssetRef ref = gravAssetRefMapper.selectById(asset.getGravAssetId());
             if (ref != null) {
-                if (StrUtil.isNotBlank(ref.getGravCatalog())) {
+                if (StrUtil.isNotBlank(ref.getGravCatalog()) && !isPortalDsCatalog(ref.getGravCatalog())) {
                     catalog = ref.getGravCatalog();
                 }
                 if (StrUtil.isNotBlank(ref.getGravSchema())) {
@@ -301,11 +319,15 @@ public class GovDqRuleProbeService {
             }
         }
 
-        String raw = StrUtil.blankToDefault(
-                primary != null ? primary.getObjectName() : null,
-                rule.getTableName());
+        String raw = portalRef != null && StrUtil.isNotBlank(portalRef.tableFqn)
+                ? portalRef.tableFqn
+                : stripLeadingPortalDsSegment(rawObject);
         if (StrUtil.isBlank(raw)) {
             throw new IllegalArgumentException("规则未绑定表名/资产");
+        }
+        if (portalRef != null && StrUtil.isNotBlank(portalRef.dsKey) && ds == null) {
+            throw new IllegalArgumentException("探数目标含门户数据源前缀 "
+                    + portalRef.dsKey + "，但未找到对应 JDBC/湖源；请检查资产主链路数据源");
         }
         GovDqRuleSqlBuilder.assertSafeTableToken(raw.replace("\"", "").replace("`", ""));
         String[] parts = raw.trim().split("\\.");
@@ -326,11 +348,90 @@ public class GovDqRuleProbeService {
                 schema = rule.getLayer().toLowerCase(Locale.ROOT);
             }
         }
+        if (isPortalDsCatalog(catalog)) {
+            throw new IllegalArgumentException("不能把门户数据源标识 "
+                    + catalog + " 当作 Trino catalog；RDB 表应走 JDBC 探数，湖表请绑定 Grav/Iceberg 资产");
+        }
         assertIdents(catalog, schema, table);
         t.catalog = catalog;
         t.schema = schema;
         t.qualifiedSql = GovDqRuleSqlBuilder.qualifyTrino(catalog, schema, table);
         return t;
+    }
+
+    /** 门户清单/资产 FQN：{@code ds_<id|code>.schema.table} 或 {@code ds_<id|code>.table} */
+    private static PortalTableRef parsePortalTableRef(String raw) {
+        if (StrUtil.isBlank(raw)) {
+            return null;
+        }
+        String text = raw.trim().replace("`", "").replace("\"", "");
+        String[] parts = text.split("\\.");
+        if (parts.length < 2 || !isPortalDsCatalog(parts[0])) {
+            return null;
+        }
+        PortalTableRef r = new PortalTableRef();
+        r.dsKey = parts[0];
+        if (parts.length >= 3) {
+            r.tableFqn = parts[parts.length - 2] + "." + parts[parts.length - 1];
+        } else {
+            r.tableFqn = parts[1];
+        }
+        return r;
+    }
+
+    private static String stripLeadingPortalDsSegment(String raw) {
+        if (StrUtil.isBlank(raw)) {
+            return raw;
+        }
+        PortalTableRef ref = parsePortalTableRef(raw);
+        return ref != null ? ref.tableFqn : raw.trim();
+    }
+
+    /** 门户数据源编码/主键形态：ds_xxx，不是真实 Trino catalog */
+    static boolean isPortalDsCatalog(String catalog) {
+        if (StrUtil.isBlank(catalog)) {
+            return false;
+        }
+        String c = catalog.trim();
+        return c.regionMatches(true, 0, "ds_", 0, 3);
+    }
+
+    private LhDatasource findDatasourceByIdOrCode(String key) {
+        if (StrUtil.isBlank(key)) {
+            return null;
+        }
+        String k = key.trim();
+        LhDatasource byId = datasourceMapper.selectById(k);
+        if (byId != null) {
+            return byId;
+        }
+        // objectName 前缀常为 ds_<雪花id>，而 ig_datasource.id 无 ds_ 前缀
+        if (isPortalDsCatalog(k) && k.length() > 3) {
+            String bare = k.substring(3);
+            byId = datasourceMapper.selectById(bare);
+            if (byId != null) {
+                return byId;
+            }
+        }
+        LhDatasource byCode = datasourceMapper.selectOne(new QueryWrapper<LhDatasource>().lambda()
+                .eq(LhDatasource::getDeleteFlag, NOT_DELETE)
+                .eq(LhDatasource::getDsCode, k)
+                .last("LIMIT 1"));
+        if (byCode != null) {
+            return byCode;
+        }
+        if (isPortalDsCatalog(k) && k.length() > 3) {
+            return datasourceMapper.selectOne(new QueryWrapper<LhDatasource>().lambda()
+                    .eq(LhDatasource::getDeleteFlag, NOT_DELETE)
+                    .eq(LhDatasource::getDsCode, k.substring(3))
+                    .last("LIMIT 1"));
+        }
+        return null;
+    }
+
+    private static final class PortalTableRef {
+        String dsKey;
+        String tableFqn;
     }
 
     private static void assertIdents(String... parts) {
@@ -365,10 +466,14 @@ public class GovDqRuleProbeService {
         if (parts.length >= 3) {
             String cat = parts[parts.length - 3].toLowerCase(Locale.ROOT);
             if ("mysql".equals(cat) || "postgresql".equals(cat) || "postgres".equals(cat)
-                    || "pg".equals(cat) || "oracle".equals(cat) || "sqlserver".equals(cat)) {
+                    || "pg".equals(cat) || "oracle".equals(cat) || "sqlserver".equals(cat)
+                    || isPortalDsCatalog(cat)) {
                 schema = parts[parts.length - 2];
                 table = parts[parts.length - 1];
             }
+        } else if (parts.length == 2 && isPortalDsCatalog(parts[0])) {
+            table = parts[1];
+            schema = st.schema();
         }
         if (!GovDqRuleSqlBuilder.isSafeIdent(table)
                 || (StrUtil.isNotBlank(schema) && !GovDqRuleSqlBuilder.isSafeIdent(schema))) {

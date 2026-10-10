@@ -1696,7 +1696,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         List<LhConsumerBinding> list = bindingMapper.selectList(new QueryWrapper<LhConsumerBinding>().lambda()
                 .eq(LhConsumerBinding::getDsId, dsId));
         for (LhConsumerBinding b : list) {
-            b.setStatus("stale");
+            // status=启用态；仅 sync_state 表达投影漂移（见 LhConsumerBinding 注释）
             b.setSyncState("stale");
             b.setRevision(Optional.ofNullable(b.getRevision()).orElse(1) + 1);
             bindingMapper.updateById(b);

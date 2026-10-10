@@ -80,6 +80,10 @@ lh:
     # true=发布必须携带已审批 API-xxx；联调可先 false
     require-publish-ticket: false
     gateway-probe-timeout-ms: 8000
+    # true=portalDs 投影 sync_state=stale/error/revoked 时拒绝 publish
+    hard-fail-stale-binding-on-publish: true
+    # 门户运行时门面（订阅 Key + row_filter）；直连 Gateway 仍旁路
+    runtime-invoke-enabled: true
   # APISIX：数据服务明确不做；保留配置块以免旧环境报错，发布路径不再调用
   apisix:
     admin-url: http://127.0.0.1:9180
@@ -108,6 +112,8 @@ lh:
     password: ""
     metalake: lakehouse
     catalog: iceberg
+    # true=Grav DOWN 时禁止新建登记/建表（§23）
+    block-register-when-down: true
   schema-sync:
     enabled: true
     schemas: ""
@@ -137,6 +143,8 @@ lh:
     hard-fail-quality-on-deploy: true
     # true=DS 投影 degrade 时发布硬失败
     hard-fail-ds-on-deploy: false
+    # true=节点 dsId 的 consumer_binding 为 stale/error/revoked 时拒绝发布
+    hard-fail-stale-binding-on-deploy: true
   catalog:
     # false=注册资产时 objectName 必须已在 ig_ds_table；true=允许手工对象名
     allow-manual-object-name: false
@@ -184,11 +192,43 @@ lh:
     storage-per-tb-month: 100
     compute-per-gb-scan: 0.50
     currency: CNY
+  # 指标中心：对账实查 / 看板回看
+  metric:
+    recon-lookback-hours: 48
+    # true=runForMetric 经 Trino/CK COUNT；失败记 skipped，禁止伪造 1/1
+    recon-live-count: true
+  # 湖/CK 对账 rewrite_ck → DS
+  recon:
+    job-principal: job.ads_ck_loader
+    rewrite-ck-workflow-template: "job.reconcile.{table}.rewrite_ck"
+    rewrite-timeout-minutes: 60
+    # true=DS 降级仍返回 pending；prod 见 application-prod
+    allow-degraded-rewrite-ck: true
+    # DS Worker 可达门户基址；与 token 同时非空时尾挂 notify → /lh/recon/golden/callback
+    callback-base-url: ""
+    callback-token: ""
+    # rewrite_ck 回调 success 时自动 restore 黄金标签
+    auto-restore-on-rewrite-ok: true
+  # 即席查询策略强制
+  query:
+    # true=无 mask 策略可继续（仅打标）；prod 建议 false
+    allow-mask-degraded: true
+    # true=row_filter 改写失败仍跑原 SQL；prod 建议 false
+    allow-row-filter-degraded: true
+    # 对 maskCols 结果单元格服务端打 ***
+    redact-masked-cells: true
   # 数据质量 H1：DS 质量节点回调 + 运行写 VM（夜莺规则包 ops/nightingale-quality）
   quality:
     # DS Worker 可达的门户基址；空则 SHELL 跳过运行时 evaluate（试跑/发布仍门户写 runs）
     gov-base-url: ""
     vm-write-enabled: true
+  # 平台发件箱投递：pending → handler → sent/failed/dead
+  outbox:
+    enabled: true
+    poll-ms: 15000
+    batch-size: 50
+    max-retry: 5
+    backoff-seconds: 30
   # 运维监控 §30：夜莺当前告警；空 URL=仅 VM PromQL
   observability:
     nightingale-url: ""

@@ -56,9 +56,12 @@ public class LhProperties {
     private Compute compute = new Compute();
     private Compliance compliance = new Compliance();
     private Metric metric = new Metric();
+    private Recon recon = new Recon();
+    private Query query = new Query();
     private Quality quality = new Quality();
     private Export export = new Export();
     private Observability observability = new Observability();
+    private Outbox outbox = new Outbox();
     /** 出站 HTTPS 客户端（ES 等）是否跳过证书校验；默认 false */
     private Http http = new Http();
 
@@ -239,6 +242,15 @@ public class LhProperties {
         private boolean requirePublishTicket = false;
         /** Gateway 联调探针超时毫秒 */
         private int gatewayProbeTimeoutMs = 8000;
+        /**
+         * 发布时 portalDsId 对应 consumer_binding 为 stale/error/revoked 则硬失败。
+         */
+        private boolean hardFailStaleBindingOnPublish = true;
+        /**
+         * 门户运行时门面 {@code /lh/dataapi/runtime/invoke}：订阅 Key 鉴权 + row_filter 注入。
+         * false=关闭（返回明确错误）；直连 SQLREST Gateway 不受本开关影响。
+         */
+        private boolean runtimeInvokeEnabled = true;
     }
 
     @Getter
@@ -333,6 +345,19 @@ public class LhProperties {
         private String password;
         private String metalake = "lakehouse";
         private String catalog = "iceberg";
+        /**
+         * true=health DOWN 时禁止新建 Catalog/资产登记/Iceberg 建表（§23）。
+         * 读路径走 schema 缓存降级，不经本门禁。
+         */
+        private boolean blockRegisterWhenDown = true;
+        /** 只读 schema 缓存（list/load）；写操作仍直连 Grav */
+        private boolean schemaCacheEnabled = true;
+        /** 内存缓存 TTL（毫秒）；默认 5 分钟 */
+        private long schemaCacheTtlMs = 300_000L;
+        /**
+         * Grav 读失败时是否降级：先内存缓存，再 {@code cb_grav_asset_ref.columns_json}。
+         */
+        private boolean schemaCacheFallbackWhenDown = true;
     }
 
     /** Grav→OM Schema Sync 配置 */
@@ -371,6 +396,10 @@ public class LhProperties {
          * 发布时 DS createOrUpdateWorkflow 返回 degraded 则硬失败（不把门户标为 prod 成功）。
          */
         private boolean hardFailDsOnDeploy = false;
+        /**
+         * 发布时节点引用数据源的 consumer_binding.sync_state 为 stale/error/revoked 则硬失败。
+         */
+        private boolean hardFailStaleBindingOnDeploy = true;
     }
 
     @Getter
@@ -632,6 +661,51 @@ public class LhProperties {
         private boolean allowDegradedMaterialize = true;
         /** 热路径 / 看板检查 recon_partition 失败的回看小时数 */
         private int reconLookbackHours = 48;
+        /**
+         * true=runForMetric 无显式行数时经 Trino/CK 实查 COUNT；
+         * false=回落 skipped（不再伪造 1/1）。
+         */
+        private boolean reconLiveCount = true;
+    }
+
+    /** 湖/CK 对账与 rewrite_ck */
+    @Getter
+    @Setter
+    public static class Recon {
+        /** DS 作业主体 */
+        private String jobPrincipal = "job.ads_ck_loader";
+        /** 工作流名模板，{table}=裸表名 */
+        private String rewriteCkWorkflowTemplate = "job.reconcile.{table}.rewrite_ck";
+        private int rewriteTimeoutMinutes = 60;
+        /** true=DS 降级时仍返回 pending 票据；prod 建议 false */
+        private boolean allowDegradedRewriteCk = true;
+        /**
+         * DS Worker 可达的门户基址；非空且配 token 时投影尾节点 SHELL 回调
+         * {@code /lh/recon/golden/callback}。空则跳过自动回调。
+         */
+        private String callbackBaseUrl = "";
+        /** 与 callbackBaseUrl 同时非空时启用 curl 回调头鉴权 */
+        private String callbackToken = "";
+        /** rewrite_ck 回调 success 时自动 restore 黄金标签 / recon_ok */
+        private boolean autoRestoreOnRewriteOk = true;
+    }
+
+    /** 即席查询策略强制 */
+    @Getter
+    @Setter
+    public static class Query {
+        /**
+         * true=无列级 mask 策略时继续返回明文（仅打标 maskDegraded）；
+         * false=有表引用且无策略时阻断（敏感环境）。
+         */
+        private boolean allowMaskDegraded = true;
+        /**
+         * true=有 row_filter 策略但 SQL 改写失败时仍执行原 SQL；
+         * false=硬失败（policyFailed）。
+         */
+        private boolean allowRowFilterDegraded = true;
+        /** 对 maskCols 结果单元格做服务端脱敏（***） */
+        private boolean redactMaskedCells = true;
     }
 
     /**
@@ -679,6 +753,24 @@ public class LhProperties {
         /** 扫描 ¥/GB */
         private java.math.BigDecimal computePerGbScan = new java.math.BigDecimal("0.50");
         private String currency = "CNY";
+    }
+
+    /**
+     * 平台发件箱投递（plat_outbox_event → handler → sent/failed/dead）。
+     */
+    @Getter
+    @Setter
+    public static class Outbox {
+        /** false=跳过 {@code PlatOutboxPollerJob} */
+        private boolean enabled = true;
+        /** 轮询间隔毫秒（@Scheduled fixedDelay） */
+        private long pollMs = 15_000L;
+        /** 每批最多条数 */
+        private int batchSize = 50;
+        /** 失败转 dead 前最大尝试次数（含首次） */
+        private int maxRetry = 5;
+        /** 失败退避基数秒；实际 = base * 2^(retry-1)，上限约 64× */
+        private int backoffSeconds = 30;
     }
 
     /**

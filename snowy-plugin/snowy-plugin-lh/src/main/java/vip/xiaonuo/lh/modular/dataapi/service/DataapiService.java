@@ -8,6 +8,7 @@ import vip.xiaonuo.lh.modular.dataapi.param.DataapiIdParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiKeyRevealParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiParseParam;
+import vip.xiaonuo.lh.modular.dataapi.param.DataapiRuntimeInvokeParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTagsParam;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 
@@ -87,6 +88,12 @@ public interface DataapiService {
 
     /** Gateway 联调探针（edgeMode=gateway 时） */
     Map<String, Object> gatewayProbe(DataapiGatewayProbeParam param);
+
+    /**
+     * 门户运行时门面：订阅 Key 鉴权 → 按申请人注入 row_filter → SQLREST debug。
+     * 直连 Gateway 仍旁路本注入（须放受信网络）。
+     */
+    Map<String, Object> runtimeInvoke(DataapiRuntimeInvokeParam param, String appKey, String authorization);
 
     /** 调用大盘：SQLREST overview counter / trend / topPath */
     Map<String, Object> callStats(Integer days);
