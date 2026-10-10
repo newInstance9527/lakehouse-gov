@@ -238,8 +238,8 @@ public class LhDatasourceGravitinoProjector {
 
     /**
      * Hive Catalog 需要 HMS thrift URI（默认 9083），不是 HiveServer2 JDBC（10000）。
-     * 门户常填 HS2；若未显式给 metastoreUris，则把 10000 改写为 9083，并把 *.127.0.0.1 换成内网 IP，
-     * 避免 Docker 内公网 DNS 导致连错地址。
+     * 门户常填 HS2；若未显式给 metastoreUris，则把 10000 改写为 9083。
+     * 公网主机名请在数据源 secret / local 覆盖里写成内网 IP，避免 Docker 内 DNS 连错。
      */
     private static String resolveHiveMetastoreUris(LhDatasource ds, Map<String, Object> secret) {
         String uris = first(secret, "metastoreUris", "metastore.uris", "metastore");
@@ -264,16 +264,10 @@ public class LhDatasourceGravitinoProjector {
     }
 
     /**
-     * Docker 内公网 DNS 常把 *.127.0.0.1 解析到公网 IP；内网服务须走台账 IP。
+     * 主机名→内网 IP 应由数据源配置提供，不再硬编码公网域名。
      */
     private static String rewriteDatagooHostToLanIp(String hostOrUri) {
-        if (StrUtil.isBlank(hostOrUri)) {
-            return hostOrUri;
-        }
-        String s = hostOrUri;
-        s = s.replace("127.0.0.1", "10.0.0.34");
-        s = s.replace("127.0.0.1", "182.44.68.9");
-        return s;
+        return hostOrUri;
     }
 
     /** MinIO / S3 → Grav FILESET(hadoop) */
