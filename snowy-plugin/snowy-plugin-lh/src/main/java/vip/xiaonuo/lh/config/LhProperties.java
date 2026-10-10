@@ -207,10 +207,10 @@ public class LhProperties {
     @Getter
     @Setter
     public static class Sqlrest {
-        /** Manager UI / Admin API 根，如 http://host:18090（对齐部署台账） */
-        private String managerUrl = "http://127.0.0.1:18090";
+        /** Manager UI / Admin API 根，如 http://host:18090；空=未配置（见 application-local） */
+        private String managerUrl = "";
         private String username = "admin";
-        private String password = "123456";
+        private String password = "";
         /** 默认授权分组 / 模块（SQLREST） */
         private Long defaultGroupId = 1L;
         private Long defaultModuleId = 1L;
@@ -220,16 +220,16 @@ public class LhProperties {
          */
         private Long datasourceId = 1L;
         /**
-         * 边缘模式：仅支持 {@code gateway}（SQLREST Gateway）。
-         * {@code apisix}/{@code both} 已废弃，运行时强制回落 gateway（数据服务不做 APISIX）。
+         * 边缘模式：仅 {@code gateway}（SQLREST Gateway）。
+         * {@code apisix}/{@code both} 已删减，运行时强制回落 gateway。
          */
         private String edgeMode = "gateway";
-        /** SQLREST Gateway 公网根，如 http://host:18091；门户展示与联调 */
-        private String gatewayUrl = "http://127.0.0.1:18091";
+        /** SQLREST Gateway 根，如 http://host:18091；空=未配置（见 application-local） */
+        private String gatewayUrl = "";
         /**
-         * 历史字段：曾作 APISIX upstream；APISIX 不做后仅作展示兜底，可与 {@link #gatewayUrl} 主机端口一致。
+         * 历史字段：曾作 APISIX upstream；删减 APISIX 后仅作展示兜底，可与 {@link #gatewayUrl} 主机端口一致。
          */
-        private String executorUpstream = "127.0.0.1:18091";
+        private String executorUpstream = "";
     }
 
     @Getter
@@ -302,7 +302,7 @@ public class LhProperties {
     @Getter
     @Setter
     public static class Openmetadata {
-        private String url = "http://127.0.0.1:8585";
+        private String url = "";
         private String vaultPath = LhVaultPaths.OPENMETADATA;
         /** Bot / PAT；空则启动不种子，需运维写入 Vault */
         private String token;
@@ -329,8 +329,8 @@ public class LhProperties {
     @Getter
     @Setter
     public static class Marquez {
-        /** 经 lh-ui-auth 的对外 API，默认 :15000 */
-        private String url = "http://127.0.0.1:15000";
+        /** 经 lh-ui-auth 的对外 API，例 :15000；空=未配置 */
+        private String url = "";
         private String vaultPath = LhVaultPaths.MARQUEZ;
         private String user = "admin";
         private String password;
@@ -339,7 +339,7 @@ public class LhProperties {
     @Getter
     @Setter
     public static class Gravitino {
-        private String url = "http://127.0.0.1:8090";
+        private String url = "";
         private String vaultPath = LhVaultPaths.GRAVITINO;
         private String user;
         private String password;
@@ -429,8 +429,8 @@ public class LhProperties {
     public static class Gitea {
         /** 是否启用远程推送；需 baseUrl+token */
         private boolean enabled = true;
-        /** 公网可达主机，例 http://127.0.0.1:3000（勿用 10.x，外网客户端不可达） */
-        private String baseUrl = "http://127.0.0.1:3000";
+        /** 可达主机，例 http://127.0.0.1:3000；空=未配置（见 application-local） */
+        private String baseUrl = "";
         private String username = "lakehouse";
         private String token = "";
         private String org = "lakehouse";

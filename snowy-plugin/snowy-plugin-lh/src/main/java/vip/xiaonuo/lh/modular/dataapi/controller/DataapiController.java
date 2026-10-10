@@ -146,8 +146,8 @@ public class DataapiController {
         return CommonResult.data(dataapiService.routes());
     }
 
-    @Operation(summary = "已废弃：数据服务不做 APISIX，恒返回 skipped")
-    @CommonLog("数据服务同步 APISIX（已废弃）")
+    @Operation(summary = "已删减：数据服务不写 APISIX，恒返回 skipped")
+    @CommonLog("数据服务同步 APISIX（已删减）")
     @PostMapping("/lh/dataapi/syncApisix")
     public CommonResult<Map<String, Object>> syncApisix(@RequestParam(required = false) String ws) {
         return CommonResult.data(dataapiService.syncApisix(ws));

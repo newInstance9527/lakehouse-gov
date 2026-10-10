@@ -1165,7 +1165,7 @@ public class DataapiServiceImpl implements DataapiService {
         } else {
             m.put("ok", true);
             m.put("apisix", List.of());
-            m.put("message", "边缘仅 SQLREST Gateway（不做 APISIX）");
+            m.put("message", "边缘仅 SQLREST Gateway（APISIX 已删减）");
         }
         return m;
     }
@@ -1179,7 +1179,7 @@ public class DataapiServiceImpl implements DataapiService {
             skip.put("synced", 0);
             skip.put("failed", 0);
             skip.put("edgeMode", sqlrestClient.edgeMode());
-            skip.put("message", "数据服务不做 APISIX：边缘仅 SQLREST Gateway；请在工作台/SQLREST 发版上线");
+            skip.put("message", "数据服务已删减 APISIX：边缘仅 SQLREST Gateway；请在工作台/SQLREST 发版上线");
             return skip;
         }
         String workspace = StrUtil.blankToDefault(ws, WS_DEFAULT);

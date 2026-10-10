@@ -1,6 +1,6 @@
 # 湖仓外部组件默认值（application.properties 的 lh.* 优先生效）
 # 凭证：运行时 vault-path → LhVaultStore（aes=ig_secret_store / hashicorp=KV v2）。
-# 仓库内 password/api-key/aes-key/hmac/token 留空；本机覆盖见 snowy-web-app/.../application-local.properties
+# 仓库内 password/api-key/aes-key/hmac/token 与组件 URL 留空；本机覆盖见 snowy-web-app/.../application-local.properties
 lh:
   vault:
     backend: aes
@@ -11,9 +11,9 @@ lh:
     # kv-mount: secret
     # timeout-ms: 8000
   trino:
-    url: https://127.0.0.1:18080
+    url: ""
     # Web UI 根（Explain / 慢查询外链；缺省回退为 url）
-    ui-url: https://127.0.0.1:18080
+    ui-url: ""
     vault-path: platform/trino/query
     user: admin
     password: ""
@@ -28,7 +28,7 @@ lh:
   http:
     insecure-ssl: false
   ds:
-    url: http://127.0.0.1:12345/dolphinscheduler
+    url: ""
     vault-path: platform/dolphinscheduler/api
     user: admin
     password: ""
@@ -39,10 +39,10 @@ lh:
     tenant-code: root
     # token:  # 本环境勿配；必须 user/password → /login 取 sessionId（切勿带 token 请求头，会 401）
   flink:
-    # UI / 门户：经dev3 ui-auth 反代到dev2 JM
-    url: http://127.0.0.1:8081
+    # UI / 门户：经 ui-auth 反代到 JM（地址见 application-local）
+    url: ""
     # DS Worker → JM REST（内网）
-    rest-address: 10.0.0.181
+    rest-address: ""
     rest-port: 8081
     vault-path: platform/flink/ui
     user: admin
@@ -58,24 +58,24 @@ lh:
   datax:
     home: /opt/lh-datax
   clickhouse:
-    url: http://127.0.0.1:8123
+    url: ""
     vault-path: platform/clickhouse/default
     user: default
     password: ""
     # 非空则合规 ALTER DELETE 带 ON CLUSTER，校验走 clusterAllReplicas
     cluster: ""
   sqlrest:
-    manager-url: http://127.0.0.1:18090
+    manager-url: ""
     username: admin
     password: ""
     default-group-id: 1
     default-module-id: 1
     # 正式 MUST 为 Trino JDBC；当前环境未登记 Trino 时可临时用已有 DS
     datasource-id: 1
-    # 数据 API 边缘：仅 gateway（SQLREST Gateway）。apisix/both 已废弃，代码强制回落
+    # 数据 API 边缘：仅 gateway（SQLREST Gateway）。apisix/both 已删减，代码强制回落
     edge-mode: gateway
-    gateway-url: http://127.0.0.1:18091
-    executor-upstream: "127.0.0.1:18091"
+    gateway-url: ""
+    executor-upstream: ""
   dataapi:
     # true=发布必须携带已审批 API-xxx；联调可先 false
     require-publish-ticket: false
@@ -84,14 +84,14 @@ lh:
     hard-fail-stale-binding-on-publish: true
     # 门户运行时门面（订阅 Key + row_filter）；直连 Gateway 仍旁路
     runtime-invoke-enabled: true
-  # APISIX：数据服务明确不做；保留配置块以免旧环境报错，发布路径不再调用
+  # APISIX：数据服务已删减；保留配置块以免旧环境报错，发布路径不再调用
   apisix:
-    admin-url: http://127.0.0.1:9180
+    admin-url: ""
     vault-path: platform/apisix/admin
     api-key: ""
     key-auth-enabled: false
   openmetadata:
-    url: http://127.0.0.1:8585
+    url: ""
     vault-path: platform/openmetadata/bot
     email: admin@open-metadata.org
     password: ""
@@ -101,12 +101,12 @@ lh:
     glossary-name: LakehouseStandard
     glossary-sync: true
   marquez:
-    url: http://127.0.0.1:15000
+    url: ""
     vault-path: platform/marquez/api
     user: admin
     password: ""
   gravitino:
-    url: http://127.0.0.1:8090
+    url: ""
     vault-path: platform/gravitino/api
     user: admin
     password: ""
@@ -118,12 +118,12 @@ lh:
     enabled: true
     schemas: ""
   superset:
-    url: http://127.0.0.1:8088
+    url: ""
     vault-path: platform/superset/api
     user: admin
     password: ""
   minio:
-    url: http://127.0.0.1:9009
+    url: ""
     vault-path: platform/minio/s3
     bucket: lh-portal
     dataset-prefix: adhoc/dataset

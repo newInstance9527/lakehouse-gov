@@ -53,8 +53,7 @@ public class SqlrestClient {
     private final AtomicReference<CachedToken> tokenRef = new AtomicReference<>();
 
     public String embedUrl() {
-        return StrUtil.blankToDefault(trim(lhProperties.getSqlrest().getManagerUrl()),
-                "http://127.0.0.1:18090");
+        return trim(StrUtil.blankToDefault(lhProperties.getSqlrest().getManagerUrl(), ""));
     }
 
     public Long defaultDatasourceId() {
@@ -67,12 +66,11 @@ public class SqlrestClient {
 
     /**
      * 边缘模式：产品定案仅 {@code gateway}（SQLREST Gateway）。
-     * 配置若仍写 {@code apisix}/{@code both}，强制回落 gateway 并忽略 APISIX。
+     * {@code apisix}/{@code both} 已删减不用：配置残留强制回落 gateway，发布不写 APISIX。
      */
     public String edgeMode() {
         String m = StrUtil.blankToDefault(lhProperties.getSqlrest().getEdgeMode(), "gateway").trim().toLowerCase();
         if (!"gateway".equals(m)) {
-            // APISIX 明确不做：不启用 apisix/both
             return "gateway";
         }
         return m;
@@ -82,14 +80,13 @@ public class SqlrestClient {
         return true;
     }
 
-    /** @deprecated 数据服务不做 APISIX；恒为 false */
+    /** APISIX 边缘已删减；恒 false（配置块可保留，发布路径不调用） */
     public boolean useApisixEdge() {
         return false;
     }
 
     public String gatewayUrl() {
-        return trim(StrUtil.blankToDefault(lhProperties.getSqlrest().getGatewayUrl(),
-                "http://127.0.0.1:18091"));
+        return trim(StrUtil.blankToDefault(lhProperties.getSqlrest().getGatewayUrl(), ""));
     }
 
     /**

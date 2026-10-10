@@ -1,43 +1,185 @@
 #########################################
-# 本机开发密钥覆盖模板（可提交）
+# 本机开发覆盖模板（可提交）
 # 用法：
 #   cp application-local.properties.example application-local.properties
-#   填写真值；IDE / -Dspring.profiles.active=local
-# application-local.properties 已 gitignore，允许明文，禁止提交
+#   按组件填地址 / 账号 / 密钥；IDE 或 spring.profiles.active=local
+# application-local.properties 已 gitignore，禁止提交
+#
+# 约定：可提交配置中密钥与主机/URL 一律留空；本文件按「组件」聚齐三要素：
+#   地址（url/host）· 账号（user/username）· 密钥（password/token/key）
 #########################################
 
-# —— 业务库 / Redis / 控制台 ——
+# =============================================================================
+# 门户运行底座
+# =============================================================================
+
+# —— MySQL（业务库 lakehouse_gov）——
+# 地址：JDBC URL
+spring.datasource.dynamic.datasource.master.url=jdbc:mysql://127.0.0.1:3306/lakehouse_gov?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true&useInformationSchema=true&rewriteBatchedStatements=true
+# 账号
+spring.datasource.dynamic.datasource.master.username=root
+# 密钥
 spring.datasource.dynamic.datasource.master.password=
+
+# —— Redis（Sa-Token / 缓存）——
+# 地址
+spring.data.redis.host=127.0.0.1
+spring.data.redis.port=6379
+# 密钥（无密码可留空）
 spring.data.redis.password=
+
+# —— Druid 监控台 ——
+# 账号见 application.properties（login-username=admin）；此处只覆盖密码
 spring.datasource.druid.stat-view-servlet.login-password=
+
+# —— Knife4j 文档 Basic ——
 knife4j.basic.password=
 
-# —— Vault（aes 默认；hashicorp 见 ops/vault）——
+# —— Vault（本机 AES；正式可改 hashicorp）——
+# 后端类型
 lh.vault.backend=aes
+# 密钥（AES 根密钥；hashicorp 时用 addr/token）
 lh.vault.aes-key=
+# lh.vault.addr=http://127.0.0.1:8200
+# lh.vault.token=
 
-# —— TLS（本机 lab 自签证书可开；prod/test 须 false）——
+# —— 本机开关（非组件连接）——
+# TLS：lab 自签可 true；联正式组件建议 false
 lh.trino.insecure-ssl=true
 lh.http.insecure-ssl=true
-
-# —— 数据开发发布门禁（本机放宽；prod 保持 application.properties 默认 true）——
+# 数据开发发布门禁：本机放宽；prod 保持默认 true
 lh.compute.require-mr-merge=false
 lh.compute.require-script-publish-ticket=false
 lh.compute.publish-gate-hard-fail=false
 
-# —— 外部组件 bootstrap（优先 Vault；仅首次种子）——
+# =============================================================================
+# 湖仓外部组件（每块：地址 → 账号 → 密钥；运行时凭证优先 Vault）
+# =============================================================================
+
+# —— Trino（查询闸门 / JOB）——
+# 地址：Coordinator HTTPS
+lh.trino.url=https://127.0.0.1:18080
+# 账号
+lh.trino.user=admin
+# 密钥
 lh.trino.password=
+
+# —— DolphinScheduler（编排）——
+# 地址：API 根（含 context-path）
+lh.ds.url=http://127.0.0.1:12345/dolphinscheduler
+# 账号
+lh.ds.user=admin
+# 密钥（本环境用登录取 sessionId，勿配 token 头）
 lh.ds.password=
+
+# —— Flink（JM UI / REST）——
+# 地址：门户可见 UI；Worker 内网 REST
+lh.flink.url=http://127.0.0.1:8081
+lh.flink.rest-address=127.0.0.1
+lh.flink.rest-port=8081
+# 账号
+lh.flink.user=admin
+# 密钥
 lh.flink.password=
+
+# —— ClickHouse ——
+# 地址：HTTP 接口
+lh.clickhouse.url=http://127.0.0.1:8123
+# 账号
+lh.clickhouse.user=default
+# 密钥
 lh.clickhouse.password=
+
+# —— SQLREST（数据服务 Manager + Gateway）——
+# 地址：Manager / Gateway / Executor upstream（host:port）
+lh.sqlrest.manager-url=http://127.0.0.1:18090
+lh.sqlrest.gateway-url=http://127.0.0.1:18091
+lh.sqlrest.executor-upstream=127.0.0.1:18091
+# 账号
+lh.sqlrest.username=admin
+# 密钥
 lh.sqlrest.password=
+
+# —— APISIX（已删减边缘；Admin 可选保留）——
+# 地址：Admin API
+lh.apisix.admin-url=http://127.0.0.1:9180
+# 密钥：X-API-KEY（无独立账号字段）
 lh.apisix.api-key=
+
+# —— OpenMetadata ——
+# 地址
+lh.openmetadata.url=http://127.0.0.1:8585
+# 账号（Bot 邮箱；亦可改用 PAT：lh.openmetadata.token）
+lh.openmetadata.email=admin@open-metadata.org
+# 密钥
 lh.openmetadata.password=
+# lh.openmetadata.token=
+
+# —— Marquez（血缘）——
+# 地址
+lh.marquez.url=http://127.0.0.1:15000
+# 账号
+lh.marquez.user=admin
+# 密钥
 lh.marquez.password=
+
+# —— Gravitino（Catalog）——
+# 地址
+lh.gravitino.url=http://127.0.0.1:8090
+# 账号
+lh.gravitino.user=admin
+# 密钥
 lh.gravitino.password=
+
+# —— Superset ——
+# 地址
+lh.superset.url=http://127.0.0.1:8088
+# 账号
+lh.superset.user=admin
+# 密钥
 lh.superset.password=
+
+# —— MinIO（对象存储）——
+# 地址：S3 API
+lh.minio.url=http://127.0.0.1:9009
+# 账号：Access Key
 lh.minio.access-key=
+# 密钥：Secret Key
 lh.minio.secret-key=
+
+# —— Gitea（脚本远程 SoT）——
+# 地址：须客户端可达
+lh.compute.gitea.base-url=http://127.0.0.1:3000
+# 账号
+lh.compute.gitea.username=lakehouse
+# 密钥：Personal Access Token
 lh.compute.gitea.token=
+
+# —— VictoriaMetrics（存储趋势 / 质量指标导入）——
+# 地址：import 入口（空=跳过写 VM）
+lh.lifecycle.vm-import-url=http://127.0.0.1:8428
+# 本组件通常无独立账号口令（鉴权随部署）
+
+# —— 夜莺 Nightingale（告警）——
+# 地址
+lh.observability.nightingale-url=http://127.0.0.1:17000
+# 账号
+lh.observability.nightingale-user=root
+# 密钥（亦可靠 Vault platform/nightingale/api）
+lh.observability.nightingale-password=
+
+# —— LiteLLM（AI 网关）——
+# 地址
+lh.ai.litellm-url=http://127.0.0.1:4000
+# 密钥：Master Key（无独立用户名）
 lh.ai.litellm-master-key=
+
+# —— Milvus（知识库向量）——
+# 地址
+lh.ai.milvus-uri=http://127.0.0.1:19530
+# 密钥：Token（空=无鉴权；账号概念视部署而定）
+lh.ai.milvus-token=
+
+# —— 合规删除 HMAC（非 HTTP 组件）——
+# 密钥：主体伪匿名 HMAC（导入 Vault 后可清空本项）
 lh.compliance.subject-hmac-key=

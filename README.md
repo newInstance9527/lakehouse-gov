@@ -93,12 +93,12 @@ controller  →  service / impl  →  mapper(entity)
 
 | 文件 | 可提交 | 用途 |
 |------|--------|------|
-| `application.properties` | 是 | 共享非密钥默认；默认 `local` |
-| `application-local.properties` | **否** | 本机明文密钥 |
-| `application-local.properties.example` | 是 | local 模板 |
-| `application-test|prod.properties` | 是 | 仅 `${LH_*}` 占位 |
+| `application.properties` | 是 | 共享非敏感默认；**密钥与组件主机/URL 留空**；默认 `local` |
+| `application-local.properties` | **否** | 本机明文：口令 + JDBC/Redis/组件 URL |
+| `application-local.properties.example` | 是 | local 模板（示例用 `127.0.0.1`） |
+| `application-test|prod.properties` | 是 | 口令与 URL 均 `${LH_*}` |
 | `application-docker.yml` | 是 | 容器变量 |
-| `application-lh.yml`（插件） | 是 | `lh.*` 组件默认，可被 web-app 覆盖 |
+| `application-lh.yml`（插件） | 是 | `lh.*` 非敏感默认；URL 留空，由 local/ENV 覆盖 |
 
 运行时凭证优先 **Vault**（`vault-path` → `ig_secret_store`）；properties 明文仅本机或首次 bootstrap。
 
