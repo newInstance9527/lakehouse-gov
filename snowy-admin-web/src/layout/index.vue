@@ -278,49 +278,63 @@
 			bindEmailRef.value.checkNeedBindEmail()
 		})
 	})
+	// 新版检测：不自动刷新，右上角确认后再 reload
+	let versionPollTimer = null
 	onBeforeUnmount(() => {
 		window.removeEventListener('resize', onLayoutResize)
 		window.removeEventListener('resize', getNav)
+		if (versionPollTimer) {
+			clearInterval(versionPollTimer)
+			versionPollTimer = null
+		}
 	})
-	// 新版检测
+	const notifyNewVersion = () => {
+		if (document.querySelector('.notification-update-version')) {
+			return
+		}
+		const key = `open${Date.now()}`
+		notification.open({
+			type: 'info',
+			message: '发现新版本',
+			description: '检测到前端有更新，确认后再刷新，避免打断当前操作',
+			duration: 0,
+			placement: 'topRight',
+			class: 'notification-update-version',
+			btn: () =>
+				h(
+					Button,
+					{
+						type: 'primary',
+						size: 'small',
+						onClick: () => {
+							notification.close(key)
+							window.location.reload()
+						}
+					},
+					{ default: () => '确认刷新' }
+				),
+			key,
+			onClose: () => {
+				/* 用户关掉后仍可在下次轮询再次提示 */
+			}
+		})
+	}
 	const updateVersion = () => {
 		const updateVersionOpen = import.meta.env.VITE_VERSION_UPDATE
-		if (updateVersionOpen) {
-			setTimeout(async () => {
-				// 本地
-				let localVersion = getLocalHash()
-				// 线上
-				let onlineVersion = await checkHash()
-				// 如果不一样，提示更新
-				if (localVersion !== onlineVersion) {
-					if (document.querySelector('.notification-update-version')) {
-						return
-					}
-					const key = `open${Date.now()}`
-					notification.open({
-						type: 'info',
-						message: '发现新版本',
-						description: '检测到新版本，请刷新后使用',
-						duration: 0,
-						class: 'notification-update-version',
-						btn: () =>
-							h(
-								Button,
-								{
-									type: 'primary',
-									size: 'small',
-									onClick: () => {
-										notification.close(key)
-										window.location.reload()
-									}
-								},
-								{ default: () => '立即更新' }
-							),
-						key
-					})
+		if (!updateVersionOpen) return
+		const runCheck = async () => {
+			try {
+				const localVersion = getLocalHash()
+				const onlineVersion = await checkHash()
+				if (localVersion && onlineVersion && localVersion !== onlineVersion) {
+					notifyNewVersion()
 				}
-			}, 3000)
+			} catch (e) {
+				/* ignore */
+			}
 		}
+		setTimeout(runCheck, 3000)
+		versionPollTimer = setInterval(runCheck, 60_000)
 	}
 	// 动态获取横向导航栏隐藏数量
 	const getNav = () => {
