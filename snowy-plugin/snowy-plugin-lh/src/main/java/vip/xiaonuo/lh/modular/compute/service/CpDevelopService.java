@@ -232,6 +232,51 @@ public class CpDevelopService {
         return out;
     }
 
+    /**
+     * 删除开发脚本：索引软删 + Git rm 提交。
+     * 存在进行中（IN_REVIEW）发布单时拒绝；已 PUBLISHED 允许删工作区文件（Tag/历史保留）。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> delete(String id) {
+        UserSnap user = currentUser();
+        CpScriptIndex row = requireScript(id);
+        Long openReleases = releaseMapper.selectCount(new QueryWrapper<CpRelease>().lambda()
+                .eq(CpRelease::getScriptId, row.getId())
+                .eq(CpRelease::getDeleteFlag, "NOT_DELETE")
+                .eq(CpRelease::getStatus, "IN_REVIEW"));
+        if (openReleases != null && openReleases > 0) {
+            throw new CommonException("存在进行中的发布单，请先完成或撤单后再删除脚本");
+        }
+        boolean wasPublished = "PUBLISHED".equalsIgnoreCase(StrUtil.blankToDefault(row.getStatus(), ""))
+                || releaseMapper.selectCount(new QueryWrapper<CpRelease>().lambda()
+                .eq(CpRelease::getScriptId, row.getId())
+                .eq(CpRelease::getDeleteFlag, "NOT_DELETE")
+                .eq(CpRelease::getStatus, "PUBLISHED")) > 0;
+        String sha = gitStore.delete(
+                row.getWs(),
+                row.getPath(),
+                "delete " + row.getPath(),
+                user.name,
+                user.email);
+        row.setDeleteFlag("DELETE");
+        row.setGitSha(sha);
+        row.setStatus("DELETED");
+        row.setUpdateTime(new Date());
+        row.setUpdateUser(user.id);
+        scriptMapper.updateById(row);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("id", row.getId());
+        out.put("path", row.getPath());
+        out.put("gitSha", sha);
+        out.put("published", wasPublished);
+        out.put("message", wasPublished
+                ? "已从脚本树移除；Git 历史与已发 Tag 仍保留"
+                : "已删除脚本");
+        out.put("remoteWarning", pushRemote(row.getWs()));
+        return out;
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> runStg(CpScriptRunParam param) {
         UserSnap user = currentUser();

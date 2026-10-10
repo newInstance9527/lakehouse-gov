@@ -122,6 +122,11 @@ lh:
     vault-path: platform/superset/api
     user: admin
     password: ""
+    embed-allowed-domains: ""
+    public-url: ""
+    embed-enabled: true
+    oidc-enabled: false
+    oidc-login-path: /login/
   minio:
     url: ""
     vault-path: platform/minio/s3

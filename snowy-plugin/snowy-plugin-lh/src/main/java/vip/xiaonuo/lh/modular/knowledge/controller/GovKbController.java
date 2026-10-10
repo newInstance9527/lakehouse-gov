@@ -155,4 +155,11 @@ public class GovKbController {
     public CommonResult<Map<String, Object>> ack(@RequestBody GovKbCiteAckParam param) {
         return CommonResult.data(govKbService.ackCitation(param));
     }
+
+    @Operation(summary = "项目纪要记忆老化巡检")
+    @CommonLog("知识库记忆巡检")
+    @PostMapping("/lh/knowledge/memory/patrol")
+    public CommonResult<Map<String, Object>> memoryPatrol() {
+        return CommonResult.data(govKbService.memoryPatrol());
+    }
 }

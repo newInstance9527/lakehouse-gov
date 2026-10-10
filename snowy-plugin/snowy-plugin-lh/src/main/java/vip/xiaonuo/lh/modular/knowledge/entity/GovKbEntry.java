@@ -26,7 +26,7 @@ public class GovKbEntry extends CommonEntity {
     /** workspace | platform */
     private String scope;
     private String remark;
-    /** term|dict|practice|faq|manual */
+    /** term|dict|practice|faq|manual|minutes */
     private String cat;
     private String title;
     private String body;
@@ -42,4 +42,13 @@ public class GovKbEntry extends CommonEntity {
     private String embedModelId;
     private String refsJson;
     private Integer citeCnt;
+    /** 质量分 0-10；人工优先于 agent */
+    private java.math.BigDecimal qualityScore;
+    /** agent | human */
+    private String scoreSource;
+    private String scoreReason;
+    private java.util.Date lastAccessAt;
+    /** active | archive | deleted */
+    private String lifecycleStatus;
+    private String tagsJson;
 }

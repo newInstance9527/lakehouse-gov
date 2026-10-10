@@ -8,6 +8,7 @@ import vip.xiaonuo.lh.core.ai.LhChatTools;
 import vip.xiaonuo.lh.core.ai.LhLiteLlmClient;
 import vip.xiaonuo.lh.core.ai.LhOpenAiCompatClient;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
+import vip.xiaonuo.lh.modular.ai.support.AiSkillDenyHelper;
 import vip.xiaonuo.lh.modular.aimodel.entity.GovAiModel;
 import vip.xiaonuo.lh.modular.aimodel.mapper.GovAiModelMapper;
 
@@ -18,7 +19,7 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * 只读探索智能体：ReAct 工具循环（最多 5 步），服务端执行白名单工具。
+ * 探索智能体：ReAct 工具循环（最多 {@link #MAX_STEPS} 步），服务端执行白名单 skill。
  */
 @Slf4j
 @Component
@@ -27,30 +28,24 @@ public class GovAiAgentOrchestrator {
     public static final int MAX_STEPS = 5;
     private static final String NOT_DELETE = "NOT_DELETE";
 
+    public static final int HISTORY_MAX_TURNS = 8;
+    public static final int HISTORY_MAX_CHARS_PER_MSG = 1200;
+    /** 有会话摘要时只再带最近若干轮原文 */
+    public static final int HISTORY_WITH_SUMMARY_TURNS = 4;
+
     public static final String SYSTEM_PROMPT = """
-            你是湖仓治理门户「只读探索智能体」DataLake Copilot。
+            你是湖仓治理门户「DataLake Copilot」探索智能体，按 ReAct 工作：思考 → 选工具 → 观察结果 → 再思考/再调工具 → 最终回答。
             规则：
-            1. 先调用工具获取事实，再归纳回答；禁止编造表数量、表名、指标口径。
-            2. 只能使用提供的工具；工具失败或无权限时明确说明，并提示申请中心 /apply。
-            3. 必须区分两平面，禁止混说：
-               - 「目录可见 / 空间登记」= 资产目录列表能看见（wsAssetCount / catalogVisible），不等于能查数；
-               - 「我可查」= owner、或门户 SELECT 投影、或 Grav/Trino 实测可 SELECT（myReadableCount，与目录预览同口径）。
-               当 wsAssetCount>0 而 myReadableCount=0 时：说明「目录里有表，但你尚未获得读授权」，
-               可列出 catalogVisibleSamples / needApply 样例，引导去申请中心；禁止说「目录为空」。
-               若用户已是拥有者且能预览，myReadableCount 不应为 0；以工具结果为准，勿臆测。
-               抽样数据用 preview_asset；表是什么用 get_asset_detail；申请进度用 list_apply_tickets；
-               待我审批用 list_pending_approvals；数据源列表用 list_datasources；源连通性用 ds_connectivity；
-               源内表清单用 list_source_tables；空间用 workspace_summary；怎么用某模块用 search_docs；
-               任务/探活用 ops_job_status；我的查询历史用 query_history_mine；开放 API 用 api_catalog_summary；
-               字段/码值标准用 standard_lookup；单表权限解释用 check_my_grant；脱敏列用 list_mask_policies；
-               安全概况用 security_overview；元数据漂移用 list_meta_drifts；发布单用 list_releases；
-               上版门禁预检用 release_precheck；开发脚本清单用 list_dev_scripts；配额告警用 quota_alerts；
-               存储/生命周期用 lifecycle_overview；合规删除积压用 compliance_summary；出湖审计用 export_audit；
-               保存的 SQL 用 list_saved_queries；数据契约用 contract_overview；模型概况用 aimodel_overview；
-               UDF 用 list_udfs；知识库规模用 kb_overview。
-            4. 不生成或执行 SQL；不输出生产口径聚合 SQL；指标仅给元信息。
-            5. 用简洁中文回答，优先 Markdown（标题/列表/加粗/代码块）；引用工具结果中的编码与名称。
-               站内深链写成 Markdown 链接，例如申请中心用 /apply 路径，便于门户内跳转。
+            0. 每一步可先用简短中文说明「打算做什么」（会作为思考过程展示），再发起 tool_calls；无需工具时可直接最终回答。
+            1. 问「有几个 skill / 有哪些工具 / 你会什么」时：必须先调用 list_skills，禁止用 kb_search 或知识库条目代替。
+               手册/FAQ 才用 search_docs 或 kb_search；平台事实（表、源、指标）用对应 list/get 工具。
+               跨会话项目要点用 memory_recall；沉淀本轮结论用 memory_save（草稿纪要）。
+            2. 只能使用提供的工具。若工具 JSON 含 error=`forbidden`：必须原样转述 message / applyHint / howTo，
+               并给出 Markdown 链接到 applyHref；禁止声称「已有权限」。可用 create_apply_ticket 代填申请。
+            3. 区分「目录可见」与「我可查」两平面，禁止混说；以工具 JSON 为准，禁止编造表数量/口径/授权。
+            4. 以会话摘要与近期对话轮次为准；勿编造未出现过的表名、权限或结论。
+            5. 不自动执行 SQL；不做系统管理；不代建数据源/发布/删除。
+            6. 最终用简洁中文 Markdown 回答；站内深链如 [申请表读权](/apply?type=perm&assetId=...)。
             """;
 
     @Resource
@@ -74,24 +69,41 @@ public class GovAiAgentOrchestrator {
     }
 
     /**
-     * @param onToolStep 每完成一个工具调用回调（用于 SSE citation）
-     * @param onToken    最终回答文本增量（真流式）；可空则整段返回
+     * ReAct：多步 tool loop；思考过程经 {@code onThinking}，工具经 {@code onToolStep}，最终答案经 {@code onToken}。
      */
     public AgentRunResult run(String workspace, String userText, String modelId,
                               Consumer<Map<String, Object>> onToolStep,
                               Consumer<String> onToken) {
+        return run(workspace, userText, modelId, onToolStep, onToken, null, null, null);
+    }
+
+    public AgentRunResult run(String workspace, String userText, String modelId,
+                              Consumer<Map<String, Object>> onToolStep,
+                              Consumer<String> onToken,
+                              Consumer<Map<String, Object>> onThinking) {
+        return run(workspace, userText, modelId, onToolStep, onToken, onThinking, null, null);
+    }
+
+    /**
+     * @param history        本会话历史（role=user|assistant, content），不含当前 user 句
+     * @param sessionSummary 滚动工作记忆摘要，可空
+     */
+    public AgentRunResult run(String workspace, String userText, String modelId,
+                              Consumer<Map<String, Object>> onToolStep,
+                              Consumer<String> onToken,
+                              Consumer<Map<String, Object>> onThinking,
+                              List<Map<String, Object>> history,
+                              String sessionSummary) {
         AgentRunResult result = new AgentRunResult();
         List<Map<String, Object>> tools = toolRegistry.openaiToolDefinitions();
         if (tools.isEmpty()) {
             result.failReason = "no_tools";
             return result;
         }
-        List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT
-                + "\n当前工作空间偏好 ws=`" + StrUtil.blankToDefault(workspace, "default") + "`（软偏好）。"));
-        messages.add(Map.of("role", "user", "content", StrUtil.nullToEmpty(userText)));
+        List<Map<String, Object>> messages = buildMessages(workspace, userText, history, sessionSummary);
 
         List<Map<String, Object>> collectedToolNotes = new ArrayList<>();
+        emitThinking(onThinking, 0, "analyzing", "正在分析问题，决定是否调用工具…");
 
         for (int step = 0; step < MAX_STEPS; step++) {
             result.steps = step + 1;
@@ -102,10 +114,14 @@ public class GovAiAgentOrchestrator {
                 return result;
             }
             String content = String.valueOf(llm.getOrDefault("content", ""));
+            if ("null".equals(content)) {
+                content = "";
+            }
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) llm.get("tool_calls");
             if (toolCalls == null || toolCalls.isEmpty()) {
                 if (StrUtil.isNotBlank(content)) {
+                    emitThinking(onThinking, step + 1, "answer", "已得到足够信息，正在整理回答…");
                     result.success = true;
                     result.answer = content.trim();
                     emitAnswerTokens(result.answer, onToken);
@@ -115,11 +131,24 @@ public class GovAiAgentOrchestrator {
                 result.failReason = "empty_final";
                 return result;
             }
+
+            if (StrUtil.isNotBlank(content)) {
+                emitThinking(onThinking, step + 1, "thought", content.trim());
+            } else {
+                List<String> names = new ArrayList<>();
+                for (Map<String, Object> tc : toolCalls) {
+                    names.add(String.valueOf(tc.getOrDefault("name", "tool")));
+                }
+                emitThinking(onThinking, step + 1, "plan",
+                        "准备调用工具：" + String.join("、", names));
+            }
+
             messages.add(LhChatTools.assistantToolCallMessage(content, toolCalls));
             for (Map<String, Object> tc : toolCalls) {
                 String name = String.valueOf(tc.getOrDefault("name", ""));
                 String args = String.valueOf(tc.getOrDefault("arguments", "{}"));
                 String callId = String.valueOf(tc.getOrDefault("id", "call"));
+                emitThinking(onThinking, step + 1, "acting", "正在执行 `" + name + "` …");
                 long t0 = System.currentTimeMillis();
                 String toolOut = toolRegistry.execute(name, args, workspace);
                 int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - t0);
@@ -133,6 +162,16 @@ public class GovAiAgentOrchestrator {
                 cite.put("latencyMs", latency);
                 result.citations.add(cite);
                 collectedToolNotes.add(cite);
+                if (toolOut != null && toolOut.contains("\"error\":\"forbidden\"")) {
+                    String applyHref = AiSkillDenyHelper.extractApplyHref(toolOut);
+                    boolean hasApply = result.actions.stream()
+                            .anyMatch(a -> applyHref.equals(String.valueOf(a.get("href"))));
+                    if (!hasApply) {
+                        for (Map<String, Object> a : AiSkillDenyHelper.deeplinkActions(applyHref, null)) {
+                            result.actions.add(a);
+                        }
+                    }
+                }
                 if (onToolStep != null) {
                     try {
                         onToolStep.accept(cite);
@@ -141,36 +180,12 @@ public class GovAiAgentOrchestrator {
                     }
                 }
             }
-
-            // SSE 场景：工具执行后立刻真流式归纳（同轮可多 tool_calls；跨轮再调工具让位于流式体验）
-            if (onToken != null) {
-                messages.add(Map.of("role", "user", "content",
-                        "请仅基于以上工具返回的 JSON 结果，用中文归纳回答用户问题；不要再调用工具。"
-                                + "若信息不足，说明还缺什么，并提示用户补充。"));
-                Map<String, Object> streamed = streamFinalAnswer(modelId, messages, onToken);
-                if (Boolean.TRUE.equals(streamed.get("ok"))
-                        && StrUtil.isNotBlank(String.valueOf(streamed.get("content")))) {
-                    result.success = true;
-                    result.answer = String.valueOf(streamed.get("content")).trim();
-                    appendDefaultActions(result);
-                    return result;
-                }
-                break; // 流式失败 → 循环外启发式 / 再试 streamFinal
-            }
+            // 继续下一轮：模型可再调工具或给出最终答案（真 ReAct，不在首轮强制收束）
         }
 
-        // 步数用尽 / 流式失败：无 tools 再归纳一轮
-        Object lastMsg = messages.isEmpty() ? null : messages.get(messages.size() - 1);
-        boolean alreadyNudged = false;
-        if (lastMsg instanceof Map<?, ?> lm) {
-            alreadyNudged = "user".equals(String.valueOf(lm.get("role")))
-                    && String.valueOf(lm.get("content") == null ? "" : lm.get("content"))
-                    .contains("不要再调用工具");
-        }
-        if (!alreadyNudged) {
-            messages.add(Map.of("role", "user", "content",
-                    "工具调用步数已用尽。请仅基于以上工具返回的 JSON 结果，用中文归纳回答用户问题；不要再调用工具。"));
-        }
+        emitThinking(onThinking, MAX_STEPS, "finalize", "步数用尽，基于已有工具结果归纳回答…");
+        messages.add(Map.of("role", "user", "content",
+                "工具调用步数已用尽。请仅基于以上工具返回的 JSON 结果，用中文归纳回答用户问题；不要再调用工具。"));
         Map<String, Object> finalLlm = streamFinalAnswer(modelId, messages, onToken);
         if (Boolean.TRUE.equals(finalLlm.get("ok")) && StrUtil.isNotBlank(String.valueOf(finalLlm.get("content")))) {
             result.success = true;
@@ -178,7 +193,6 @@ public class GovAiAgentOrchestrator {
             appendDefaultActions(result);
             return result;
         }
-        // 启发式：拼工具摘要
         if (!collectedToolNotes.isEmpty()) {
             StringBuilder sb = new StringBuilder();
             sb.append("### 探索结果（工具摘要）\n\n");
@@ -197,10 +211,73 @@ public class GovAiAgentOrchestrator {
         return result;
     }
 
+    private static void emitThinking(Consumer<Map<String, Object>> onThinking, int step, String phase, String text) {
+        if (onThinking == null || StrUtil.isBlank(text)) {
+            return;
+        }
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("step", step);
+        ev.put("phase", phase);
+        ev.put("text", text);
+        try {
+            onThinking.accept(ev);
+        } catch (Exception ignored) {
+            // SSE soft
+        }
+    }
+
     /** 兼容旧调用：无 token 回调 */
     public AgentRunResult run(String workspace, String userText, String modelId,
                               Consumer<Map<String, Object>> onToolStep) {
-        return run(workspace, userText, modelId, onToolStep, null);
+        return run(workspace, userText, modelId, onToolStep, null, null, null, null);
+    }
+
+    static List<Map<String, Object>> buildMessages(String workspace, String userText,
+                                                   List<Map<String, Object>> history,
+                                                   String sessionSummary) {
+        List<Map<String, Object>> messages = new ArrayList<>();
+        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT
+                + "\n当前工作空间偏好 ws=`" + StrUtil.blankToDefault(workspace, "default") + "`（软偏好）。"));
+        if (StrUtil.isNotBlank(sessionSummary)) {
+            messages.add(Map.of("role", "system", "content",
+                    "【会话工作记忆摘要】\n" + StrUtil.maxLength(sessionSummary.trim(), 2000)));
+        }
+        int maxTurns = StrUtil.isNotBlank(sessionSummary) ? HISTORY_WITH_SUMMARY_TURNS : HISTORY_MAX_TURNS;
+        List<Map<String, Object>> hist = trimHistory(history, maxTurns);
+        for (Map<String, Object> h : hist) {
+            String role = String.valueOf(h.getOrDefault("role", "")).trim().toLowerCase();
+            if (!"user".equals(role) && !"assistant".equals(role)) {
+                continue;
+            }
+            String content = StrUtil.maxLength(StrUtil.nullToEmpty(String.valueOf(h.get("content"))), HISTORY_MAX_CHARS_PER_MSG);
+            if (StrUtil.isBlank(content)) {
+                continue;
+            }
+            messages.add(Map.of("role", role, "content", content));
+        }
+        messages.add(Map.of("role", "user", "content", StrUtil.nullToEmpty(userText)));
+        return messages;
+    }
+
+    /** 取末尾 maxTurns 条 user/assistant（按条计，非「一轮」pair）。 */
+    static List<Map<String, Object>> trimHistory(List<Map<String, Object>> history, int maxTurns) {
+        if (history == null || history.isEmpty() || maxTurns <= 0) {
+            return List.of();
+        }
+        List<Map<String, Object>> filtered = new ArrayList<>();
+        for (Map<String, Object> h : history) {
+            if (h == null) {
+                continue;
+            }
+            String role = String.valueOf(h.getOrDefault("role", "")).trim().toLowerCase();
+            if ("user".equals(role) || "assistant".equals(role)) {
+                filtered.add(h);
+            }
+        }
+        if (filtered.size() <= maxTurns) {
+            return filtered;
+        }
+        return filtered.subList(filtered.size() - maxTurns, filtered.size());
     }
 
     private static void emitAnswerTokens(String answer, Consumer<String> onToken) {

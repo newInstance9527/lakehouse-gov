@@ -76,6 +76,11 @@ public final class IntentRouter {
                 && containsAny(t, "gmv", "指标", "订单", "成交", "销量", "金额", "人数", "次数")) {
             return "ask_data";
         }
+        // 问助手自身能力 / skill / 工具 → 走探索智能体（勿误进知识库）
+        if (containsAny(t, "skill", "skills", "工具", "有几个技能", "有哪些技能", "你会什么",
+                "能做什么", "有哪些能力", "调用工具", "工具列表")) {
+            return "agent";
+        }
         if (containsAny(t, "手册", "怎么用", "如何申请", "faq", "帮助")) {
             return "docqa";
         }
@@ -85,7 +90,8 @@ public final class IntentRouter {
         if (containsAny(t, "sql", "查询", "select", "近", "天", "gmv", "指标", "统计", "汇总", "帮我写")) {
             return "nl2sql";
         }
-        return "docqa";
+        // 默认：通用对话（不强制知识库）；探索路径由 chat 入口优先 Agent
+        return "chat";
     }
 
     private static boolean containsAny(String text, String... keys) {
@@ -109,7 +115,7 @@ public final class IntentRouter {
             case "nl2sql", "sql_opt", "ask_data", "list_assets", "api_script" -> "sql";
             case "gen_script" -> "script";
             case "diagnose" -> "diagnose";
-            case "docqa", "explain", "agent" -> "manual";
+            case "docqa", "explain", "agent", "chat" -> "manual";
             default -> "manual";
         };
     }

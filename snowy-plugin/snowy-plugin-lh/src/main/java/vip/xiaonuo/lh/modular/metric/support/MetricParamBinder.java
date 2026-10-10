@@ -5,6 +5,7 @@ import cn.hutool.core.util.StrUtil;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -76,14 +77,21 @@ public final class MetricParamBinder {
                 if (raw == null) {
                     raw = p.get(dimKey);
                 }
-                String v = str(raw);
-                if (StrUtil.isBlank(v)) {
+                List<String> vals = normalizeDimValues(raw);
+                if (vals.isEmpty()) {
                     throw new IllegalArgumentException("缺少维度参数: " + dimKey);
                 }
-                if (!SAFE_DIM.matcher(v).matches()) {
-                    throw new IllegalArgumentException("非法维度值: " + dimKey);
+                for (String v : vals) {
+                    if (!SAFE_DIM.matcher(v).matches()) {
+                        throw new IllegalArgumentException("非法维度值: " + dimKey);
+                    }
                 }
-                repl = v.replace("'", "''");
+                // 占位符 {{dim.x}} 仅单值；多值由 dimFilterPredicates 生成 IN 字面量
+                if (vals.size() > 1) {
+                    throw new IllegalArgumentException(
+                            "维度 " + dimKey + " 为多值，请使用编译期 IN 谓词（勿在模板写单值占位符）");
+                }
+                repl = vals.get(0).replace("'", "''");
             } else {
                 throw new IllegalArgumentException("不支持的占位符: {{" + key + "}}");
             }
@@ -164,15 +172,105 @@ public final class MetricParamBinder {
             if (raw == null) {
                 raw = params.get(g);
             }
-            if (raw == null || StrUtil.isBlank(String.valueOf(raw))) {
+            List<String> vals = normalizeDimValues(raw);
+            if (vals.isEmpty()) {
                 continue;
             }
-            String v = String.valueOf(raw).trim();
-            if (!SAFE_DIM.matcher(v).matches()) {
-                throw new IllegalArgumentException("非法维度值: " + g);
+            for (String v : vals) {
+                if (!SAFE_DIM.matcher(v).matches()) {
+                    throw new IllegalArgumentException("非法维度值: " + g);
+                }
             }
-            out.add(g + " = '{{dim." + g + "}}'");
+            if (vals.size() == 1) {
+                out.add(g + " = '{{dim." + g + "}}'");
+            } else {
+                // 已校验白名单，直接写 IN 字面量（避免多占位符）
+                StringBuilder in = new StringBuilder();
+                for (int i = 0; i < vals.size(); i++) {
+                    if (i > 0) {
+                        in.append(", ");
+                    }
+                    in.append("'").append(vals.get(i).replace("'", "''")).append("'");
+                }
+                out.add(g + " IN (" + in + ")");
+            }
         }
         return out;
+    }
+
+    /**
+     * 维度值规范化：单值字符串 / 数组 / 逗号分隔（当整串不符合 SAFE_DIM 时拆分）。
+     */
+    public static List<String> normalizeDimValues(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        if (raw instanceof Collection<?> c) {
+            List<String> out = new ArrayList<>();
+            for (Object o : c) {
+                String s = str(o);
+                if (StrUtil.isNotBlank(s)) {
+                    out.add(s);
+                }
+            }
+            return out;
+        }
+        if (raw.getClass().isArray()) {
+            int n = java.lang.reflect.Array.getLength(raw);
+            List<String> out = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                String s = str(java.lang.reflect.Array.get(raw, i));
+                if (StrUtil.isNotBlank(s)) {
+                    out.add(s);
+                }
+            }
+            return out;
+        }
+        String s = str(raw);
+        if (StrUtil.isBlank(s)) {
+            return List.of();
+        }
+        if (SAFE_DIM.matcher(s).matches()) {
+            return List.of(s);
+        }
+        if (s.contains(",")) {
+            List<String> out = new ArrayList<>();
+            for (String part : s.split(",")) {
+                String t = part.trim();
+                if (StrUtil.isNotBlank(t)) {
+                    out.add(t);
+                }
+            }
+            return out;
+        }
+        return List.of(s);
+    }
+
+    /** 供 Guest RLS 等场景生成已转义的 SQL 谓词片段（不含 WHERE） */
+    public static String dimEqualsOrInClause(String column, Object raw) {
+        if (StrUtil.isBlank(column)) {
+            throw new IllegalArgumentException("维度列为空");
+        }
+        List<String> vals = normalizeDimValues(raw);
+        if (vals.isEmpty()) {
+            return "";
+        }
+        for (String v : vals) {
+            if (!SAFE_DIM.matcher(v).matches()) {
+                throw new IllegalArgumentException("非法维度值: " + column);
+            }
+        }
+        String col = column.trim();
+        if (vals.size() == 1) {
+            return col + " = '" + vals.get(0).replace("'", "''") + "'";
+        }
+        StringBuilder in = new StringBuilder();
+        for (int i = 0; i < vals.size(); i++) {
+            if (i > 0) {
+                in.append(", ");
+            }
+            in.append("'").append(vals.get(i).replace("'", "''")).append("'");
+        }
+        return col + " IN (" + in + ")";
     }
 }

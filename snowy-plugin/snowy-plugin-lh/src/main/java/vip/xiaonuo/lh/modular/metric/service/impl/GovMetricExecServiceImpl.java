@@ -13,6 +13,7 @@ import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.core.engine.ClickHouseClient;
 import vip.xiaonuo.lh.core.engine.TrinoClient;
+import vip.xiaonuo.lh.core.engine.VictoriaMetricsClient;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricMaterialize;
 import vip.xiaonuo.lh.modular.metric.entity.GovMetricVer;
@@ -22,6 +23,8 @@ import vip.xiaonuo.lh.modular.metric.mapper.GovMetricVerMapper;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTrialParam;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricExecService;
+import vip.xiaonuo.lh.modular.metric.service.GovMetricOntologyService;
+import vip.xiaonuo.lh.modular.metric.support.GovMetricMetricsFormatter;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricSqlCompiler;
 import vip.xiaonuo.lh.modular.metric.support.MetricExecGuard;
 import vip.xiaonuo.lh.modular.metric.support.MetricExecRouter;
@@ -35,6 +38,7 @@ import vip.xiaonuo.lh.modular.sec.entity.LhTrinoPrincipal;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -77,6 +81,10 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
     private MetricPartitionReconGate partitionReconGate;
     @Resource
     private LhProperties lhProperties;
+    @Resource
+    private GovMetricOntologyService govMetricOntologyService;
+    @Resource
+    private VictoriaMetricsClient victoriaMetricsClient;
 
     @Override
     public Map<String, Object> query(GovMetricQueryParam param) {
@@ -139,6 +147,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         if (ver == null) {
             throw new CommonException("指标版本不存在");
         }
+        List<Map<String, Object>> steps = new ArrayList<>();
         GovMetricMaterialize ckMat = findMaterialize(head.getMetricCode(), ver.getVer(), "clickhouse");
         int lookback = lhProperties.getMetric() != null ? lhProperties.getMetric().getReconLookbackHours() : 48;
         String partBlock = partitionReconGate.blockReasonForMetric(
@@ -148,26 +157,38 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
         MetricExecRouter.Decision route = MetricExecRouter.decide(
                 prefer, clickHouseClient.configured(), ckMat, partBlock);
 
+        long tCompile = System.currentTimeMillis();
         GovMetricSqlCompiler.CompileOut compiled;
         try {
             compiled = GovMetricSqlCompiler.compile(head, ver, "trino",
                     code -> resolveNode(code, head.getWs()),
                     params == null ? Map.of() : params);
+            steps.add(stepOf("compile", "ok", System.currentTimeMillis() - tCompile, "trino dialect"));
         } catch (IllegalArgumentException e) {
+            steps.add(stepOf("compile", "error", System.currentTimeMillis() - tCompile, e.getMessage()));
             throw new CommonException(e.getMessage());
         }
 
+        long tBind = System.currentTimeMillis();
         MetricParamBinder.BindOut bound;
         try {
+            govMetricOntologyService.assertDimMembers(
+                    params == null ? Map.of() : params,
+                    compiled.grainKeys(),
+                    head.getWs());
             bound = MetricParamBinder.bind(compiled.sqlText(), params,
                     compiled.timeWindow(), compiled.grainKeys());
+            steps.add(stepOf("param_bind", "ok", System.currentTimeMillis() - tBind,
+                    "grain=" + (compiled.grainKeys() == null ? 0 : compiled.grainKeys().size())));
         } catch (IllegalArgumentException e) {
+            steps.add(stepOf("param_bind", "error", System.currentTimeMillis() - tBind, e.getMessage()));
             throw new CommonException(e.getMessage());
         }
 
         String compiledLimited = MetricExecGuard.ensureLimit(bound.sql(), maxRows);
         String trinoSql = compiledLimited;
         boolean iceMaterialized = false;
+        long tRewrite = System.currentTimeMillis();
         GovMetricMaterialize iceMat = findMaterialize(head.getMetricCode(), ver.getVer(), "iceberg");
         if (iceMat != null && iceMat.getReconOk() != null && iceMat.getReconOk() == 1
                 && StrUtil.isNotBlank(iceMat.getTargetTable())
@@ -200,15 +221,23 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
                         bound.dt(), bound.from(), bound.to(),
                         maxRows);
                 materialized = true;
+                steps.add(stepOf("materialize_rewrite", "ok", System.currentTimeMillis() - tRewrite,
+                        "clickhouse " + route.materialize().getTargetTable()));
             } catch (IllegalArgumentException e) {
                 route = MetricExecRouter.Decision.fallback("物化改写失败: " + e.getMessage());
                 dialect = route.dialect();
                 engine = route.engine();
                 sql = trinoSql;
                 materialized = iceMaterialized;
+                steps.add(stepOf("materialize_rewrite", "skipped", System.currentTimeMillis() - tRewrite,
+                        e.getMessage()));
             }
         } else {
             materialized = iceMaterialized;
+            steps.add(stepOf("materialize_rewrite",
+                    iceMaterialized ? "ok" : "skipped",
+                    System.currentTimeMillis() - tRewrite,
+                    iceMaterialized ? "iceberg ADS" : "no materialize hit"));
         }
 
         String block = MetricExecGuard.blockReason(sql);
@@ -226,6 +255,8 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             row.setRowCount(0);
             row.setUpdateTime(new Date());
             execMapper.updateById(row);
+            steps.add(stepOf("engine", "error", 0L, block));
+            steps.add(stepOf("rows", "skipped", 0L, "blocked"));
             Map<String, Object> blocked = MetricExecGuard.blockedPayload(block);
             blocked.put("queryId", queryId);
             blocked.put("metricCode", head.getMetricCode());
@@ -235,6 +266,7 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             blocked.put("engine", engine);
             blocked.put("materialized", materialized);
             blocked.put("cached", false);
+            blocked.put("steps", steps);
             if (route.fallback() != null) {
                 blocked.put("fallback", route.fallback());
                 blocked.put("message", hotFallbackMessage(prefer, route));
@@ -242,12 +274,54 @@ public class GovMetricExecServiceImpl implements GovMetricExecService {
             return blocked;
         }
 
+        Map<String, Object> out;
         if (route.useHot()) {
-            return executeClickHouse(row, head, ver, sql, trinoSql, dialect, engine, bound, queryId,
+            out = executeClickHouse(row, head, ver, sql, trinoSql, dialect, engine, bound, queryId,
                     source, trial, jobIdentity, materialized, prefer, maxRows);
+        } else {
+            out = executeTrino(row, head, ver, sql, dialect, engine, bound, queryId,
+                    source, trial, jobIdentity, materialized, prefer, route, maxRows);
         }
-        return executeTrino(row, head, ver, sql, dialect, engine, bound, queryId,
-                source, trial, jobIdentity, materialized, prefer, route, maxRows);
+        long engDur = out.get("durMs") instanceof Number n ? n.longValue() : 0L;
+        boolean ok = Boolean.TRUE.equals(out.get("executed"))
+                && !"failed".equals(String.valueOf(out.get("status")));
+        steps.add(stepOf("engine", ok ? "ok" : "error", engDur,
+                StrUtil.blankToDefault(String.valueOf(out.get("engine")), engine)));
+        Object rc = out.get("rowCount");
+        steps.add(stepOf("rows", ok ? "ok" : "skipped", 0L,
+                "rowCount=" + (rc == null ? 0 : rc)));
+        out.put("steps", steps);
+        writeQueryObsSoft(head, prefer, source, engDur, ok);
+        return out;
+    }
+
+    /** 查询观测写 VM（QPS/延迟）；未配置 import-url 则跳过 */
+    private void writeQueryObsSoft(GovMetric head, String prefer, String kind, long durMs, boolean ok) {
+        try {
+            if (head == null || !victoriaMetricsClient.configured()) {
+                return;
+            }
+            List<String> lines = GovMetricMetricsFormatter.formatQueryObs(
+                    head.getMetricCode(),
+                    StrUtil.blankToDefault(head.getWs(), WS_DEFAULT),
+                    prefer,
+                    kind,
+                    durMs,
+                    ok,
+                    System.currentTimeMillis());
+            victoriaMetricsClient.importPrometheus(GovMetricMetricsFormatter.joinBody(lines));
+        } catch (Exception ignored) {
+            // soft-fail：观测不影响主路径
+        }
+    }
+
+    private static Map<String, Object> stepOf(String name, String status, long durMs, String detail) {
+        Map<String, Object> s = new LinkedHashMap<>();
+        s.put("name", name);
+        s.put("status", status);
+        s.put("durMs", durMs);
+        s.put("detail", detail == null ? "" : detail);
+        return s;
     }
 
     private Map<String, Object> executeClickHouse(CpQueryExec row, GovMetric head, GovMetricVer ver,

@@ -9,7 +9,7 @@ import lombok.Setter;
 public class GovKbUpsertParam {
 
     private String title;
-    /** term|dict|practice|faq|manual */
+    /** term|dict|practice|faq|manual|minutes */
     private String cat;
     private String body;
     /** manual|upload */
@@ -27,4 +27,9 @@ public class GovKbUpsertParam {
     /** workspace | platform */
     private String scope;
     private String remark;
+    /** 人工覆盖质量分 0-10 */
+    private java.math.BigDecimal qualityScore;
+    private String scoreReason;
+    private String tagsJson;
+    private String lifecycleStatus;
 }

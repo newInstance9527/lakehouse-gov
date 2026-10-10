@@ -8,6 +8,9 @@
 | 1 | `lh_metric_anomaly==1` | 告警平台组 | 规则已写 |
 | 2 | `|lh_metric_change_pct|≥40` | P0/P1 | 规则已写 |
 | 3 | 36h 无 `lh_metric_value` | 采样断流 | 规则已写 |
+| 4 | 查询失败率 10m>30% | `lh_metric_query_*` | 规则已写 |
+| 5 | 查询均延迟 >15s | latency | 规则已写 |
+| 6 | 24h 无查询写点 | 空闲/断流 | 规则已写（info） |
 
 ## 文件
 

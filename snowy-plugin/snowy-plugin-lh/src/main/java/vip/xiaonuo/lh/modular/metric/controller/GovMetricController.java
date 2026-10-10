@@ -17,14 +17,18 @@ import org.springframework.web.bind.annotation.RestController;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import cn.hutool.core.util.StrUtil;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricBoardQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricCompileParam;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricDimUpsertParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricMaterializeParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricPageParam;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricQualifierUpsertParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTransitionParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricTrialParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricUpsertParam;
 import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
+import vip.xiaonuo.lh.modular.metric.service.GovMetricOntologyService;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
 import vip.xiaonuo.lh.modular.recon.support.ReconPartitionService;
 
@@ -42,6 +46,8 @@ public class GovMetricController {
     @Resource
     private GovMetricService govMetricService;
     @Resource
+    private GovMetricOntologyService govMetricOntologyService;
+    @Resource
     private ReconPartitionService reconPartitionService;
 
     @Operation(summary = "KPI 概览")
@@ -50,10 +56,17 @@ public class GovMetricController {
         return CommonResult.data(govMetricService.overview(ws));
     }
 
-    @Operation(summary = "核心看板（对账门禁）")
+    @Operation(summary = "就绪指标看板（对账门禁）")
     @GetMapping("/lh/metric/board")
     public CommonResult<Map<String, Object>> board(@RequestParam(required = false) String ws) {
         return CommonResult.data(govMetricService.board(ws));
+    }
+
+    @Operation(summary = "就绪指标按维查询（filters.dims ≡ params.dims）")
+    @PostMapping("/lh/metric/board/query")
+    public CommonResult<Map<String, Object>> boardQuery(
+            @RequestBody(required = false) GovMetricBoardQueryParam param) {
+        return CommonResult.data(govMetricService.boardQuery(param));
     }
 
     @Operation(summary = "指标分页列表")
@@ -134,6 +147,15 @@ public class GovMetricController {
         return CommonResult.data(govMetricService.lineage(code, ws));
     }
 
+    @Operation(summary = "指标试跑/查询执行记录（审计元数据，无历史行集）")
+    @GetMapping("/lh/metric/{code}/execs")
+    public CommonResult<Map<String, Object>> listExecs(
+            @PathVariable("code") String code,
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(govMetricService.listExecs(code, ws, limit));
+    }
+
     @Operation(summary = "指标日波动摘要")
     @GetMapping("/lh/metric/{code}/anomaly")
     public CommonResult<Map<String, Object>> anomaly(
@@ -165,6 +187,106 @@ public class GovMetricController {
             @PathVariable("code") String code,
             @RequestBody(required = false) GovMetricMaterializeParam param) {
         return CommonResult.data(govMetricService.materialize(code, param));
+    }
+
+    @Operation(summary = "修饰词列表")
+    @GetMapping("/lh/metric/qualifiers")
+    public CommonResult<List<Map<String, Object>>> listQualifiers(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String domain,
+            @RequestParam(required = false) String q) {
+        return CommonResult.data(govMetricOntologyService.listQualifiers(ws, status, domain, q));
+    }
+
+    @Operation(summary = "修饰词下拉（value=编译 SQL 快照）")
+    @GetMapping("/lh/metric/qualifiers/options")
+    public CommonResult<List<Map<String, Object>>> qualifierOptions(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String domain,
+            @RequestParam(required = false) String table) {
+        return CommonResult.data(govMetricOntologyService.qualifierOptions(ws, domain, table));
+    }
+
+    @Operation(summary = "新建修饰词")
+    @CommonLog("新建指标修饰词")
+    @PostMapping("/lh/metric/qualifiers")
+    public CommonResult<Map<String, Object>> createQualifier(
+            @RequestBody @Valid GovMetricQualifierUpsertParam param) {
+        return CommonResult.data(govMetricOntologyService.upsertQualifier(param, true));
+    }
+
+    @Operation(summary = "更新修饰词")
+    @CommonLog("更新指标修饰词")
+    @PutMapping("/lh/metric/qualifiers/{code}")
+    public CommonResult<Map<String, Object>> updateQualifier(
+            @PathVariable("code") String code,
+            @RequestBody GovMetricQualifierUpsertParam param) {
+        param.setCode(code);
+        return CommonResult.data(govMetricOntologyService.upsertQualifier(param, false));
+    }
+
+    @Operation(summary = "停用修饰词")
+    @CommonLog("停用指标修饰词")
+    @PostMapping("/lh/metric/qualifiers/{code}/disable")
+    public CommonResult<Map<String, Object>> disableQualifier(
+            @PathVariable("code") String code,
+            @RequestParam(required = false) String ws) {
+        return CommonResult.data(govMetricOntologyService.disableQualifier(code, ws));
+    }
+
+    @Operation(summary = "公共维度列表")
+    @GetMapping("/lh/metric/dims")
+    public CommonResult<List<Map<String, Object>>> listDims(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String domain,
+            @RequestParam(required = false) String q) {
+        return CommonResult.data(govMetricOntologyService.listDims(ws, status, domain, q));
+    }
+
+    @Operation(summary = "公共维度下拉")
+    @GetMapping("/lh/metric/dims/options")
+    public CommonResult<List<Map<String, Object>>> dimOptions(
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String domain) {
+        return CommonResult.data(govMetricOntologyService.dimOptions(ws, domain));
+    }
+
+    @Operation(summary = "新建公共维度")
+    @CommonLog("新建指标维度")
+    @PostMapping("/lh/metric/dims")
+    public CommonResult<Map<String, Object>> createDim(@RequestBody @Valid GovMetricDimUpsertParam param) {
+        return CommonResult.data(govMetricOntologyService.upsertDim(param, true));
+    }
+
+    @Operation(summary = "更新公共维度")
+    @CommonLog("更新指标维度")
+    @PutMapping("/lh/metric/dims/{code}")
+    public CommonResult<Map<String, Object>> updateDim(
+            @PathVariable("code") String code,
+            @RequestBody GovMetricDimUpsertParam param) {
+        param.setCode(code);
+        return CommonResult.data(govMetricOntologyService.upsertDim(param, false));
+    }
+
+    @Operation(summary = "停用公共维度")
+    @CommonLog("停用指标维度")
+    @PostMapping("/lh/metric/dims/{code}/disable")
+    public CommonResult<Map<String, Object>> disableDim(
+            @PathVariable("code") String code,
+            @RequestParam(required = false) String ws) {
+        return CommonResult.data(govMetricOntologyService.disableDim(code, ws));
+    }
+
+    @Operation(summary = "DIM 层成员列表（从湖表查询）")
+    @GetMapping("/lh/metric/dims/{code}/members")
+    public CommonResult<Map<String, Object>> listDimMembers(
+            @PathVariable("code") String code,
+            @RequestParam(required = false) String ws,
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false) Integer limit) {
+        return CommonResult.data(govMetricOntologyService.listDimMembers(code, ws, q, limit));
     }
 
     @Operation(summary = "分区对账流水（看板/可靠性）")

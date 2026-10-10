@@ -31,6 +31,15 @@ public class GovMetricUpsertParam {
     @Schema(description = "单位")
     private String unit;
 
+    @Schema(description = "值类型 number/ratio/currency/count")
+    private String valueType;
+
+    @Schema(description = "小数精度")
+    private Integer valuePrecision;
+
+    @Schema(description = "标签列表")
+    private List<String> tags;
+
     @Schema(description = "业务口径说明")
     private String caliber;
 

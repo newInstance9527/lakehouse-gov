@@ -28,6 +28,9 @@ public class GovMetric extends CommonEntity {
     private String kind;
     private String domainCode;
     private String unit;
+    private String valueType;
+    private Integer valuePrecision;
+    private String tagsJson;
     private String owner;
     private String currentVer;
     private String currentVerId;

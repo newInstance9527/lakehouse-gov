@@ -228,8 +228,18 @@ public class IgEtlSinkTargetChecker {
             r.put("via", "gravitino");
             r.put("message", "Grav CREATE TABLE 已提交");
             if (conf.getBool("registerAfterCreate", true)) {
-                upsertGravRef(ref);
-                r.put("registered", true);
+                Map<String, Object> reg = upsertGravRef(ref);
+                r.put("registered", Boolean.TRUE.equals(reg.get("ok")));
+                r.put("register", reg);
+                if (reg.get("assetId") != null) {
+                    r.put("assetId", reg.get("assetId"));
+                }
+                if (reg.get("omFqn") != null) {
+                    r.put("omFqn", reg.get("omFqn"));
+                }
+                if (reg.get("error") != null) {
+                    r.put("registerError", reg.get("error"));
+                }
             }
         } catch (CommonException e) {
             throw e;
@@ -243,7 +253,9 @@ public class IgEtlSinkTargetChecker {
         return r;
     }
 
-    private void upsertGravRef(TargetRef ref) {
+    /** @return ok / assetId / omFqn / error */
+    private Map<String, Object> upsertGravRef(TargetRef ref) {
+        Map<String, Object> out = new LinkedHashMap<>();
         try {
             CbGravAssetRef existing = gravAssetRefMapper.selectOne(new QueryWrapper<CbGravAssetRef>().lambda()
                     .eq(CbGravAssetRef::getGravMetalake, ref.metalake)
@@ -266,8 +278,16 @@ public class IgEtlSinkTargetChecker {
                 gravAssetRefMapper.insert(existing);
             }
             lakeQueryAssetBinder.ensure(existing);
+            out.put("ok", true);
+            out.put("assetId", existing.getId());
+            out.put("omFqn", ref.fqn());
+            return out;
         } catch (Exception e) {
             log.warn("register cb_grav_asset_ref soft-fail: {}", e.getMessage());
+            out.put("ok", false);
+            out.put("error", e.getMessage());
+            out.put("omFqn", ref.fqn());
+            return out;
         }
     }
 

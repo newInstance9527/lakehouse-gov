@@ -4,6 +4,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Getter;
 import lombok.Setter;
 
+import java.util.Map;
+
 @Getter
 @Setter
 public class GovMetricCompileParam {
@@ -22,4 +24,7 @@ public class GovMetricCompileParam {
 
     @Schema(description = "未落库时的临时定义（试编译）")
     private GovMetricUpsertParam draft;
+
+    @Schema(description = "与试跑同形：时间窗 / dims 切片（可选）")
+    private Map<String, Object> params;
 }

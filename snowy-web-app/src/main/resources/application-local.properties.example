@@ -173,6 +173,9 @@ lh.observability.nightingale-password=
 lh.ai.litellm-url=http://127.0.0.1:4000
 # 密钥：Master Key（无独立用户名）
 lh.ai.litellm-master-key=
+# 纪要记忆老化巡检（可选）
+# lh.ai.memory-patrol-enabled=true
+# lh.ai.memory-patrol-cron=0 30 3 ? * MON
 
 # —— Milvus（知识库向量）——
 # 地址

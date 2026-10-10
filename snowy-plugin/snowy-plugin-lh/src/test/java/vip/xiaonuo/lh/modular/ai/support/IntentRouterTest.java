@@ -36,4 +36,13 @@ class IntentRouterTest {
         assertEquals("list_assets", IntentRouter.route("任意", "list_assets"));
         assertEquals("nl2sql", IntentRouter.route("帮我写查询近7天订单", null));
     }
+
+    @Test
+    void skillQuestionsRouteToAgentNotDocqa() {
+        assertEquals("agent", IntentRouter.route("你有几个skill", null));
+        assertEquals("agent", IntentRouter.route("有哪些工具", null));
+        assertEquals("agent", IntentRouter.route("你会什么", null));
+        assertEquals("chat", IntentRouter.route("你好", null));
+        assertEquals("docqa", IntentRouter.route("申请中心怎么用", null));
+    }
 }

@@ -24,6 +24,12 @@ public interface CpQueryService {
 
     List<Map<String, Object>> history(CpQueryHistoryParam param);
 
+    /** 本人历史软删（从列表移除；不物理删） */
+    void deleteHistory(String id);
+
+    /** 清空本人在指定 ws 下的可见历史（软删） */
+    Map<String, Object> clearMyHistory(String ws);
+
     /**
      * 门户资产目录。{@code ws} 缺省 default。空列表表示没有已登记的表，不是降级。
      */

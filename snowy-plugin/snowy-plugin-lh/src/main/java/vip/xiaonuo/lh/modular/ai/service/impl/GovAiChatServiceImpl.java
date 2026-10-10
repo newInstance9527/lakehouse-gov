@@ -88,6 +88,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
     private static final String NOT_DELETE = "NOT_DELETE";
     private static final long SSE_TIMEOUT = 120_000L;
     private static final String DEFAULT_CHAT_MODEL = "aim_datagoo_dsflash";
+    /** 会话历史文本超此字符量时滚动更新 memory_summary */
+    private static final int MEMORY_SUMMARY_CHAR_THRESHOLD = 6000;
 
     private final ExecutorService ssePool = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "lh-ai-sse");
@@ -451,12 +453,16 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             }
             sendEvent(emitter, "meta", meta);
 
-            // 工具：知识检索（docqa/explain/manual；nl2sql/ask_data 涉及口径时也开）
+            // 工具：知识检索仅手册/解释/口径；chat/agent 兜底不强制 KB（避免「有几个 skill」误推知识库）
             boolean needKb = "docqa".equals(intent) || "explain".equals(intent) || "manual".equals(intent)
                     || StrUtil.containsIgnoreCase(safeText, "手册")
                     || IntentRouter.needsKbForCaliber(safeText)
                     || (("nl2sql".equals(intent) || "ask_data".equals(intent))
                         && IntentRouter.needsKbForCaliber(safeText));
+            if ("chat".equals(intent) || "agent".equals(intent)) {
+                needKb = IntentRouter.needsKbForCaliber(safeText)
+                        || StrUtil.containsIgnoreCase(safeText, "手册");
+            }
             if (needKb) {
                 List<Map<String, Object>> hits = searchKbPreferWs(workspace, safeText, 5);
                 for (Map<String, Object> h : hits) {
@@ -1888,6 +1894,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
 
             List<Map<String, Object>> liveCitations = new ArrayList<>();
             final boolean[] tokensStarted = {false};
+            List<Map<String, Object>> history = loadSessionHistoryForAgent(session.getId());
+            String sessionSummary = session.getMemorySummary();
             GovAiAgentOrchestrator.AgentRunResult agentResult = agentOrchestrator.run(
                     workspace, safeText, modelId,
                     cite -> {
@@ -1908,9 +1916,36 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                         } catch (Exception ignored) {
                             // SSE soft
                         }
-                    });
+                    },
+                    thinking -> {
+                        try {
+                            sendEvent(emitter, "thinking", thinking);
+                        } catch (Exception ignored) {
+                            // SSE soft
+                        }
+                    },
+                    history,
+                    sessionSummary);
             if (!agentResult.success || StrUtil.isBlank(agentResult.answer)) {
                 log.info("Agent fallback to IntentRouter: {}", agentResult.failReason);
+                String reason = StrUtil.blankToDefault(agentResult.failReason, "agent_failed");
+                boolean modelFail = reason.contains("llm") || reason.contains("model")
+                        || reason.contains("upstream") || reason.contains("timeout")
+                        || reason.contains("401") || reason.contains("403") || reason.contains("连接");
+                try {
+                    Map<String, Object> st = new LinkedHashMap<>();
+                    st.put("level", modelFail ? "error" : "warn");
+                    st.put("code", modelFail ? "model_call_failed" : "agent_fallback");
+                    st.put("label", modelFail ? "模型调用失败" : "智能体降级");
+                    st.put("message", modelFail
+                            ? ("模型调用失败：" + reason + "。将尝试降级回答；请到「AI 模型管理」测试连通性。")
+                            : ("探索智能体未完成（" + reason + "），改用固定意图链。"));
+                    st.put("failReason", reason);
+                    st.put("href", "/aimodel");
+                    sendEvent(emitter, "status", st);
+                } catch (Exception ignored) {
+                    // SSE soft
+                }
                 return false;
             }
 
@@ -1953,6 +1988,7 @@ public class GovAiChatServiceImpl implements GovAiChatService {
                 session.setTitle(StrUtil.maxLength(safeText.trim(), 40));
                 sessionMapper.updateById(session);
             }
+            tryRefreshSessionMemorySummary(session, history, safeText, agentResult.answer, modelId);
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("turnId", turnId);
             done.put("intent", intent);
@@ -1971,6 +2007,91 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             }
             return false;
         }
+    }
+
+    /** 本会话已落库轮次 → Agent history（不含尚未 persist 的本轮）。 */
+    private List<Map<String, Object>> loadSessionHistoryForAgent(String sessionId) {
+        if (StrUtil.isBlank(sessionId)) {
+            return List.of();
+        }
+        List<GovAiTurn> rows = turnMapper.selectList(new QueryWrapper<GovAiTurn>().lambda()
+                .eq(GovAiTurn::getSessionId, sessionId)
+                .orderByAsc(GovAiTurn::getCreateTime)
+                .last("LIMIT 40"));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (GovAiTurn t : rows) {
+            if (t == null) {
+                continue;
+            }
+            String role = StrUtil.blankToDefault(t.getRole(), "").trim().toLowerCase(Locale.ROOT);
+            if (!"user".equals(role) && !"assistant".equals(role)) {
+                continue;
+            }
+            if (StrUtil.isBlank(t.getContent())) {
+                continue;
+            }
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("role", role);
+            m.put("content", t.getContent());
+            out.add(m);
+        }
+        return out;
+    }
+
+    /**
+     * 历史文本过长时滚动更新 memory_summary；LLM 失败则用截断拼接兜底。
+     */
+    private void tryRefreshSessionMemorySummary(GovAiSession session,
+                                                List<Map<String, Object>> priorHistory,
+                                                String userText, String assistantAnswer, String modelId) {
+        if (session == null || StrUtil.isBlank(session.getId())) {
+            return;
+        }
+        int chars = 0;
+        StringBuilder transcript = new StringBuilder();
+        if (StrUtil.isNotBlank(session.getMemorySummary())) {
+            transcript.append("既有摘要：\n").append(session.getMemorySummary()).append("\n\n");
+            chars += session.getMemorySummary().length();
+        }
+        List<Map<String, Object>> all = new ArrayList<>(priorHistory == null ? List.of() : priorHistory);
+        Map<String, Object> u = new LinkedHashMap<>();
+        u.put("role", "user");
+        u.put("content", userText);
+        all.add(u);
+        Map<String, Object> a = new LinkedHashMap<>();
+        a.put("role", "assistant");
+        a.put("content", assistantAnswer);
+        all.add(a);
+        for (Map<String, Object> h : all) {
+            String c = String.valueOf(h.getOrDefault("content", ""));
+            chars += c.length();
+            transcript.append(h.get("role")).append(": ")
+                    .append(StrUtil.maxLength(c, 400)).append("\n");
+        }
+        if (chars < MEMORY_SUMMARY_CHAR_THRESHOLD && StrUtil.isNotBlank(session.getMemorySummary())) {
+            return;
+        }
+        if (chars < MEMORY_SUMMARY_CHAR_THRESHOLD / 2) {
+            return;
+        }
+        String summary = null;
+        try {
+            String prompt = "请用不超过 400 字中文归纳下列对话的关键事实、表名、结论与待办，勿编造：\n"
+                    + StrUtil.maxLength(transcript.toString(), 4000);
+            if (isDirectChatReady(modelId)) {
+                summary = chatDirect(modelId, "你是会话摘要器", prompt);
+            } else if (liteLlmClient.available()) {
+                summary = liteLlmClient.chatSimple(modelId, "你是会话摘要器", prompt);
+            }
+        } catch (Exception e) {
+            log.debug("memory_summary LLM soft-fail: {}", e.getMessage());
+        }
+        if (StrUtil.isBlank(summary) || "null".equalsIgnoreCase(summary.trim())) {
+            summary = StrUtil.maxLength(transcript.toString(), 800);
+        }
+        session.setMemorySummary(StrUtil.maxLength(summary.trim(), 2000));
+        session.setRevision(session.getRevision() == null ? 1 : session.getRevision() + 1);
+        sessionMapper.updateById(session);
     }
 
     private void persistTurn(String sessionId, String id, String role, String intent, String content,
@@ -2035,6 +2156,8 @@ public class GovAiChatServiceImpl implements GovAiChatService {
             case "diagnose" -> "诊断建议";
             case "explain" -> "解释说明";
             case "sql_opt" -> "SQL 优化";
+            case "agent" -> "探索智能体";
+            case "chat" -> "通用对话";
             default -> "助手回复";
         };
     }

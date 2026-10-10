@@ -20,6 +20,8 @@ public class GovDomain extends CommonEntity {
     private String id;
     private String ws;
     private String domainCode;
+    /** 父域/主题域编码（可空=顶层） */
+    private String parentCode;
     private String name;
     private String owner;
     private Integer sortNo;

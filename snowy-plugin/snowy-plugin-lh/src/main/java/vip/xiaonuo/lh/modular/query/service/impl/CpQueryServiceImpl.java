@@ -538,6 +538,54 @@ public class CpQueryServiceImpl implements CpQueryService {
     }
 
     @Override
+    public void deleteHistory(String id) {
+        if (StrUtil.isBlank(id)) {
+            throw new CommonException("缺少历史 id");
+        }
+        UserSnap user = currentUser();
+        CpQueryExec row = execMapper.selectById(id.trim());
+        if (row == null || "DELETE".equals(row.getDeleteFlag())) {
+            throw new CommonException("历史不存在");
+        }
+        if (StrUtil.isBlank(user.id) || !user.id.equals(row.getUserId())) {
+            throw new CommonException("只能删除本人历史");
+        }
+        row.setDeleteFlag("DELETE");
+        row.setUpdateTime(new Date());
+        row.setUpdateUser(user.id);
+        execMapper.updateById(row);
+    }
+
+    @Override
+    public Map<String, Object> clearMyHistory(String ws) {
+        UserSnap user = currentUser();
+        if (StrUtil.isBlank(user.id)) {
+            throw new CommonException("未登录，无法清空历史");
+        }
+        String workspace = StrUtil.blankToDefault(StrUtil.trim(ws), "default");
+        QueryWrapper<CpQueryExec> qw = new QueryWrapper<CpQueryExec>()
+                .eq("delete_flag", "NOT_DELETE")
+                .eq("user_id", user.id)
+                .eq("ws", workspace);
+        List<CpQueryExec> list = execMapper.selectList(qw);
+        Date now = new Date();
+        int n = 0;
+        for (CpQueryExec row : list) {
+            row.setDeleteFlag("DELETE");
+            row.setUpdateTime(now);
+            row.setUpdateUser(user.id);
+            execMapper.updateById(row);
+            n++;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("ws", workspace);
+        out.put("cleared", n);
+        out.put("message", "已从本人历史列表移除 " + n + " 条");
+        return out;
+    }
+
+    @Override
     public List<Map<String, Object>> schemaTree(String ws) {
         return assetCatalog.schemaTree(ws);
     }

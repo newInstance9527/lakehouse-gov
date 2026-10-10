@@ -12,7 +12,7 @@ import java.util.Date;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 热路径 / 核心看板：检查 {@code recon_partition} 最近失败分区。
+ * 热路径 / 就绪指标：检查 {@code recon_partition} 最近失败分区。
  * <p>失败 → 不得 prefer=hot，看板标记「数据未就绪」。</p>
  */
 @Component

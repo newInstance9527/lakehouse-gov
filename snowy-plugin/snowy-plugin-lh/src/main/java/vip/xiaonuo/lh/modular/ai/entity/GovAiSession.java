@@ -25,4 +25,6 @@ public class GovAiSession extends CommonEntity {
     private String userId;
     private String title;
     private String modelOverride;
+    /** 会话工作记忆滚动摘要（L1） */
+    private String memorySummary;
 }

@@ -58,6 +58,13 @@ public class CpDevelopController {
         return CommonResult.data(cpDevelopService.commit(param));
     }
 
+    @Operation(summary = "删除开发脚本（索引软删 + Git rm）")
+    @CommonLog("删除开发脚本")
+    @PostMapping({"/lh/compute/scripts/delete", "/api/compute/scripts/delete"})
+    public CommonResult<Map<String, Object>> delete(@RequestBody CpScriptSaveParam param) {
+        return CommonResult.data(cpDevelopService.delete(param == null ? null : param.getId()));
+    }
+
     @Operation(summary = "TEST/PRE 试跑")
     @CommonLog("开发脚本试跑")
     @PostMapping({"/lh/compute/scripts/run-stg", "/api/compute/scripts/run-stg"})

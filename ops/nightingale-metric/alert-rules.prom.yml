@@ -40,3 +40,47 @@ groups:
         annotations:
           summary: "指标采样时序断流（36h 无 lh_metric_value）"
           description: "检查 lh.metric.sample-daily-enabled、Trino、lh.lifecycle.vm-import-url"
+
+  # 查询 API 观测（门户 formal query / trial 写点：lh_metric_query_*）
+  - name: lh-metric-query
+    interval: 60s
+    rules:
+      # 门户按次写 gauge 点（非 counter）；用 *_over_time 统计窗口内样本
+      - alert: LhMetricQueryFailRateHigh
+        expr: |
+          count_over_time(lh_metric_query_total[10m]) > 5
+          and
+          (1 - avg_over_time(lh_metric_query_ok[10m])) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+          domain: metric
+          route: platform
+        annotations:
+          summary: "指标查询失败率偏高（10m >30%）"
+          description: "看 lh_metric_query_ok / lh_metric_query_total；深链 /metrics/catalog"
+
+      - alert: LhMetricQueryLatencyHigh
+        expr: |
+          count_over_time(lh_metric_query_dur_ms[10m]) > 3
+          and
+          avg_over_time(lh_metric_query_dur_ms[10m]) > 15000
+        for: 15m
+        labels:
+          severity: warning
+          domain: metric
+          route: platform
+        annotations:
+          summary: "指标查询平均延迟 >15s（{{ $value }}ms）"
+          description: "labels 含 metric_code / prefer / kind；检查 Trino/CK 与物化就绪"
+
+      - alert: LhMetricQuerySilent
+        expr: absent_over_time(lh_metric_query_total[24h])
+        for: 2h
+        labels:
+          severity: info
+          domain: metric
+          route: platform
+        annotations:
+          summary: "24h 无指标查询写点"
+          description: "确认 lh.lifecycle.vm-import-url 与门户查询路径；无流量时为正常空闲"

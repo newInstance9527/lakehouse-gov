@@ -42,6 +42,13 @@ public interface SecAuthGrantService {
     boolean canReadMetric(String metricId);
 
     /**
+     * 当前用户对指标的强制行级谓词（来自 active SELECT/EDIT/MANAGE 的 {@code row_filter}）。
+     * <p>Owner / 超管 / 无 row_filter → 空列表（不额外收紧）。多个谓词由调用方 AND。
+     * 存在非空但不安全的谓词时抛错（fail-closed）。</p>
+     */
+    List<String> resolveMetricRowFilterClauses(String metricId);
+
+    /**
      * 是否具备所需操作能力（owner 或 privilege 满足；MANAGE 覆盖 EDIT/DELETE）。
      */
     boolean hasOpsPrivilege(String resourceType, String resourceId, LhOpsPrivilegeEnum needed);

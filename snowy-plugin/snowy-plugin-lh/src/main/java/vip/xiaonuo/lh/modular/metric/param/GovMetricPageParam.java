@@ -14,6 +14,9 @@ public class GovMetricPageParam {
     @Schema(description = "业务域 trade/user/goods")
     private String domain;
 
+    @Schema(description = "标签（命中 tags_json）")
+    private String tag;
+
     @Schema(description = "类型 原子/衍生/复合")
     private String kind;
 

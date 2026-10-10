@@ -42,6 +42,9 @@ public class GovMetricVo {
     private String dim;
     private String time;
     private String unit;
+    private String valueType;
+    private Integer valuePrecision;
+    private List<String> tags;
     private String owner;
     /** 创建人用户 id（CommonEntity），前端草稿归属与按钮 ACL 用 */
     private String createUser;

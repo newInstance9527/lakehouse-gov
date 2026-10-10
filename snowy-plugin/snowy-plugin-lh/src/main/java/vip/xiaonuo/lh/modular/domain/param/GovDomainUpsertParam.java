@@ -15,6 +15,9 @@ public class GovDomainUpsertParam {
     @Schema(description = "域编码（创建必填，小写）")
     private String domainCode;
 
+    @Schema(description = "父域/主题域编码（可空）")
+    private String parentCode;
+
     @NotBlank(message = "name 不能为空")
     @Schema(description = "展示名")
     private String name;

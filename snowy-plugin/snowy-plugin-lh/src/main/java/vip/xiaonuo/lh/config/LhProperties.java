@@ -271,6 +271,36 @@ public class LhProperties {
         private String vaultPath = LhVaultPaths.SUPERSET;
         private String user;
         private String password;
+        /**
+         * 嵌入允许的门户 Origin（逗号分隔），写入 Superset dashboard embedded.allowed_domains。
+         * 例：http://localhost:5173,https://portal.example.com
+         */
+        private String embedAllowedDomains = "";
+        /**
+         * 浏览器访问的 Superset 公网根（可与内网 url 不同）；空则用 url。
+         * Embedded SDK 的 supersetDomain。
+         */
+        private String publicUrl = "";
+        /** 是否启用 Guest Token 内嵌看数（需 Superset FEATURE EMBEDDED_SUPERSET） */
+        private boolean embedEnabled = true;
+        /**
+         * 做表/SQL Lab：是否已启用与门户同 IdP 的 OIDC。
+         * false 时不做 AUTH_DB 裸深链降级，接口明确返回需启用 OIDC。
+         */
+        private boolean oidcEnabled = false;
+        /** OIDC 登录入口（相对或绝对）；默认 /login/ 由 IdP 接管 */
+        private String oidcLoginPath = "/login/";
+        /**
+         * Guest Token 有效秒数（须与 Superset {@code SUPERSET_GUEST_TOKEN_EXP} 对齐）。
+         * 门户 Embedded SDK 到期前会再次调用 embedSession。
+         */
+        private int guestTokenExpSec = 300;
+        /**
+         * 内嵌看数是否强制按门户 {@code sec_auth_grant} 隔离：
+         * 看板须关联 metricCodes；校验指标可读；投影 row_filter + 维筛选到 Guest RLS；
+         * 未授权关联数据集下发 {@code 1 = 0}；可选 datasets allowlist（远端不支持则回退）。
+         */
+        private boolean embedEnforceMetricAuth = true;
     }
 
     @Getter
@@ -324,6 +354,13 @@ public class LhProperties {
         private String glossaryName = "LakehouseStandard";
         /** false=不写 OM Glossary（门户 CRUD 仍可用） */
         private boolean glossarySync = true;
+        /**
+         * 指标外链指针 Glossary（仅 name/描述；不写口径公式）。
+         * 空则跳过指标 → OM 指针同步。
+         */
+        private String metricGlossaryName = "LakehouseMetric";
+        /** false=升版/发布不写 OM 指标指针 */
+        private boolean metricGlossarySync = true;
     }
 
     @Getter

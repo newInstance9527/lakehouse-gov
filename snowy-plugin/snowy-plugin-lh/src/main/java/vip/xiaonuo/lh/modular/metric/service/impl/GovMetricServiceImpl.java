@@ -26,6 +26,7 @@ import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMaterializeMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricSampleMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricSqlMapper;
 import vip.xiaonuo.lh.modular.metric.mapper.GovMetricVerMapper;
+import vip.xiaonuo.lh.modular.metric.param.GovMetricBoardQueryParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricCompileParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricMaterializeParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricPageParam;
@@ -35,6 +36,7 @@ import vip.xiaonuo.lh.modular.metric.param.GovMetricTrialParam;
 import vip.xiaonuo.lh.modular.metric.param.GovMetricUpsertParam;
 import vip.xiaonuo.lh.modular.metric.result.GovMetricVo;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricExecService;
+import vip.xiaonuo.lh.modular.metric.service.GovMetricOntologyService;
 import vip.xiaonuo.lh.modular.metric.service.GovMetricService;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricFormulaParser;
 import vip.xiaonuo.lh.modular.metric.support.GovMetricMaterializeDsLauncher;
@@ -53,11 +55,18 @@ import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAssetSourceLink;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetSourceLinkMapper;
+import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
+import vip.xiaonuo.lh.modular.query.mapper.CpQueryExecMapper;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
+import vip.xiaonuo.lh.modular.bi.entity.GovBiDataset;
+import vip.xiaonuo.lh.modular.bi.mapper.GovBiDatasetMapper;
+import vip.xiaonuo.lh.core.engine.OpenMetadataClient;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -125,6 +134,14 @@ public class GovMetricServiceImpl implements GovMetricService {
     private vip.xiaonuo.lh.modular.sec.mapper.SecAuthGrantMapper secAuthGrantMapper;
     @Resource
     private vip.xiaonuo.lh.modular.apply.mapper.ApplyTicketMapper applyTicketMapper;
+    @Resource
+    private CpQueryExecMapper cpQueryExecMapper;
+    @Resource
+    private GovMetricOntologyService govMetricOntologyService;
+    @Resource
+    private GovBiDatasetMapper biDatasetMapper;
+    @Resource
+    private OpenMetadataClient openMetadataClient;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -177,6 +194,9 @@ public class GovMetricServiceImpl implements GovMetricService {
         if (StrUtil.isNotBlank(param.getDomain()) && !"all".equalsIgnoreCase(param.getDomain())) {
             qw.lambda().eq(GovMetric::getDomainCode, normalizeDomain(param.getDomain()));
         }
+        if (StrUtil.isNotBlank(param.getTag())) {
+            qw.lambda().like(GovMetric::getTagsJson, param.getTag().trim());
+        }
         if (StrUtil.isNotBlank(param.getKind()) && !"all".equals(param.getKind())) {
             qw.lambda().eq(GovMetric::getKind, param.getKind().trim());
         }
@@ -187,7 +207,8 @@ public class GovMetricServiceImpl implements GovMetricService {
             String kw = param.getQ().trim();
             qw.lambda().and(w -> w.like(GovMetric::getMetricCode, kw)
                     .or().like(GovMetric::getName, kw)
-                    .or().like(GovMetric::getOwner, kw));
+                    .or().like(GovMetric::getOwner, kw)
+                    .or().like(GovMetric::getTagsJson, kw));
         }
         // 目录默认：非废弃在前，组内按创建时间倒序（新→旧）；已废弃(status=deprecated)置底
         if (StrUtil.isNotBlank(param.getSortField())) {
@@ -218,6 +239,8 @@ public class GovMetricServiceImpl implements GovMetricService {
         String kind = normalizeKind(param.getKind());
         validateDefinition(kind, param);
         resolveAtomBindAsset(kind, param, ws);
+        List<String> depCodes = collectDeps(kind, param, null);
+        assertDepsHealthy(kind, null, depCodes, ws);
         String code = nextMetricCode(kind, ws);
         GovMetric head = new GovMetric();
         head.setId(IdUtil.getSnowflakeNextIdStr());
@@ -229,8 +252,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         head.setName(param.getName().trim());
         head.setKind(kind);
         head.setDomainCode(govDomainService.requireActive(normalizeDomain(param.getDomain())));
-        head.setUnit(StrUtil.blankToDefault(param.getUnit(), ""));
-        head.setOwner(StrUtil.blankToDefault(param.getOwner(), ""));
+        applyMetaToHead(head, param, true);
         head.setCurrentVer("v1");
         head.setGravAssetId(param.getGravAssetId());
         head.setDeleteFlag(NOT_DELETE);
@@ -240,7 +262,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         verMapper.insert(ver);
         head.setCurrentVerId(ver.getId());
         metricMapper.updateById(head);
-        replaceDeps(ver.getId(), ws, collectDeps(kind, param, ver));
+        replaceDeps(ver.getId(), ws, depCodes);
         appendHistory(head.getId(), "draft", "新建保存为草稿");
         return toVo(requireMetric(code, ws), true);
     }
@@ -260,12 +282,13 @@ public class GovMetricServiceImpl implements GovMetricService {
         String kind = normalizeKind(StrUtil.blankToDefault(param.getKind(), head.getKind()));
         validateDefinition(kind, param);
         resolveAtomBindAsset(kind, param, head.getWs());
+        List<String> depCodes = collectDeps(kind, param, null);
+        assertDepsHealthy(kind, head.getMetricCode(), depCodes, head.getWs());
         head.setName(StrUtil.blankToDefault(param.getName(), head.getName()).trim());
         head.setKind(kind);
         head.setDomainCode(govDomainService.requireActive(
                 normalizeDomain(StrUtil.blankToDefault(param.getDomain(), head.getDomainCode()))));
-        head.setUnit(param.getUnit() != null ? param.getUnit() : head.getUnit());
-        head.setOwner(param.getOwner() != null ? param.getOwner() : head.getOwner());
+        applyMetaToHead(head, param, false);
         head.setRemark(param.getRemark() != null ? param.getRemark() : head.getRemark());
         head.setGravAssetId(param.getGravAssetId() != null ? param.getGravAssetId() : head.getGravAssetId());
         head.setRevision(head.getRevision() == null ? 1 : head.getRevision() + 1);
@@ -279,7 +302,7 @@ public class GovMetricServiceImpl implements GovMetricService {
         ver.setFingerprint(fingerprint(ver));
         ver.setRevision(ver.getRevision() == null ? 1 : ver.getRevision() + 1);
         verMapper.updateById(ver);
-        replaceDeps(ver.getId(), head.getWs(), collectDeps(kind, param, ver));
+        replaceDeps(ver.getId(), head.getWs(), depCodes);
         // 清编译缓存
         sqlMapper.delete(new QueryWrapper<GovMetricSql>().lambda().eq(GovMetricSql::getVerId, ver.getId()));
         appendHistory(head.getId(), head.getStatus(), "编辑口径");
@@ -356,10 +379,12 @@ public class GovMetricServiceImpl implements GovMetricService {
         if (freed.length() > 64) {
             freed = freed.substring(0, 64);
         }
+        // 先改码释放唯一约束，再 deleteById 软删。
+        // CommonEntity.deleteFlag 带 @TableLogic：updateById 不会写 delete_flag。
         head.setMetricCode(freed);
-        head.setDeleteFlag("DELETED");
         head.setRevision(head.getRevision() == null ? 1 : head.getRevision() + 1);
         metricMapper.updateById(head);
+        metricMapper.deleteById(head.getId());
         appendHistory(head.getId(), status, "删除指标（软删）");
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -487,6 +512,7 @@ public class GovMetricServiceImpl implements GovMetricService {
                 to = "active";
                 // 启用时编译并缓存
                 compileAndPersist(head, "trino");
+                syncOmMetricPointerSoft(head);
                 appendHistory(head.getId(), to, StrUtil.blankToDefault(note, head.getCurrentVer() + " 启用"));
             }
             case "reject" -> {
@@ -544,7 +570,9 @@ public class GovMetricServiceImpl implements GovMetricService {
             if (Boolean.TRUE.equals(param.getPersist())) {
                 secAuthGrantService.assertCanEditMetric(head);
             }
-            GovMetricSqlCompiler.CompileOut out = compileInternal(head, dialect);
+            Map<String, Object> params = param.getParams() == null ? Map.of() : param.getParams();
+            GovMetricSqlCompiler.CompileOut out = GovMetricSqlCompiler.compile(
+                    head, requireVer(head), dialect, code -> resolveNode(code, head.getWs()), params);
             if (Boolean.TRUE.equals(param.getPersist()) && StrUtil.isNotBlank(head.getCurrentVerId())) {
                 persistSql(head.getCurrentVerId(), out);
             }
@@ -564,7 +592,9 @@ public class GovMetricServiceImpl implements GovMetricService {
         GovMetricVer ver = new GovMetricVer();
         applyParamToVer(ver, draft, kind);
         ver.setVer("v1");
-        GovMetricSqlCompiler.CompileOut out = GovMetricSqlCompiler.compile(head, ver, dialect, code -> resolveNode(code, draft.getWs()));
+        Map<String, Object> params = param.getParams() == null ? Map.of() : param.getParams();
+        GovMetricSqlCompiler.CompileOut out = GovMetricSqlCompiler.compile(
+                head, ver, dialect, code -> resolveNode(code, draft.getWs()), params);
         return out.meta();
     }
 
@@ -637,6 +667,46 @@ public class GovMetricServiceImpl implements GovMetricService {
         out.put("impactSummary", Map.of(
                 "downstreamMetrics", downstream.size(),
                 "apiBindings", impact.getOrDefault("apiCount", 0)));
+        return out;
+    }
+
+    @Override
+    public Map<String, Object> listExecs(String metricCode, String ws, Integer limit) {
+        GovMetric head = requireMetric(metricCode, ws);
+        secAuthGrantService.assertCanReadMetric(head);
+        int n = limit == null ? 20 : Math.max(1, Math.min(limit, 100));
+        String code = head.getMetricCode();
+        List<CpQueryExec> rows = cpQueryExecMapper.selectList(new QueryWrapper<CpQueryExec>()
+                .eq("metric_code", code)
+                .eq("ws", StrUtil.blankToDefault(head.getWs(), WS_DEFAULT))
+                .eq("delete_flag", NOT_DELETE)
+                .in("source", List.of("metric_trial", "metric", "metric_sample"))
+                .orderByDesc("create_time")
+                .last("LIMIT " + n));
+        SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (CpQueryExec e : rows) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", e.getId());
+            row.put("queryId", e.getQueryId());
+            row.put("source", e.getSource());
+            row.put("ver", e.getMetricVer());
+            row.put("engine", e.getEngine());
+            row.put("status", e.getStatus());
+            row.put("statusLabel", e.getStatusLabel());
+            row.put("sqlText", e.getSqlText());
+            row.put("rowCount", e.getRowCount());
+            row.put("durMs", e.getDurMs());
+            row.put("error", e.getErrorMsg());
+            row.put("trinoQueryId", e.getTrinoQueryId());
+            row.put("createTime", e.getCreateTime() == null ? null : fmt.format(e.getCreateTime()));
+            items.add(row);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("metricCode", code);
+        out.put("items", items);
+        out.put("hasResultRows", false);
+        out.put("limit", n);
         return out;
     }
 
@@ -768,6 +838,126 @@ public class GovMetricServiceImpl implements GovMetricService {
         out.put("cards", cards);
         out.put("reconRecent", recon);
         return out;
+    }
+
+    @Override
+    public Map<String, Object> boardQuery(GovMetricBoardQueryParam param) {
+        GovMetricBoardQueryParam p = param == null ? new GovMetricBoardQueryParam() : param;
+        String ws = StrUtil.blankToDefault(p.getWs(), WS_DEFAULT);
+        String prefer = StrUtil.blankToDefault(p.getPrefer(), "trino");
+        int maxRows = p.getMaxRows() == null ? 20 : Math.max(1, Math.min(p.getMaxRows(), 200));
+        Map<String, Object> dims = extractBoardDims(p.getFilters());
+        Map<String, Object> boardBase = board(ws);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> cards = boardBase.get("cards") instanceof List<?> l
+                ? (List<Map<String, Object>>) l
+                : List.of();
+        List<Map<String, Object>> outCards = new ArrayList<>();
+        int queried = 0;
+        int ok = 0;
+        for (Map<String, Object> card : cards) {
+            Map<String, Object> row = new LinkedHashMap<>(card);
+            boolean ready = Boolean.TRUE.equals(card.get("ready"));
+            if (!ready) {
+                row.put("executed", false);
+                row.put("value", null);
+                row.put("rowCount", 0);
+                outCards.add(row);
+                continue;
+            }
+            String code = String.valueOf(card.get("metricCode"));
+            queried++;
+            try {
+                GovMetricQueryParam qp = new GovMetricQueryParam();
+                qp.setMetricCode(code);
+                qp.setWs(ws);
+                qp.setPrefer(prefer);
+                qp.setMaxRows(maxRows);
+                Map<String, Object> params = new LinkedHashMap<>();
+                if (!dims.isEmpty()) {
+                    params.put("dims", dims);
+                }
+                qp.setParams(params);
+                Map<String, Object> q = govMetricExecService.query(qp);
+                row.put("executed", Boolean.TRUE.equals(q.get("executed")));
+                row.put("blocked", Boolean.TRUE.equals(q.get("blocked"))
+                        || "blocked".equals(String.valueOf(q.get("status"))));
+                row.put("message", q.get("message"));
+                row.put("status", q.get("status"));
+                row.put("durMs", q.get("durMs"));
+                row.put("queryId", q.get("queryId"));
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> qrows = q.get("rows") instanceof List<?> rl
+                        ? (List<Map<String, Object>>) rl
+                        : List.of();
+                int rc = q.get("rowCount") instanceof Number n ? n.intValue() : qrows.size();
+                row.put("rowCount", rc);
+                row.put("value", extractMetricValue(qrows));
+                if (Boolean.TRUE.equals(row.get("executed")) && !Boolean.TRUE.equals(row.get("blocked"))) {
+                    ok++;
+                }
+            } catch (Exception e) {
+                row.put("executed", false);
+                row.put("blocked", false);
+                row.put("value", null);
+                row.put("rowCount", 0);
+                row.put("message", e.getMessage() == null ? "query failed" : e.getMessage());
+            }
+            outCards.add(row);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ws", ws);
+        out.put("prefer", prefer);
+        out.put("filters", Map.of("dims", dims));
+        out.put("readyCount", boardBase.get("readyCount"));
+        out.put("blockedCount", boardBase.get("blockedCount"));
+        out.put("queriedCount", queried);
+        out.put("okCount", ok);
+        out.put("cards", outCards);
+        return out;
+    }
+
+    private static Map<String, Object> extractBoardDims(Map<String, Object> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return Map.of();
+        }
+        Object dimsObj = filters.get("dims");
+        if (!(dimsObj instanceof Map<?, ?> raw)) {
+            return Map.of();
+        }
+        Map<String, Object> dims = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : raw.entrySet()) {
+            if (e.getKey() == null || e.getValue() == null) {
+                continue;
+            }
+            String k = String.valueOf(e.getKey()).trim();
+            String v = String.valueOf(e.getValue()).trim();
+            if (StrUtil.isBlank(k) || StrUtil.isBlank(v)) {
+                continue;
+            }
+            dims.put(k, v);
+        }
+        return dims;
+    }
+
+    private static Object extractMetricValue(List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> first = rows.get(0);
+        if (first.containsKey("metric_value")) {
+            return first.get("metric_value");
+        }
+        for (Map.Entry<String, Object> e : first.entrySet()) {
+            if (e.getKey() != null && "metric_value".equalsIgnoreCase(e.getKey())) {
+                return e.getValue();
+            }
+        }
+        // 单列结果直接取首值
+        if (first.size() == 1) {
+            return first.values().iterator().next();
+        }
+        return first.get("value");
     }
 
     @Override
@@ -945,6 +1135,67 @@ public class GovMetricServiceImpl implements GovMetricService {
         head.setCurrentVer(nextVer);
         head.setCurrentVerId(neu.getId());
         metricMapper.updateById(head);
+        markBiDatasetsStaleSoft(head.getMetricCode(), head.getWs(),
+                "metric version bumped to " + nextVer + "; republish BI dataset");
+        syncOmMetricPointerSoft(head);
+    }
+
+    /** 升版后钉旧版的 BI 数据集标 stale，提示门户重新发布 */
+    private void markBiDatasetsStaleSoft(String metricCode, String ws, String reason) {
+        if (StrUtil.isBlank(metricCode) || biDatasetMapper == null) {
+            return;
+        }
+        try {
+            var qw = new QueryWrapper<GovBiDataset>().lambda()
+                    .eq(GovBiDataset::getDeleteFlag, NOT_DELETE)
+                    .eq(GovBiDataset::getMetricCode, metricCode)
+                    .ne(GovBiDataset::getSyncState, "revoked");
+            if (StrUtil.isNotBlank(ws)) {
+                qw.eq(GovBiDataset::getWs, ws);
+            }
+            List<GovBiDataset> list = biDatasetMapper.selectList(qw);
+            Date now = new Date();
+            for (GovBiDataset d : list) {
+                d.setSyncState("stale");
+                d.setLastError(StrUtil.maxLength(reason, 500));
+                d.setLastSyncAt(now);
+                d.setRevision(d.getRevision() == null ? 1 : d.getRevision() + 1);
+                biDatasetMapper.updateById(d);
+            }
+        } catch (Exception e) {
+            // soft-fail：不影响升版主路径
+        }
+    }
+
+    /**
+     * soft-fail：OM Glossary 术语作外链指针写回 {@code om_fqn}；只写 name/描述，不双写口径公式。
+     */
+    private void syncOmMetricPointerSoft(GovMetric head) {
+        if (head == null || openMetadataClient == null || lhProperties == null) {
+            return;
+        }
+        try {
+            var om = lhProperties.getOpenmetadata();
+            if (om == null || !om.isMetricGlossarySync() || StrUtil.isBlank(om.getUrl())) {
+                return;
+            }
+            String glossary = StrUtil.trim(om.getMetricGlossaryName());
+            if (StrUtil.isBlank(glossary)) {
+                return;
+            }
+            String desc = "Lakehouse metric pointer · code=" + head.getMetricCode()
+                    + " · ver=" + StrUtil.blankToDefault(head.getCurrentVer(), "")
+                    + " · name=" + StrUtil.blankToDefault(head.getName(), "")
+                    + "（口径 SoT 在门户，OM 仅外链）";
+            Map<String, Object> r = openMetadataClient.upsertGlossaryTerm(
+                    glossary, head.getMetricCode(), head.getName(), desc);
+            if (Boolean.TRUE.equals(r.get("ok")) && r.get("fqn") != null) {
+                head.setOmFqn(String.valueOf(r.get("fqn")));
+                metricMapper.updateById(head);
+            }
+        } catch (Exception ignored) {
+            /* soft-fail */
+        }
     }
 
     private GovMetricSqlCompiler.CompileOut compileInternal(GovMetric head, String dialect) {
@@ -1010,8 +1261,93 @@ public class GovMetricServiceImpl implements GovMetricService {
     }
 
     /**
+     * 依赖须存在且 active（草稿自引用除外）；禁止环；复合不可依赖复合（嵌套仍禁）。
+     */
+    private void assertDepsHealthy(String kind, String selfCode, List<String> deps, String ws) {
+        if (deps == null || deps.isEmpty()) {
+            return;
+        }
+        String self = StrUtil.isBlank(selfCode) ? null : selfCode.trim().toUpperCase(Locale.ROOT);
+        for (String raw : deps) {
+            if (StrUtil.isBlank(raw)) {
+                continue;
+            }
+            String code = raw.trim().toUpperCase(Locale.ROOT);
+            if (self != null && self.equals(code)) {
+                throw new CommonException("指标不能依赖自身: " + code);
+            }
+            GovMetric dep = findMetric(code, ws);
+            if (dep == null) {
+                throw new CommonException("依赖指标不存在: " + code);
+            }
+            String st = StrUtil.blankToDefault(dep.getStatus(), "");
+            if (!"active".equals(st) && !"review".equals(st) && !"draft".equals(st)) {
+                throw new CommonException("依赖指标不可用（已废弃等）: " + code + " / " + st);
+            }
+            if ("复合".equals(kind) && "复合".equals(dep.getKind())) {
+                throw new CommonException("复合暂不支持嵌套复合依赖: " + code);
+            }
+            if ("衍生".equals(kind) && !"原子".equals(dep.getKind())) {
+                throw new CommonException("衍生只能依赖原子指标: " + code);
+            }
+            if (wouldCycle(self, code, ws)) {
+                throw new CommonException("依赖成环: " + (self == null ? "?" : self) + " → … → " + code);
+            }
+        }
+    }
+
+    /** 若将 self 依赖 depCode，dep 的上游闭包是否已含 self */
+    private boolean wouldCycle(String self, String depCode, String ws) {
+        if (StrUtil.isBlank(self)) {
+            return false;
+        }
+        Set<String> seen = new java.util.HashSet<>();
+        java.util.ArrayDeque<String> q = new java.util.ArrayDeque<>();
+        q.add(depCode);
+        while (!q.isEmpty()) {
+            String cur = q.poll();
+            if (!seen.add(cur)) {
+                continue;
+            }
+            if (self.equals(cur)) {
+                return true;
+            }
+            GovMetric h = findMetric(cur, ws);
+            if (h == null || StrUtil.isBlank(h.getCurrentVerId())) {
+                continue;
+            }
+            List<GovMetricDep> edges = depMapper.selectList(new QueryWrapper<GovMetricDep>().lambda()
+                    .eq(GovMetricDep::getVerId, h.getCurrentVerId()));
+            for (GovMetricDep e : edges) {
+                if (StrUtil.isNotBlank(e.getDepCode())) {
+                    q.add(e.getDepCode().trim().toUpperCase(Locale.ROOT));
+                }
+            }
+        }
+        return false;
+    }
+
+    private void applyMetaToHead(GovMetric head, GovMetricUpsertParam param, boolean create) {
+        if (create || param.getUnit() != null) {
+            head.setUnit(create ? StrUtil.blankToDefault(param.getUnit(), "") : param.getUnit());
+        }
+        if (create || param.getOwner() != null) {
+            head.setOwner(create ? StrUtil.blankToDefault(param.getOwner(), "") : param.getOwner());
+        }
+        if (create || param.getValueType() != null) {
+            head.setValueType(StrUtil.trim(param.getValueType()));
+        }
+        if (create || param.getValuePrecision() != null) {
+            head.setValuePrecision(param.getValuePrecision());
+        }
+        if (create || param.getTags() != null) {
+            head.setTagsJson(toJsonArray(param.getTags()));
+        }
+    }
+
+    /**
      * 原子绑定对齐资产目录：用 assetId / table 反查 gov_asset，回填 gravAssetId；
-     * 找不到已登记资产则拒绝（避免演示表名绕过目录）。
+     * 找不到已登记资产则拒绝。
      */
     private void resolveAtomBindAsset(String kind, GovMetricUpsertParam param, String ws) {
         if (!"原子".equals(kind)) {
@@ -1155,18 +1491,28 @@ public class GovMetricServiceImpl implements GovMetricService {
     private List<String> collectDeps(String kind, GovMetricUpsertParam param, GovMetricVer ver) {
         List<String> deps = new ArrayList<>();
         if ("衍生".equals(kind)) {
-            deps.add(StrUtil.blankToDefault(param.getAtomRef(), ver.getAtomRef()));
+            String atom = param != null ? param.getAtomRef() : null;
+            if (StrUtil.isBlank(atom) && ver != null) {
+                atom = ver.getAtomRef();
+            }
+            deps.add(atom);
         } else if ("复合".equals(kind)) {
-            if (param.getDeriveRef() != null && !param.getDeriveRef().isEmpty()) {
-                deps.addAll(param.getDeriveRef());
-            } else {
-                GovMetricFormulaParser.Result r = GovMetricFormulaParser.parse(ver.getFormula());
-                if (r.ok()) {
+            // 以公式引用为权威，避免 deriveRef 与公式分叉
+            String formula = param != null ? param.getFormula() : null;
+            if (StrUtil.isBlank(formula) && ver != null) {
+                formula = ver.getFormula();
+            }
+            if (StrUtil.isNotBlank(formula)) {
+                GovMetricFormulaParser.Result r = GovMetricFormulaParser.parse(formula);
+                if (r.ok() && r.refs() != null && !r.refs().isEmpty()) {
                     deps.addAll(r.refs());
                 }
             }
+            if (deps.isEmpty() && param != null && param.getDeriveRef() != null) {
+                deps.addAll(param.getDeriveRef());
+            }
         }
-        return deps.stream().filter(StrUtil::isNotBlank).distinct().toList();
+        return deps.stream().filter(StrUtil::isNotBlank).map(s -> s.trim().toUpperCase(Locale.ROOT)).distinct().toList();
     }
 
     private void replaceDeps(String verId, String ws, List<String> deps) {
@@ -1215,7 +1561,9 @@ public class GovMetricServiceImpl implements GovMetricService {
             }
         } else if ("衍生".equals(kind)) {
             ver.setAtomRef(param.getAtomRef());
-            ver.setQualifierJson(toJsonArray(param.getQualifier()));
+            List<String> qSnap = govMetricOntologyService.resolveQualifierSnapshots(
+                    param.getQualifier(), ver.getWs());
+            ver.setQualifierJson(toJsonArray(qSnap));
             ver.setGrainJson(toJsonArray(param.getDim()));
             ver.setTimeWindow(param.getTime());
             ver.setFormula(null);
@@ -1253,6 +1601,9 @@ public class GovMetricServiceImpl implements GovMetricService {
         vo.setStatus(head.getStatus());
         vo.setStatusLabel(STATUS_LABEL.getOrDefault(head.getStatus(), head.getStatus()));
         vo.setUnit(head.getUnit());
+        vo.setValueType(head.getValueType());
+        vo.setValuePrecision(head.getValuePrecision());
+        vo.setTags(GovMetricSqlCompiler.parseJsonArray(head.getTagsJson()));
         vo.setOwner(head.getOwner());
         vo.setCreateUser(head.getCreateUser());
         vo.setVer(head.getCurrentVer());
@@ -1292,6 +1643,13 @@ public class GovMetricServiceImpl implements GovMetricService {
         List<GovMetricDep> deps = ver == null ? List.of() : depMapper.selectList(
                 new QueryWrapper<GovMetricDep>().lambda().eq(GovMetricDep::getVerId, ver.getId()));
         vo.setDepCodes(deps.stream().map(GovMetricDep::getDepCode).collect(Collectors.toList()));
+        // 复合不落 grain：对外暴露依赖粒度交集，供试算维切片 UI
+        if ("复合".equals(head.getKind()) && (vo.getDimKeys() == null || vo.getDimKeys().isEmpty())
+                && !vo.getDepCodes().isEmpty()) {
+            List<String> inter = intersectDepGrains(vo.getDepCodes(), head.getWs());
+            vo.setDimKeys(inter);
+            vo.setDim(inter.isEmpty() ? "" : String.join(" + ", inter));
+        }
 
         if (detail) {
             List<GovMetricHistory> hist = historyMapper.selectList(new QueryWrapper<GovMetricHistory>().lambda()
@@ -1325,6 +1683,48 @@ public class GovMetricServiceImpl implements GovMetricService {
             return StrUtil.blankToDefault(ver.getAtomRef(), "—");
         }
         return StrUtil.blankToDefault(ver.getFormula(), "—");
+    }
+
+    /** 复合依赖粒度交集（原子视为空粒度，与编译器一致） */
+    private List<String> intersectDepGrains(List<String> depCodes, String ws) {
+        if (depCodes == null || depCodes.isEmpty()) {
+            return List.of();
+        }
+        String home = StrUtil.blankToDefault(ws, WS_DEFAULT);
+        List<List<String>> sets = new ArrayList<>();
+        for (String code : depCodes) {
+            if (StrUtil.isBlank(code)) {
+                continue;
+            }
+            GovMetric dep = metricMapper.selectOne(new QueryWrapper<GovMetric>().lambda()
+                    .eq(GovMetric::getMetricCode, code.trim())
+                    .eq(GovMetric::getWs, home)
+                    .eq(GovMetric::getDeleteFlag, NOT_DELETE)
+                    .last("LIMIT 1"));
+            if (dep == null || StrUtil.isBlank(dep.getCurrentVerId())) {
+                continue;
+            }
+            if ("原子".equals(dep.getKind())) {
+                sets.add(List.of());
+                continue;
+            }
+            GovMetricVer dv = verMapper.selectById(dep.getCurrentVerId());
+            sets.add(dv == null ? List.of() : GovMetricSqlCompiler.parseJsonArray(dv.getGrainJson()));
+        }
+        if (sets.isEmpty()) {
+            return List.of();
+        }
+        if (sets.stream().allMatch(List::isEmpty)) {
+            return List.of();
+        }
+        if (sets.stream().anyMatch(List::isEmpty)) {
+            return List.of();
+        }
+        LinkedHashSet<String> inter = new LinkedHashSet<>(sets.get(0));
+        for (int i = 1; i < sets.size(); i++) {
+            inter.retainAll(new LinkedHashSet<>(sets.get(i)));
+        }
+        return new ArrayList<>(inter);
     }
 
     private void appendHistory(String metricId, String status, String note) {

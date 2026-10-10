@@ -31,6 +31,7 @@ import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsPrivilegeEnum;
 import vip.xiaonuo.lh.modular.sec.enums.LhOpsResourceTypeEnum;
 import vip.xiaonuo.lh.modular.sec.mapper.SecAuthGrantMapper;
+import vip.xiaonuo.lh.modular.query.support.CpQueryRowFilterInjector;
 import vip.xiaonuo.lh.modular.sec.service.LhTrinoPrincipalService;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 
@@ -172,6 +173,45 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             return true;
         }
         return hasActivePrivilege(user.getId(), type, metricId, "SELECT");
+    }
+
+    @Override
+    public List<String> resolveMetricRowFilterClauses(String metricId) {
+        if (StrUtil.isBlank(metricId)) {
+            return List.of();
+        }
+        if (LhLoginUsers.isSuperAdmin()) {
+            return List.of();
+        }
+        SaBaseLoginUser user = LhLoginUsers.requireUser();
+        GovMetric metric = metricMapper.selectById(metricId);
+        if (metric != null && isMetricOwner(metric, user)) {
+            return List.of();
+        }
+        Date now = new Date();
+        Set<String> privs = new LinkedHashSet<>();
+        privs.add("SELECT");
+        privs.addAll(LhOpsPrivilegeEnum.matchingValues(LhOpsPrivilegeEnum.EDIT));
+        privs.add(LhOpsPrivilegeEnum.MANAGE.getValue());
+        List<SecAuthGrant> grants = grantMapper.selectList(baseActiveGrantQw(user.getId(), now)
+                .eq(SecAuthGrant::getResourceType, LhOpsResourceTypeEnum.METRIC.getValue())
+                .eq(SecAuthGrant::getResourceId, metricId)
+                .in(SecAuthGrant::getPrivilege, privs)
+                .isNotNull(SecAuthGrant::getRowFilter)
+                .ne(SecAuthGrant::getRowFilter, ""));
+        LinkedHashSet<String> clauses = new LinkedHashSet<>();
+        for (SecAuthGrant g : grants) {
+            if (g == null || StrUtil.isBlank(g.getRowFilter())) {
+                continue;
+            }
+            String raw = g.getRowFilter().trim();
+            if (!CpQueryRowFilterInjector.isSafePredicate(raw)) {
+                throw new CommonException("指标授权 row_filter 不安全，已拒绝签发看数令牌（grantId="
+                        + g.getId() + "）");
+            }
+            clauses.add(raw);
+        }
+        return new ArrayList<>(clauses);
     }
 
     @Override

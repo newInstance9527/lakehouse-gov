@@ -7,13 +7,20 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import cn.hutool.core.util.IdUtil;
 import vip.xiaonuo.lh.core.ai.LhChatTools;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
+import vip.xiaonuo.lh.modular.ai.entity.GovAiActionLog;
+import vip.xiaonuo.lh.modular.ai.mapper.GovAiActionLogMapper;
 import vip.xiaonuo.lh.modular.ai.support.AiAssetReadAccess;
 import vip.xiaonuo.lh.modular.ai.support.AiDocsSearch;
+import vip.xiaonuo.lh.modular.ai.support.AiSkillDenyHelper;
 import vip.xiaonuo.lh.modular.aimodel.service.GovAiModelService;
 import vip.xiaonuo.lh.modular.apply.entity.ApplyTicket;
+import vip.xiaonuo.lh.modular.apply.param.ApplyTicketCreateParam;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketPageParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.domain.service.GovDomainService;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetIdParam;
@@ -37,6 +44,7 @@ import vip.xiaonuo.lh.modular.etl.param.IgEtlPageParam;
 import vip.xiaonuo.lh.modular.etl.service.IgEtlService;
 import vip.xiaonuo.lh.modular.export.service.ExportBoardService;
 import vip.xiaonuo.lh.modular.knowledge.param.GovKbSearchParam;
+import vip.xiaonuo.lh.modular.knowledge.param.GovKbUpsertParam;
 import vip.xiaonuo.lh.modular.knowledge.service.GovKbService;
 import vip.xiaonuo.lh.modular.lifecycle.service.GovLcService;
 import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
@@ -64,6 +72,7 @@ import vip.xiaonuo.lh.modular.workspace.result.GovWsVo;
 import vip.xiaonuo.lh.modular.workspace.service.GovWsService;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -71,7 +80,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 只读探索智能体工具白名单（服务端执行 + ACL）。
+ * Copilot 技能白名单（查询 + 安全创建申请；服务端执行 + ACL）。
  */
 @Slf4j
 @Component
@@ -132,10 +141,27 @@ public class AiToolRegistry {
     private ContractService contractService;
     @Resource
     private GovAiModelService govAiModelService;
+    @Resource
+    private GovDomainService govDomainService;
+    @Resource
+    private GovAiActionLogMapper govAiActionLogMapper;
 
-    /** OpenAI tools JSON schema 列表 */
+    /** OpenAI tools JSON schema 列表（默认全量；intent 预留裁剪）。 */
     public List<Map<String, Object>> openaiToolDefinitions() {
+        return openaiToolDefinitions(null);
+    }
+
+    /**
+     * @param intentOrScene 可选；create/apply 意图时仍返回全量（总数可控）。预留按意图过滤。
+     */
+    public List<Map<String, Object>> openaiToolDefinitions(String intentOrScene) {
+        voidUnusedIntent(intentOrScene);
         List<Map<String, Object>> tools = new ArrayList<>();
+        tools.add(fn("list_skills",
+                "列出本助手可调用的 skill/工具名称、数量与一句话说明（来自服务端白名单，非知识库）。"
+                        + "问「你有几个 skill / 有哪些工具 / 你会什么」时必须优先调用本工具，禁止 kb_search。",
+                objectSchema(Map.of(
+                        "includeDesc", propStr("true 时附带简短 description；默认 true")), List.of())));
         tools.add(fn("catalog_stats",
                 "同时返回：①当前空间目录登记数 wsAssetCount（与资产目录列表同口径）；"
                         + "②我可查数 myReadableCount（owner∪门户SELECT投影∪Grav实测，与预览/grants/check 同口径）；"
@@ -207,6 +233,26 @@ public class AiToolRegistry {
                         "query", propStr("查询词"),
                         "ws", propStr("工作空间"),
                         "topK", propInt("条数")), List.of("query"))));
+        tools.add(fn("memory_recall",
+                "检索项目纪要记忆（知识库 cat=minutes）：跨会话项目结论/风险/待办。"
+                        + "问「上次项目结论/风险/纪要」时用；手册 FAQ 仍用 kb_search。",
+                objectSchema(Map.of(
+                        "query", propStr("查询词"),
+                        "ws", propStr("工作空间"),
+                        "projectId", propStr("可选项目编号，写入 refs 过滤"),
+                        "topK", propInt("条数，默认 5")), List.of("query"))));
+        tools.add(fn("memory_save",
+                "将本轮要点沉淀为项目纪要草稿（知识库 minutes），供跨会话 recall。"
+                        + "仅写摘要与结论，勿灌入密钥/明细数据；需用户意图明确时再调用。",
+                objectSchema(Map.of(
+                        "title", propStr("纪要标题"),
+                        "summary", propStr("要点摘要（必填）"),
+                        "conclusions", propStr("核心结论"),
+                        "risks", propStr("风险点"),
+                        "todos", propStr("待办与责任人"),
+                        "projectId", propStr("可选项目编号"),
+                        "tags", propStr("逗号分隔标签，如 风险,里程碑"),
+                        "ws", propStr("工作空间")), List.of("summary"))));
         tools.add(fn("list_metrics",
                 "检索指标元信息（不含编译 SQL）。无读权时标记 needApply。",
                 objectSchema(Map.of(
@@ -245,6 +291,42 @@ public class AiToolRegistry {
                         "status", propStr("可选 pending/approved/rejected，空=全部"),
                         "ws", propStr("工作空间"),
                         "topN", propInt("条数，默认 8")), List.of())));
+        Map<String, Object> createApplyProps = new LinkedHashMap<>();
+        createApplyProps.put("ticketType", propStr("table_read|perm|lake_export|export|resource_manage|manage|api_subscribe|metric|quality_fix 等"));
+        createApplyProps.put("title", propStr("标题，可空则按类型生成"));
+        createApplyProps.put("reason", propStr("事由"));
+        createApplyProps.put("assetId", propStr("资产 id（table_read MUST）"));
+        createApplyProps.put("assetCode", propStr("与 assetId 二选一，用于解析资产"));
+        createApplyProps.put("privilege", propStr("SELECT 或 EDIT|DELETE|MANAGE"));
+        createApplyProps.put("expireLabel", propStr("时效，如 30天"));
+        createApplyProps.put("resourceType", propStr("resource_manage：asset|datasource|etl"));
+        createApplyProps.put("resourceId", propStr("资源 id"));
+        createApplyProps.put("apiBindingId", propStr("api_subscribe 绑定 id"));
+        createApplyProps.put("publicPath", propStr("API 路径"));
+        createApplyProps.put("method", propStr("HTTP 方法"));
+        createApplyProps.put("consumerName", propStr("订阅应用名"));
+        createApplyProps.put("metricCode", propStr("指标编码"));
+        createApplyProps.put("metricKind", propStr("create|change|query"));
+        createApplyProps.put("exportTable", propStr("出湖源表"));
+        createApplyProps.put("exportTarget", propStr("出湖目标"));
+        createApplyProps.put("ws", propStr("工作空间偏好"));
+        tools.add(fn("create_apply_ticket",
+                "安全创建：代用户提交申请中心工单（table_read/lake_export/resource_manage/api_subscribe/metric 等）。"
+                        + "缺权查数时优先用 table_read。不创建数据源、不发布、不删库。成功返回 ticketNo 与深链。",
+                objectSchema(createApplyProps, List.of("ticketType"))));
+        tools.add(fn("list_domains",
+                "列出业务域（gov_domain）：编码/名称/状态。问「有哪些域/域列表」时用。",
+                objectSchema(Map.of(
+                        "ws", propStr("工作空间可选"),
+                        "q", propStr("关键词可选"),
+                        "status", propStr("状态可选"),
+                        "topN", propInt("条数，默认 20")), List.of())));
+        tools.add(fn("list_etl_jobs",
+                "列出 ETL/集成 DAG 摘要（只读，不含密钥与脚本全文）。问「有哪些作业/管道」时用。",
+                objectSchema(Map.of(
+                        "ws", propStr("工作空间"),
+                        "q", propStr("关键词可选"),
+                        "topN", propInt("条数，默认 12")), List.of())));
         tools.add(fn("ds_connectivity",
                 "测试已登记数据源连通性（复用门户 test，不含密码回传）。问「这个源通不通/连得上吗」时用；须有数据源使用权。",
                 objectSchema(Map.of(
@@ -350,6 +432,10 @@ public class AiToolRegistry {
         return tools;
     }
 
+    private static void voidUnusedIntent(String intentOrScene) {
+        // 预留：按 intent 裁剪 tools；当前全量 ≤55，保持稳定
+    }
+
     private static Map<String, Object> objectSchema(Map<String, Object> properties, List<String> required) {
         Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
@@ -380,6 +466,8 @@ public class AiToolRegistry {
         String ws = StrUtil.blankToDefault(str(args.get("ws")), StrUtil.blankToDefault(defaultWs, WS_DEFAULT));
         try {
             Object result = switch (StrUtil.nullToEmpty(name)) {
+                case "list_skills" -> listSkills(!"false".equalsIgnoreCase(StrUtil.blankToDefault(
+                        str(args.get("includeDesc")), "true")));
                 case "catalog_stats" -> catalogStats(ws);
                 case "list_ws_catalog" -> listWsCatalog(ws, intArg(args.get("topN"), 12));
                 case "list_my_assets" -> listMyAssets(ws, intArg(args.get("topN"), 12));
@@ -394,6 +482,9 @@ public class AiToolRegistry {
                 case "search_docs" -> aiDocsSearch.search(str(args.get("query")), intArg(args.get("topK"), 6));
                 case "ops_job_status" -> opsJobStatus(ws, intArg(args.get("topN"), 8));
                 case "kb_search" -> kbSearch(str(args.get("query")), ws, intArg(args.get("topK"), 5));
+                case "memory_recall" -> memoryRecall(str(args.get("query")), ws,
+                        str(args.get("projectId")), intArg(args.get("topK"), 5));
+                case "memory_save" -> memorySave(args, ws);
                 case "list_metrics" -> listMetrics(str(args.get("q")), ws, intArg(args.get("topN"), 8));
                 case "resolve_metric_meta" -> resolveMetricMeta(str(args.get("metricCode")), ws);
                 case "quality_summary" -> qualitySummary(str(args.get("tableName")), ws);
@@ -401,6 +492,10 @@ public class AiToolRegistry {
                 case "lineage_upstream" -> lineageUpstream(str(args.get("tableName")), ws);
                 case "lineage_downstream" -> lineageDownstream(str(args.get("tableName")), ws);
                 case "list_apply_tickets" -> listApplyTickets(str(args.get("status")), ws, intArg(args.get("topN"), 8));
+                case "create_apply_ticket" -> createApplyTicket(args, ws);
+                case "list_domains" -> listDomains(ws, str(args.get("q")), str(args.get("status")),
+                        intArg(args.get("topN"), 20));
+                case "list_etl_jobs" -> listEtlJobs(ws, str(args.get("q")), intArg(args.get("topN"), 12));
                 case "ds_connectivity" -> dsConnectivity(str(args.get("dsId")));
                 case "list_source_tables" -> listSourceTables(str(args.get("dsId")), str(args.get("q")),
                         intArg(args.get("topN"), 12));
@@ -432,6 +527,33 @@ public class AiToolRegistry {
             log.warn("AI tool {} failed: {}", name, e.getMessage());
             return truncateJson(Map.of("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName())));
         }
+    }
+
+    private Map<String, Object> listSkills(boolean includeDesc) {
+        List<Map<String, Object>> defs = openaiToolDefinitions();
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (Map<String, Object> t : defs) {
+            if (t == null) {
+                continue;
+            }
+            Object fnObj = t.get("function");
+            if (!(fnObj instanceof Map<?, ?> fn)) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name", String.valueOf(fn.get("name")));
+            if (includeDesc) {
+                Object descObj = fn.get("description");
+                String desc = descObj == null ? "" : String.valueOf(descObj);
+                row.put("description", StrUtil.maxLength(desc, 160));
+            }
+            items.add(row);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("skillCount", items.size());
+        out.put("note", "服务端白名单 skill（OpenAI tools）；问能力时用本结果，勿用知识库条目冒充");
+        out.put("skills", items);
+        return out;
     }
 
     private Map<String, Object> catalogStats(String ws) {
@@ -479,7 +601,12 @@ public class AiToolRegistry {
                 ? "目录有登记资产，但当前账号无可查授权；请到申请中心申请表读权限"
                 : null);
         out.put("softPrefer", true);
-        out.put("applyHref", "/apply");
+        out.put("applyHref", "/apply?type=perm");
+        out.put("applyHint", "申请表读权（SELECT）后即可查数");
+        out.put("howTo", List.of(
+                "打开申请中心选择「权限/表读」",
+                "选中目标资产并提交 SELECT",
+                "审批通过后重试预览或即席"));
         out.put("catalogHref", "/catalog");
         return out;
     }
@@ -505,7 +632,7 @@ public class AiToolRegistry {
             Map<String, Object> row = assetRow(a, canRead ? "readable" : "visible_only");
             row.put("canRead", canRead);
             if (!canRead) {
-                row.put("hint", "目录可见，查数需到申请中心授权");
+                AiSkillDenyHelper.attachNeedApplyHints(row, a.getId(), a.getAssetCode());
             }
             items.add(row);
         }
@@ -516,7 +643,8 @@ public class AiToolRegistry {
         out.put("readableInPage", readable);
         out.put("items", items);
         out.put("note", "与资产目录当前空间列表一致；canRead=false 仍可出现在目录，但不能查数");
-        out.put("applyHref", "/apply");
+        out.put("applyHref", "/apply?type=perm");
+        out.put("applyHint", "对 canRead=false 的资产申请表读权");
         return out;
     }
 
@@ -571,7 +699,7 @@ public class AiToolRegistry {
                 readable.add(assetRow(a, "readable"));
             } else if (needApply.size() < n) {
                 Map<String, Object> row = assetRow(a, "need_apply");
-                row.put("hint", "无读权限，请到申请中心申请");
+                AiSkillDenyHelper.attachNeedApplyHints(row, a.getId(), a.getAssetCode());
                 needApply.add(row);
             }
             if (readable.size() >= n) {
@@ -592,8 +720,7 @@ public class AiToolRegistry {
             return Map.of("error", "asset_not_found");
         }
         if (!aiAssetReadAccess.canRead(asset.getId())) {
-            return Map.of("error", "forbidden", "message", "无表读权限", "assetId", asset.getId(),
-                    "assetCode", asset.getAssetCode(), "href", "/apply");
+            return AiSkillDenyHelper.denyRead(asset.getId(), asset.getAssetCode(), "无表读权限，无法查看列结构");
         }
         try {
             GovAssetIdParam p = new GovAssetIdParam();
@@ -668,7 +795,12 @@ public class AiToolRegistry {
             }
             if (!canRead) {
                 out.put("hint", "元数据可见；抽样/列类型详查需可读权限");
-                out.put("applyHref", "/apply");
+                out.put("applyHint", "申请表读权（SELECT）后可预览与查结构");
+                out.put("applyHref", AiSkillDenyHelper.applyPermHref(asset.getId(), asset.getAssetCode()));
+                out.put("howTo", List.of(
+                        "打开申请中心提交表读权",
+                        "或调用 create_apply_ticket（ticketType=table_read, assetId=本资产）",
+                        "审批通过后重试 preview_asset / get_asset_schema"));
             }
             return out;
         } catch (Exception e) {
@@ -682,8 +814,7 @@ public class AiToolRegistry {
             return Map.of("error", "asset_not_found");
         }
         if (!aiAssetReadAccess.canRead(asset.getId())) {
-            return Map.of("error", "forbidden", "message", "无表读权限，无法预览",
-                    "assetId", asset.getId(), "assetCode", asset.getAssetCode(), "href", "/apply");
+            return AiSkillDenyHelper.denyRead(asset.getId(), asset.getAssetCode(), "无表读权限，无法预览");
         }
         int lim = Math.max(1, Math.min(limit, 20));
         try {
@@ -785,12 +916,106 @@ public class AiToolRegistry {
                 row.put("title", h.get("title"));
                 row.put("text", StrUtil.maxLength(String.valueOf(h.getOrDefault("text", "")), 500));
                 row.put("score", h.get("score"));
+                row.put("qualityScore", h.get("qualityScore"));
                 row.put("ws", h.get("ws"));
                 row.put("preferWs", prefer);
                 out.add(row);
             }
         } catch (Exception e) {
             log.debug("kb_search soft-fail: {}", e.toString());
+        }
+    }
+
+    private Map<String, Object> memoryRecall(String query, String ws, String projectId, int topK) {
+        if (StrUtil.isBlank(query)) {
+            return Map.of("error", "query_required");
+        }
+        int k = Math.max(1, Math.min(topK, MAX_ITEMS));
+        GovKbSearchParam param = new GovKbSearchParam();
+        param.setQuery(query.trim());
+        param.setWs(StrUtil.blankToDefault(ws, "default"));
+        param.setTopK(k);
+        param.setCats(List.of("minutes"));
+        param.setIncludePlatform(true);
+        if (StrUtil.isNotBlank(projectId)) {
+            param.setFilters(Map.of("projectId", projectId.trim()));
+        }
+        List<Map<String, Object>> hits = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        appendKb(hits, seen, param, param.getWs(), true);
+        if (hits.isEmpty()) {
+            GovKbSearchParam global = new GovKbSearchParam();
+            global.setQuery(query.trim());
+            global.setTopK(k);
+            global.setCats(List.of("minutes"));
+            appendKb(hits, seen, global, param.getWs(), false);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("query", query.trim());
+        out.put("cat", "minutes");
+        out.put("ws", param.getWs());
+        out.put("hits", hits);
+        out.put("note", "项目纪要记忆；引用后会更新 last_access_at");
+        return out;
+    }
+
+    private Map<String, Object> memorySave(Map<String, Object> args, String ws) {
+        String summary = str(args.get("summary"));
+        if (StrUtil.isBlank(summary)) {
+            return Map.of("error", "summary_required", "message", "摘要不能为空");
+        }
+        String title = StrUtil.blankToDefault(str(args.get("title")),
+                "项目纪要 · " + StrUtil.maxLength(summary.trim(), 24));
+        String conclusions = str(args.get("conclusions"));
+        String risks = str(args.get("risks"));
+        String todos = str(args.get("todos"));
+        String projectId = str(args.get("projectId"));
+        String tagsCsv = str(args.get("tags"));
+        StringBuilder body = new StringBuilder();
+        body.append("## 摘要\n").append(summary.trim()).append("\n\n");
+        if (StrUtil.isNotBlank(conclusions)) {
+            body.append("## 核心结论\n").append(conclusions.trim()).append("\n\n");
+        }
+        if (StrUtil.isNotBlank(risks)) {
+            body.append("## 风险点\n").append(risks.trim()).append("\n\n");
+        }
+        if (StrUtil.isNotBlank(todos)) {
+            body.append("## 待办\n").append(todos.trim()).append("\n\n");
+        }
+        GovKbUpsertParam param = new GovKbUpsertParam();
+        param.setTitle(title.trim());
+        param.setCat("minutes");
+        param.setBody(body.toString());
+        param.setSource("manual");
+        param.setStrategy("heading");
+        param.setWs(StrUtil.blankToDefault(str(args.get("ws")), StrUtil.blankToDefault(ws, "default")));
+        if (StrUtil.isNotBlank(projectId)) {
+            param.setRefsJson("{\"projectId\":\"" + projectId.trim().replace("\"", "") + "\"}");
+        }
+        if (StrUtil.isNotBlank(tagsCsv)) {
+            List<String> tags = new ArrayList<>();
+            for (String t : tagsCsv.split("[,，]")) {
+                if (StrUtil.isNotBlank(t)) {
+                    tags.add(t.trim());
+                }
+            }
+            param.setTagsJson(JSONUtil.toJsonStr(tags));
+        }
+        try {
+            var vo = govKbService.create(param);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("entryId", vo.getId());
+            out.put("title", vo.getTitle());
+            out.put("cat", vo.getCat());
+            out.put("qualityScore", vo.getQualityScore());
+            out.put("scoreReason", vo.getScoreReason());
+            out.put("href", "/knowledge?entry=" + vo.getId());
+            out.put("message", "已写入项目纪要草稿，可在知识库复核分数");
+            return out;
+        } catch (Exception e) {
+            return Map.of("error", "save_failed",
+                    "message", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
         }
     }
 
@@ -859,7 +1084,14 @@ public class AiToolRegistry {
         row.put("canRead", canRead);
         if (!canRead) {
             row.put("needApply", true);
-            row.put("href", "/apply");
+            row.put("applyHint", "申请指标查询权（metricKind=query）");
+            row.put("applyHref", "/apply?type=metric&kind=query&metricId="
+                    + StrUtil.blankToDefault(m.getMetricCode(), ""));
+            row.put("href", row.get("applyHref"));
+            row.put("howTo", List.of(
+                    "打开申请中心 → 指标申请 → 查询权",
+                    "或 create_apply_ticket（ticketType=metric, metricKind=query, metricCode=本编码）",
+                    "审批通过后可查看口径元信息"));
             row.put("note", "无指标读权限，不返回口径 SQL");
         }
         return row;
@@ -1250,9 +1482,194 @@ public class AiToolRegistry {
             out.put("items", items);
             out.put("count", items.size());
             out.put("href", "/apply");
+            out.put("applyHref", "/apply");
+            out.put("note", "创建新申请请用 create_apply_ticket；待我审的单用 list_pending_approvals");
             return out;
         } catch (Exception e) {
-            return Map.of("error", e.getMessage(), "href", "/apply");
+            return Map.of("error", e.getMessage(), "href", "/apply", "applyHref", "/apply");
+        }
+    }
+
+    private Map<String, Object> createApplyTicket(Map<String, Object> args, String ws) {
+        String ticketType = str(args.get("ticketType"));
+        if (StrUtil.isBlank(ticketType)) {
+            return AiSkillDenyHelper.denyApplyCreate("ticketType 必填");
+        }
+        String typeNorm = normalizeApplyType(ticketType);
+        String assetId = str(args.get("assetId"));
+        String assetCode = str(args.get("assetCode"));
+        if (StrUtil.isBlank(assetId) && StrUtil.isNotBlank(assetCode)) {
+            GovAsset resolved = resolveAsset(null, assetCode);
+            if (resolved != null) {
+                assetId = resolved.getId();
+                assetCode = resolved.getAssetCode();
+            }
+        }
+        if (("table_read".equals(typeNorm) || "perm".equals(typeNorm)) && StrUtil.isBlank(assetId)) {
+            return AiSkillDenyHelper.denyApplyCreate("table_read 须提供 assetId 或可解析的 assetCode");
+        }
+        if (StrUtil.isNotBlank(assetId)) {
+            GovAsset asset = resolveAsset(assetId, assetCode);
+            if (asset == null) {
+                return AiSkillDenyHelper.denyApplyCreate("资产不存在或不可见，无法代申；请到目录确认后再申请");
+            }
+            assetId = asset.getId();
+            assetCode = asset.getAssetCode();
+        }
+        try {
+            ApplyTicketCreateParam param = new ApplyTicketCreateParam();
+            param.setTicketType(typeNorm);
+            String title = str(args.get("title"));
+            if (StrUtil.isBlank(title)) {
+                title = "AI代申-" + typeNorm
+                        + (StrUtil.isNotBlank(assetCode) ? "-" + assetCode : "");
+            }
+            param.setTitle(title);
+            param.setReason(StrUtil.blankToDefault(str(args.get("reason")), "经 DataLake Copilot 代为提交"));
+            param.setAssetId(assetId);
+            param.setPrivilege(str(args.get("privilege")));
+            param.setExpireLabel(str(args.get("expireLabel")));
+            param.setResourceType(str(args.get("resourceType")));
+            param.setResourceId(str(args.get("resourceId")));
+            param.setApiBindingId(str(args.get("apiBindingId")));
+            param.setPublicPath(str(args.get("publicPath")));
+            param.setMethod(str(args.get("method")));
+            param.setConsumerName(str(args.get("consumerName")));
+            param.setMetricCode(str(args.get("metricCode")));
+            param.setMetricKind(str(args.get("metricKind")));
+            param.setExportTable(str(args.get("exportTable")));
+            param.setExportTarget(str(args.get("exportTarget")));
+            ApplyTicket created = applyTicketService.create(param);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("ticketId", created == null ? null : created.getId());
+            out.put("ticketNo", created == null ? null : created.getTicketNo());
+            out.put("ticketType", created == null ? typeNorm : created.getTicketType());
+            out.put("status", created == null ? null : created.getStatus());
+            out.put("ws", ws);
+            out.put("assetId", assetId);
+            out.put("assetCode", assetCode);
+            out.put("applyHref", "/apply");
+            out.put("href", "/apply");
+            out.put("message", "申请单已创建，请等待审批；可通过 list_apply_tickets 查看进度");
+            auditCreateApply(out);
+            return out;
+        } catch (Exception e) {
+            Map<String, Object> denied = AiSkillDenyHelper.denyApplyCreate(
+                    StrUtil.blankToDefault(e.getMessage(), "创建申请失败"));
+            denied.put("ticketType", typeNorm);
+            denied.put("assetId", assetId);
+            return denied;
+        }
+    }
+
+    private static String normalizeApplyType(String raw) {
+        String t = StrUtil.blankToDefault(raw, "").trim().toLowerCase();
+        return switch (t) {
+            case "perm", "table", "read" -> "table_read";
+            case "export" -> "lake_export";
+            case "manage" -> "resource_manage";
+            case "api" -> "api_subscribe";
+            case "publish" -> "api_publish";
+            case "elevated" -> "scan_elevate";
+            case "quality" -> "quality_fix";
+            default -> t;
+        };
+    }
+
+    private void auditCreateApply(Map<String, Object> detail) {
+        try {
+            GovAiActionLog logRow = new GovAiActionLog();
+            logRow.setId(IdUtil.getSnowflakeNextIdStr());
+            logRow.setAction("create_apply_ticket");
+            logRow.setDetailJson(JSONUtil.toJsonStr(detail));
+            logRow.setCreateTime(new Date());
+            try {
+                logRow.setCreateUser(LhLoginUsers.requireUser().getId());
+            } catch (Exception ignored) {
+                // soft
+            }
+            govAiActionLogMapper.insert(logRow);
+        } catch (Exception e) {
+            log.debug("create_apply_ticket audit soft-fail: {}", e.toString());
+        }
+    }
+
+    private Map<String, Object> listDomains(String ws, String q, String status, int topN) {
+        int n = Math.max(1, Math.min(topN, MAX_ITEMS));
+        try {
+            List<Map<String, Object>> rows = govDomainService.list(
+                    StrUtil.blankToDefault(ws, null),
+                    StrUtil.blankToDefault(status, null),
+                    StrUtil.blankToDefault(q, null));
+            List<Map<String, Object>> items = new ArrayList<>();
+            if (rows != null) {
+                for (Map<String, Object> r : rows) {
+                    if (r == null || items.size() >= n) {
+                        break;
+                    }
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    for (String k : List.of("id", "domainCode", "name", "cnName", "status", "ws",
+                            "owner", "description")) {
+                        if (r.containsKey(k) && r.get(k) != null) {
+                            row.put(k, r.get(k));
+                        }
+                    }
+                    if (row.isEmpty()) {
+                        row.putAll(r);
+                    }
+                    items.add(row);
+                }
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ws", ws);
+            out.put("q", q);
+            out.put("count", items.size());
+            out.put("items", items);
+            out.put("href", "/domain");
+            return out;
+        } catch (Exception e) {
+            return Map.of("error", e.getMessage(), "href", "/domain");
+        }
+    }
+
+    private Map<String, Object> listEtlJobs(String ws, String q, int topN) {
+        int n = Math.max(1, Math.min(topN, MAX_ITEMS));
+        try {
+            IgEtlPageParam dp = new IgEtlPageParam();
+            dp.setWs(ws);
+            if (StrUtil.isNotBlank(q)) {
+                dp.setQ(q.trim());
+                dp.setKeyword(q.trim());
+            }
+            Page<Map<String, Object>> dags = igEtlService.pageDags(dp);
+            List<Map<String, Object>> items = new ArrayList<>();
+            if (dags != null && dags.getRecords() != null) {
+                for (Map<String, Object> d : dags.getRecords()) {
+                    if (d == null || items.size() >= n) {
+                        break;
+                    }
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", d.get("id"));
+                    row.put("name", d.getOrDefault("name", d.get("dagName")));
+                    row.put("status", d.get("status"));
+                    row.put("ws", d.get("ws"));
+                    row.put("engine", d.get("engine"));
+                    row.put("updateTime", d.get("updateTime"));
+                    items.add(row);
+                }
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ws", ws);
+            out.put("q", q);
+            out.put("count", items.size());
+            out.put("total", dags == null ? items.size() : dags.getTotal());
+            out.put("items", items);
+            out.put("href", "/integration");
+            out.put("note", "只读摘要；发布/启停不在 AI 工具范围");
+            return out;
+        } catch (Exception e) {
+            return Map.of("error", e.getMessage(), "href", "/integration");
         }
     }
 
@@ -1262,12 +1679,8 @@ public class AiToolRegistry {
         }
         try {
             if (!secAuthGrantService.canUseDatasource(dsId)) {
-                Map<String, Object> denied = new LinkedHashMap<>();
-                denied.put("error", "forbidden");
-                denied.put("message", "无权使用该数据源（须为拥有者或持有 EDIT/MANAGE）");
-                denied.put("dsId", dsId);
-                denied.put("href", "/apply");
-                return denied;
+                return AiSkillDenyHelper.denyDs(dsId,
+                        "无权使用该数据源（须为拥有者或持有 EDIT/MANAGE）");
             }
             LhDatasourceTestParam param = new LhDatasourceTestParam();
             param.setId(dsId);
@@ -1316,12 +1729,7 @@ public class AiToolRegistry {
         int n = Math.max(1, Math.min(topN, MAX_ITEMS));
         try {
             if (!secAuthGrantService.canUseDatasource(dsId)) {
-                Map<String, Object> denied = new LinkedHashMap<>();
-                denied.put("error", "forbidden");
-                denied.put("message", "无权使用该数据源");
-                denied.put("dsId", dsId);
-                denied.put("href", "/apply");
-                return denied;
+                return AiSkillDenyHelper.denyDs(dsId, "无权使用该数据源");
             }
             LhDsTablePageParam param = new LhDsTablePageParam();
             param.setDsId(dsId);
@@ -1579,7 +1987,13 @@ public class AiToolRegistry {
 
         if (!canRead) {
             out.put("hint", "目录可能可见但不可查数；请到申请中心申请表读权");
-            out.put("href", "/apply");
+            out.put("applyHint", "申请表读权（SELECT）");
+            out.put("applyHref", AiSkillDenyHelper.applyPermHref(asset.getId(), asset.getAssetCode()));
+            out.put("howTo", List.of(
+                    "打开申请中心提交表读权",
+                    "或 create_apply_ticket（ticketType=table_read）",
+                    "审批通过后 canRead 应为 true"));
+            out.put("href", out.get("applyHref"));
         } else {
             out.put("hint", "可读（与目录预览 / grants/check 同口径）");
             out.put("href", "/catalog?asset=" + asset.getId());

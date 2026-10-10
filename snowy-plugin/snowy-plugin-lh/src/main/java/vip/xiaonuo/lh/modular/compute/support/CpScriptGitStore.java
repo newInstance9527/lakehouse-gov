@@ -106,6 +106,47 @@ public class CpScriptGitStore {
         }
     }
 
+    /**
+     * 从工作区删除脚本文件并提交（Git 历史与 tag 仍保留，可用 {@link #readAt} 找回）。
+     */
+    public String delete(String ws, String path, String message, String author, String email) {
+        ensure(ws);
+        if (StrUtil.isBlank(path)) {
+            throw new CommonException("缺少脚本 path");
+        }
+        File file = new File(repoDir(ws), path);
+        try (Git git = Git.open(repoDir(ws))) {
+            if (file.isFile()) {
+                Files.deleteIfExists(file.toPath());
+            }
+            git.rm().addFilepattern(path).call();
+            var status = git.status().addPath(path).call();
+            boolean unchanged = status.getAdded().isEmpty()
+                    && status.getChanged().isEmpty()
+                    && status.getModified().isEmpty()
+                    && status.getRemoved().isEmpty()
+                    && status.getMissing().isEmpty();
+            if (unchanged && !file.exists()) {
+                // 工作区与索引已无该文件：仍返回 HEAD，便于调用方写索引
+                ObjectId head = git.getRepository().resolve("HEAD");
+                return head == null ? "" : head.getName();
+            }
+            PersonIdent ident = new PersonIdent(
+                    StrUtil.blankToDefault(author, "lakehouse"),
+                    StrUtil.blankToDefault(email, "lakehouse@local"));
+            RevCommit commit = git.commit()
+                    .setMessage(StrUtil.blankToDefault(message, "delete " + path))
+                    .setAuthor(ident)
+                    .setCommitter(ident)
+                    .call();
+            return commit.getName();
+        } catch (CommonException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CommonException("从 Git 删除脚本失败: {}", e.getMessage());
+        }
+    }
+
     public String tag(String ws, String name, String message) {
         ensure(ws);
         String tag = name.replaceAll("[^A-Za-z0-9._\\-]", "-");

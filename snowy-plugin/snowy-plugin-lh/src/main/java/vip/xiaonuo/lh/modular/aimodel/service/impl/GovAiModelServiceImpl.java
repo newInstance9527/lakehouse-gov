@@ -85,6 +85,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
                 .and(w -> w.eq(GovAiModel::getWs, workspace).or().eq(GovAiModel::getWs, "*")));
         long enabled = all.stream().filter(m -> Boolean.TRUE.equals(m.getEnabled())).count();
         long ok = all.stream().filter(m -> "ok".equalsIgnoreCase(m.getStatus())).count();
+        long warn = all.stream().filter(m -> "warn".equalsIgnoreCase(m.getStatus())).count();
+        long error = all.stream().filter(m -> isErrorStatus(m.getStatus())).count();
 
         Date from = monthStart();
         List<GovAiUsageDaily> usage = usageMapper.selectList(new QueryWrapper<GovAiUsageDaily>().lambda()
@@ -104,6 +106,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         out.put("modelCount", all.size());
         out.put("enabledCount", enabled);
         out.put("okCount", ok);
+        out.put("warnCount", warn);
+        out.put("errorCount", error);
         out.put("connectivity", ok + "/" + Math.max(all.size(), 1));
         out.put("monthCalls", calls);
         out.put("monthCost", cost.setScale(2, RoundingMode.HALF_UP));
@@ -331,7 +335,9 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         if (param.getKeyExpiresAt() != null) {
             row.setKeyExpiresAt(param.getKeyExpiresAt());
         }
-        if ("warn".equalsIgnoreCase(row.getStatus()) || "off".equalsIgnoreCase(row.getStatus())) {
+        if ("warn".equalsIgnoreCase(row.getStatus())
+                || isErrorStatus(row.getStatus())
+                || "off".equalsIgnoreCase(row.getStatus())) {
             // 轮换后恢复可探测态；启停 off 仍保持 enabled 语义由 enable 控制
             if (Boolean.TRUE.equals(row.getEnabled())) {
                 row.setStatus("ok");
@@ -364,7 +370,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
                 boolean ok = Boolean.TRUE.equals(probe.get("ok"));
                 int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
                 row.setLatencyMs(latency);
-                String status = !Boolean.TRUE.equals(row.getEnabled()) ? "off" : (ok ? "ok" : "warn");
+                String status = statusAfterProbe(row, ok);
                 row.setStatus(status);
                 modelMapper.updateById(row);
                 out.put("ok", ok);
@@ -380,7 +386,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             }
             int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
             row.setLatencyMs(latency);
-            row.setStatus(Boolean.TRUE.equals(row.getEnabled()) ? "warn" : "off");
+            row.setStatus(Boolean.TRUE.equals(row.getEnabled()) ? "error" : "off");
             modelMapper.updateById(row);
             out.put("ok", false);
             out.put("mock", false);
@@ -403,10 +409,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             boolean ok = Boolean.TRUE.equals(probe.get("ok"));
             int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
             row.setLatencyMs(latency);
-            String status = !Boolean.TRUE.equals(row.getEnabled()) ? "off" : (ok ? "ok" : "warn");
-            if (ok && isKeyExpiringSoon(row)) {
-                status = "warn";
-            }
+            String status = statusAfterProbe(row, ok);
             row.setStatus(status);
             modelMapper.updateById(row);
             out.put("ok", ok);
@@ -418,7 +421,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             String message = ok
                     ? "直连 OpenAI 兼容端点成功（" + row.getModelName() + "）"
                     : probeErrorMsg(probe, "直连调用失败");
-            if (ok && isKeyExpiringSoon(row)) {
+            if (ok && "warn".equalsIgnoreCase(status)) {
                 message = message + "；Key 即将过期";
             }
             out.put("message", message);
@@ -464,9 +467,8 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         }
         int latency = (int) Math.min(Integer.MAX_VALUE, System.currentTimeMillis() - start);
         row.setLatencyMs(latency);
-        String status = !Boolean.TRUE.equals(row.getEnabled()) ? "off" : (ok ? "ok" : "warn");
-        if (ok && isKeyExpiringSoon(row)) {
-            status = "warn";
+        String status = statusAfterProbe(row, ok);
+        if (ok && "warn".equalsIgnoreCase(status)) {
             message = message + "；Key 即将过期";
         }
         row.setStatus(status);
@@ -1114,6 +1116,24 @@ public class GovAiModelServiceImpl implements GovAiModelService {
         String last4 = k.length() <= 4 ? k : k.substring(k.length() - 4);
         String prefix = k.startsWith("sk-") ? "sk-" : "";
         return prefix + "****..." + last4 + "（Vault）";
+    }
+
+    /**
+     * 探测后的门户状态：off（停用）/ ok（通）/ warn（通但 Key 将过期）/ error（不通）。
+     * 连通失败不得写成 warn，避免前端误显示「Key将过期」。
+     */
+    private String statusAfterProbe(GovAiModel row, boolean ok) {
+        if (!Boolean.TRUE.equals(row.getEnabled())) {
+            return "off";
+        }
+        if (!ok) {
+            return "error";
+        }
+        return isKeyExpiringSoon(row) ? "warn" : "ok";
+    }
+
+    private static boolean isErrorStatus(String status) {
+        return "error".equalsIgnoreCase(status) || "fail".equalsIgnoreCase(status);
     }
 
     /** Key 已过期或在 warnDays 内 → 预警 */

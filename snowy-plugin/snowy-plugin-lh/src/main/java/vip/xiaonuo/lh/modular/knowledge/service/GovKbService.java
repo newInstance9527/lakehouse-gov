@@ -48,4 +48,15 @@ public interface GovKbService {
     Map<String, Object> stats(String ws);
 
     Map<String, Object> ackCitation(GovKbCiteAckParam param);
+
+    /** 回写最后访问时间（检索命中 / 引用） */
+    void touchLastAccess(List<String> entryIds);
+
+    /** 纪要质量打分（启发式；人工分不覆盖） */
+    void scoreMinutesEntry(String entryId);
+
+    /**
+     * 纪要老化巡检：低分且长期未访问 → archive（去向量）→ 再过窗口 soft-delete。
+     */
+    Map<String, Object> memoryPatrol();
 }

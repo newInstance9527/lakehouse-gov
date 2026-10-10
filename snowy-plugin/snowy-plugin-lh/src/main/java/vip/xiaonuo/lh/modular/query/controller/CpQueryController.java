@@ -116,6 +116,31 @@ public class CpQueryController {
         return CommonResult.data(cpQueryService.history(param));
     }
 
+    @Operation(summary = "删除本人查询历史（软删）")
+    @CommonLog("即席删除历史")
+    @PostMapping({
+            "/lh/compute/query/history/{id}/delete",
+            "/lh/query/history/{id}/delete",
+            "/api/compute/query/history/{id}/delete"
+    })
+    public CommonResult<String> deleteHistory(@PathVariable String id) {
+        cpQueryService.deleteHistory(id);
+        return CommonResult.ok();
+    }
+
+    @Operation(summary = "清空本人查询历史（软删）")
+    @CommonLog("即席清空历史")
+    @PostMapping({
+            "/lh/compute/query/history/clear",
+            "/lh/query/history/clear",
+            "/api/compute/query/history/clear"
+    })
+    public CommonResult<Map<String, Object>> clearHistory(@RequestBody(required = false) Map<String, Object> body) {
+        Object raw = body == null ? null : body.get("ws");
+        String ws = raw == null ? null : String.valueOf(raw);
+        return CommonResult.data(cpQueryService.clearMyHistory(ws));
+    }
+
     @Operation(summary = "即席目录（门户资产；不列举 Gravitino/Trino）")
     @GetMapping({
             "/lh/compute/query/schema-tree",

@@ -28,6 +28,12 @@ public class GovKbEntryVo {
     private String refsJson;
     private Object refs;
     private Integer citeCnt;
+    private java.math.BigDecimal qualityScore;
+    private String scoreSource;
+    private String scoreReason;
+    private Date lastAccessAt;
+    private String lifecycleStatus;
+    private String tagsJson;
     private Integer chunkCount;
     private String status;
     /** indexing|ready|failed 时的错误摘要（来自 remark indexError=） */

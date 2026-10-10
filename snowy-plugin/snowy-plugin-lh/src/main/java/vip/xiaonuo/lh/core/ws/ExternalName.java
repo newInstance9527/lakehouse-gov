@@ -16,6 +16,8 @@ public final class ExternalName {
     public static final String KIND_APISIX = "apisix";
     public static final String KIND_MARQUEZ_NS = "marquez_ns";
     public static final String KIND_MARQUEZ_JOB = "marquez_job";
+    /** Superset Database 投影（仅 Trino query_gateway） */
+    public static final String KIND_SUPERSET_DB = "superset_db";
 
     private static final Pattern UNSAFE = Pattern.compile("[^a-zA-Z0-9._-]+");
     private static final int MAX_SEGMENT = 64;

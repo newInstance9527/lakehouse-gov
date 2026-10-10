@@ -16,7 +16,7 @@ class AiToolRegistryDefinitionsTest {
         AiToolRegistry registry = new AiToolRegistry();
         List<Map<String, Object>> tools = registry.openaiToolDefinitions();
         assertFalse(tools.isEmpty());
-        assertTrue(tools.size() >= 41);
+        assertTrue(tools.size() >= 45);
         Set<String> names = new java.util.HashSet<>();
         for (Map<String, Object> t : tools) {
             Object fn = t.get("function");
@@ -24,6 +24,7 @@ class AiToolRegistryDefinitionsTest {
                 names.add(String.valueOf(m.get("name")));
             }
         }
+        assertTrue(names.contains("list_skills"));
         assertTrue(names.contains("catalog_stats"));
         assertTrue(names.contains("list_my_assets"));
         assertTrue(names.contains("preview_asset"));
@@ -31,6 +32,9 @@ class AiToolRegistryDefinitionsTest {
         assertTrue(names.contains("lineage_downstream"));
         assertTrue(names.contains("recent_dq_fails"));
         assertTrue(names.contains("list_apply_tickets"));
+        assertTrue(names.contains("create_apply_ticket"));
+        assertTrue(names.contains("list_domains"));
+        assertTrue(names.contains("list_etl_jobs"));
         assertTrue(names.contains("list_datasources"));
         assertTrue(names.contains("ds_connectivity"));
         assertTrue(names.contains("list_source_tables"));

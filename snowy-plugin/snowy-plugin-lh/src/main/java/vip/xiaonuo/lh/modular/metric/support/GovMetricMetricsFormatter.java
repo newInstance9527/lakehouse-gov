@@ -29,6 +29,21 @@ public final class GovMetricMetricsFormatter {
         return lines;
     }
 
+    /**
+     * 查询/试跑观测：次数 + 耗时（供夜莺算 QPS / 延迟）。
+     */
+    public static List<String> formatQueryObs(String metricCode, String ws, String prefer,
+                                              String kind, long durMs, boolean ok, long timestampMs) {
+        List<String> lines = new ArrayList<>(3);
+        String base = "metric_code=\"" + esc(metricCode) + "\",ws=\"" + esc(ws)
+                + "\",prefer=\"" + esc(StrUtil.blankToDefault(prefer, "trino"))
+                + "\",kind=\"" + esc(StrUtil.blankToDefault(kind, "query")) + "\"";
+        lines.add(gauge("lh_metric_query_total", base, 1, timestampMs));
+        lines.add(gauge("lh_metric_query_dur_ms", base, Math.max(0, durMs), timestampMs));
+        lines.add(gauge("lh_metric_query_ok", base, ok ? 1 : 0, timestampMs));
+        return lines;
+    }
+
     public static String joinBody(List<String> lines) {
         if (lines == null || lines.isEmpty()) {
             return "";

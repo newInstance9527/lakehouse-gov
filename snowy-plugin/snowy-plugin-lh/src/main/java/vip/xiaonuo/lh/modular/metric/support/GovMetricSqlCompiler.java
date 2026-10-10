@@ -41,7 +41,6 @@ public final class GovMetricSqlCompiler {
         if (!"trino".equals(d) && !"clickhouse".equals(d)) {
             d = "trino";
         }
-        // M1：clickhouse 暂用 trino 方言文本，执行层会回退 Trino
         String kind = head.getKind();
         List<String> closure = new ArrayList<>();
         List<String> assets = new ArrayList<>();
@@ -68,12 +67,22 @@ public final class GovMetricSqlCompiler {
                 throw new IllegalArgumentException(parsed.error());
             }
             closure.add(head.getMetricCode());
-            sql = compileComposite(head, ver, parsed, resolveDep, closure, assets, params);
+            CompositeCompile cc = compileComposite(head, ver, parsed, resolveDep, closure, assets, params);
+            sql = cc.sql();
+            // 复合 ver 不落 grain；执行/试算维切片用依赖粒度交集
+            if (grains.isEmpty()) {
+                grains = cc.grainKeys();
+            }
         } else {
             throw new IllegalArgumentException("未知指标类型: " + kind);
         }
+        String outDialect = "trino";
+        if ("clickhouse".equals(d)) {
+            sql = toClickHouseDialect(sql);
+            outDialect = "clickhouse";
+        }
         Map<String, Object> meta = new LinkedHashMap<>();
-        meta.put("dialect", "trino");
+        meta.put("dialect", outDialect);
         meta.put("metricCode", head.getMetricCode());
         meta.put("ver", ver.getVer());
         meta.put("depClosure", closure);
@@ -81,7 +90,32 @@ public final class GovMetricSqlCompiler {
         meta.put("grainKeys", grains);
         meta.put("timeWindow", ver.getTimeWindow());
         meta.put("sqlText", sql);
-        return new CompileOut("trino", sql, closure, assets, grains, ver.getTimeWindow(), meta);
+        return new CompileOut(outDialect, sql, closure, assets, grains, ver.getTimeWindow(), meta);
+    }
+
+    /**
+     * Trino 风格指标 SQL → ClickHouse：标识符引号、date_trunc、三节表名压成库.表。
+     */
+    static String toClickHouseDialect(String trinoSql) {
+        if (StrUtil.isBlank(trinoSql)) {
+            return trinoSql;
+        }
+        String s = trinoSql;
+        // date_trunc('day', c) → toStartOfDay(c)；week/month/year 同理
+        s = Pattern.compile("(?i)date_trunc\\(\\s*'day'\\s*,\\s*([^)]+)\\)").matcher(s)
+                .replaceAll("toStartOfDay($1)");
+        s = Pattern.compile("(?i)date_trunc\\(\\s*'week'\\s*,\\s*([^)]+)\\)").matcher(s)
+                .replaceAll("toStartOfWeek($1)");
+        s = Pattern.compile("(?i)date_trunc\\(\\s*'month'\\s*,\\s*([^)]+)\\)").matcher(s)
+                .replaceAll("toStartOfMonth($1)");
+        s = Pattern.compile("(?i)date_trunc\\(\\s*'year'\\s*,\\s*([^)]+)\\)").matcher(s)
+                .replaceAll("toStartOfYear($1)");
+        // "ident" → `ident`
+        s = Pattern.compile("\"([^\"]+)\"").matcher(s).replaceAll("`$1`");
+        // iceberg.schema.table → schema.table（CK 无 catalog 段）
+        s = Pattern.compile("(?i)\\biceberg\\.([A-Za-z0-9_]+)\\.([A-Za-z0-9_`]+)").matcher(s)
+                .replaceAll("$1.$2");
+        return s;
     }
 
     private static void requireActiveOrTrial(GovMetric head) {
@@ -92,11 +126,11 @@ public final class GovMetricSqlCompiler {
         }
     }
 
-    private static String compileComposite(GovMetric head, GovMetricVer ver,
-                                           GovMetricFormulaParser.Result parsed,
-                                           Function<String, MetricNode> resolveDep,
-                                           List<String> closure, List<String> assets,
-                                           Map<String, Object> params) {
+    private static CompositeCompile compileComposite(GovMetric head, GovMetricVer ver,
+                                                     GovMetricFormulaParser.Result parsed,
+                                                     Function<String, MetricNode> resolveDep,
+                                                     List<String> closure, List<String> assets,
+                                                     Map<String, Object> params) {
         // 收集叶子 grain 交集
         List<List<String>> grainSets = new ArrayList<>();
         Map<String, String> cteSql = new LinkedHashMap<>();
@@ -110,13 +144,13 @@ public final class GovMetricSqlCompiler {
             }
             requireActiveOrTrial(node.head());
             List<String> g = parseJsonArray(node.ver().getGrainJson());
-            if ("原子".equals(node.head().getKind())) {
-                g = List.of(); // 原子无粒度 → 标量，复合时按全表一行
-            }
             grainSets.add(g);
             String leaf;
             if ("原子".equals(node.head().getKind())) {
-                leaf = compileAtomSelect(node.ver(), assets, null, null, params);
+                // 有 grain 时 CTE 保留维度列，供交集 JOIN；无 grain 才是标量一行
+                List<String> atomWhere = new ArrayList<>(parseJsonArray(node.ver().getQualifierJson()));
+                atomWhere.addAll(MetricParamBinder.dimFilterPredicates(params, g));
+                leaf = compileAtomSelect(node.ver(), assets, g.isEmpty() ? null : g, atomWhere, params);
             } else if ("衍生".equals(node.head().getKind())) {
                 MetricNode atom = resolveDep.apply(node.ver().getAtomRef());
                 if (atom == null || atom.ver() == null) {
@@ -175,9 +209,15 @@ public final class GovMetricSqlCompiler {
             }
         }
         if (StrUtil.isNotBlank(parsed.filter())) {
-            sb.append("\n-- extra filter reserved: ").append(parsed.filter());
+            // 与修饰词同白名单 DSL；限定挂到 a0（首依赖 CTE）
+            String pred = MetricQualifierDsl.compile(parsed.filter());
+            pred = pred.replaceAll("\"([A-Za-z_][A-Za-z0-9_]*)\"", "a0.\"$1\"");
+            sb.append("\nWHERE ").append(pred);
         }
-        return sb.toString();
+        return new CompositeCompile(sb.toString(), interGrain);
+    }
+
+    private record CompositeCompile(String sql, List<String> grainKeys) {
     }
 
     private static List<String> intersectGrains(List<List<String>> sets) {

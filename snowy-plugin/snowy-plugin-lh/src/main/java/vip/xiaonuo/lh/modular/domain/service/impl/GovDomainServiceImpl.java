@@ -141,6 +141,7 @@ public class GovDomainServiceImpl implements GovDomainService {
         row.setId(IdUtil.getSnowflakeNextIdStr());
         row.setWs(StrUtil.blankToDefault(param.getWs(), WS_DEFAULT).trim());
         row.setDomainCode(code);
+        row.setParentCode(normalizeParent(param.getParentCode(), code));
         row.setName(param.getName().trim());
         row.setOwner(StrUtil.trim(param.getOwner()));
         row.setSortNo(param.getSortNo() == null ? 100 : param.getSortNo());
@@ -160,6 +161,9 @@ public class GovDomainServiceImpl implements GovDomainService {
         GovDomain row = requireByCode(code);
         if (StrUtil.isNotBlank(param.getName())) {
             row.setName(param.getName().trim());
+        }
+        if (param.getParentCode() != null) {
+            row.setParentCode(normalizeParent(param.getParentCode(), row.getDomainCode()));
         }
         if (param.getOwner() != null) {
             row.setOwner(StrUtil.trim(param.getOwner()));
@@ -407,11 +411,33 @@ public class GovDomainServiceImpl implements GovDomainService {
         return false;
     }
 
+    /** 父域：空=顶层；不可自指；须已存在 */
+    private String normalizeParent(String parentCode, String selfCode) {
+        if (StrUtil.isBlank(parentCode)) {
+            return null;
+        }
+        String p = normalizeKey(parentCode);
+        if ("product".equals(p)) {
+            p = "goods";
+        }
+        if (p.equals(selfCode)) {
+            throw new CommonException("父域不能是自身");
+        }
+        Long cnt = domainMapper.selectCount(new QueryWrapper<GovDomain>().lambda()
+                .eq(GovDomain::getDomainCode, p)
+                .eq(GovDomain::getDeleteFlag, NOT_DELETE));
+        if (cnt == null || cnt == 0) {
+            throw new CommonException("父域不存在: " + p);
+        }
+        return p;
+    }
+
     private Map<String, Object> toRow(GovDomain d) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", d.getId());
         m.put("ws", d.getWs());
         m.put("domainCode", d.getDomainCode());
+        m.put("parentCode", d.getParentCode());
         m.put("name", d.getName());
         m.put("owner", d.getOwner());
         m.put("sortNo", d.getSortNo());

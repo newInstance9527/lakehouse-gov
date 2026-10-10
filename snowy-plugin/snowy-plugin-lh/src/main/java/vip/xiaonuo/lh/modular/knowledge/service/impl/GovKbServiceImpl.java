@@ -30,6 +30,8 @@ import vip.xiaonuo.lh.modular.knowledge.service.GovKbService;
 import vip.xiaonuo.lh.modular.knowledge.support.KbChunker;
 import vip.xiaonuo.lh.modular.knowledge.support.KbDocumentParser;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Comparator;
@@ -42,9 +44,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import lombok.extern.slf4j.Slf4j;
+
 /**
- * 知识库：分片索引 + Milvus 向量（未启用则关键词）
+ * 知识库：分片索引 + Milvus 向量（未启用则关键词）；纪要记忆质量与老化
  */
+@Slf4j
 @Service
 public class GovKbServiceImpl implements GovKbService {
 
@@ -54,6 +59,16 @@ public class GovKbServiceImpl implements GovKbService {
     private static final String SCOPE_WORKSPACE = "workspace";
     private static final String SCOPE_PLATFORM = "platform";
     private static final String NOT_DELETE = "NOT_DELETE";
+    private static final String LIFECYCLE_ACTIVE = "active";
+    private static final String LIFECYCLE_ARCHIVE = "archive";
+    private static final String LIFECYCLE_DELETED = "deleted";
+    private static final String CAT_MINUTES = "minutes";
+    /** 低分（≤3）无访问天数 → 归档 */
+    private static final int LOW_SCORE_IDLE_DAYS = 90;
+    /** 普通分（≤6）无访问天数 → 归档 */
+    private static final int MID_SCORE_IDLE_DAYS = 180;
+    /** 归档后再过此天数 soft-delete */
+    private static final int ARCHIVE_PURGE_DAYS = 180;
 
     @Resource
     private GovKbEntryMapper entryMapper;
@@ -85,6 +100,9 @@ public class GovKbServiceImpl implements GovKbService {
         out.put("practiceCount", countCat(all, "practice"));
         out.put("faqCount", countCat(all, "faq"));
         out.put("manualCount", countCat(all, "manual"));
+        out.put("minutesCount", countCat(all, CAT_MINUTES));
+        long archived = all.stream().filter(e -> LIFECYCLE_ARCHIVE.equalsIgnoreCase(e.getLifecycleStatus())).count();
+        out.put("minutesArchived", archived);
         out.put("citeCnt", all.stream().mapToInt(e -> e.getCiteCnt() == null ? 0 : e.getCiteCnt()).sum());
         out.put("citeTotal", all.stream().mapToInt(e -> e.getCiteCnt() == null ? 0 : e.getCiteCnt()).sum());
         out.put("ws", "*");
@@ -120,7 +138,9 @@ public class GovKbServiceImpl implements GovKbService {
     @Override
     public Page<GovKbEntryVo> page(GovKbPageParam param) {
         QueryWrapper<GovKbEntry> qw = new QueryWrapper<GovKbEntry>().checkSqlInjection();
-        qw.lambda().eq(GovKbEntry::getDeleteFlag, NOT_DELETE);
+        qw.lambda().eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
+                .and(w -> w.isNull(GovKbEntry::getLifecycleStatus)
+                        .or().ne(GovKbEntry::getLifecycleStatus, LIFECYCLE_DELETED));
         // 全局列表：忽略 ws / scope（历史 platform/workspace 列仅作痕迹）
         if (param != null && StrUtil.isNotBlank(param.getCat()) && !"all".equalsIgnoreCase(param.getCat())) {
             qw.lambda().eq(GovKbEntry::getCat, param.getCat().trim().toLowerCase(Locale.ROOT));
@@ -176,10 +196,24 @@ public class GovKbServiceImpl implements GovKbService {
         row.setEmbedModelId(param.getEmbedModelId());
         row.setRefsJson(resolveRefsJson(param));
         row.setCiteCnt(0);
+        row.setLifecycleStatus(LIFECYCLE_ACTIVE);
+        row.setTagsJson(param.getTagsJson());
+        if (param.getQualityScore() != null) {
+            row.setQualityScore(clampScore(param.getQualityScore()));
+            row.setScoreSource("human");
+            row.setScoreReason(StrUtil.blankToDefault(param.getScoreReason(), "人工评分"));
+        }
         row.setDeleteFlag(NOT_DELETE);
         entryMapper.insert(row);
         indexEntry(row);
-        return toVo(row, true);
+        if (CAT_MINUTES.equals(row.getCat()) && !"human".equalsIgnoreCase(row.getScoreSource())) {
+            try {
+                scoreMinutesEntry(row.getId());
+            } catch (Exception e) {
+                log.debug("minutes score soft-fail: {}", e.getMessage());
+            }
+        }
+        return toVo(requireEntry(row.getId()), true);
     }
 
     @Override
@@ -277,6 +311,20 @@ public class GovKbServiceImpl implements GovKbService {
         if (param.getRemark() != null) {
             row.setRemark(param.getRemark());
         }
+        if (param.getTagsJson() != null) {
+            row.setTagsJson(param.getTagsJson());
+        }
+        if (param.getQualityScore() != null) {
+            row.setQualityScore(clampScore(param.getQualityScore()));
+            row.setScoreSource("human");
+            row.setScoreReason(StrUtil.blankToDefault(param.getScoreReason(), "人工评分"));
+        }
+        if (StrUtil.isNotBlank(param.getLifecycleStatus())) {
+            String lc = param.getLifecycleStatus().trim().toLowerCase(Locale.ROOT);
+            if (LIFECYCLE_ACTIVE.equals(lc) || LIFECYCLE_ARCHIVE.equals(lc) || LIFECYCLE_DELETED.equals(lc)) {
+                row.setLifecycleStatus(lc);
+            }
+        }
         if (SCOPE_WORKSPACE.equals(effectiveScope(row)) && StrUtil.isNotBlank(param.getWs())
                 && !WS_PLATFORM.equals(param.getWs().trim())) {
             row.setWs(param.getWs().trim());
@@ -344,7 +392,9 @@ public class GovKbServiceImpl implements GovKbService {
         QueryWrapper<GovKbEntry> entryQw = new QueryWrapper<>();
         entryQw.lambda()
                 .eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
-                .eq(GovKbEntry::getStatus, "ready");
+                .eq(GovKbEntry::getStatus, "ready")
+                .and(w -> w.isNull(GovKbEntry::getLifecycleStatus)
+                        .or().eq(GovKbEntry::getLifecycleStatus, LIFECYCLE_ACTIVE));
         // 传 ws 时：本空间 workspace 条目 +（可选）platform；不传则全局（兼容旧调用）
         if (StrUtil.isNotBlank(param.getWs())) {
             String ws = param.getWs().trim();
@@ -486,15 +536,27 @@ public class GovKbServiceImpl implements GovKbService {
             double score = hasVec
                     ? (vectorWeight * vecNorm + kwWeight * kwNorm)
                     : kwNorm;
+            // 质量分与近访问加成（纪要记忆 / 通用条目均可）
+            GovKbEntry entry = entryMap.get(String.valueOf(m.get("entryId")));
+            double qBoost = qualityBoost(entry);
+            double accessBoost = accessRecencyBoost(entry);
+            score = Math.min(1.5, score * qBoost + accessBoost);
             m.put("score", score);
+            m.put("qualityScore", entry == null || entry.getQualityScore() == null
+                    ? null : entry.getQualityScore().doubleValue());
             m.put("retrievalMode", retrievalMode);
             scored.add(m);
         }
         scored.sort(Comparator.comparingDouble((Map<String, Object> m) -> (Double) m.get("score")).reversed());
-        if (scored.size() > topK) {
-            return scored.subList(0, topK);
-        }
-        return scored;
+        List<Map<String, Object>> top = scored.size() > topK ? scored.subList(0, topK) : scored;
+        // 检索命中回写访问时间（异步感：同事务轻量更新）
+        List<String> touched = top.stream()
+                .map(m -> String.valueOf(m.get("entryId")))
+                .filter(StrUtil::isNotBlank)
+                .distinct()
+                .toList();
+        touchLastAccess(touched);
+        return top;
     }
 
     @Override
@@ -542,6 +604,7 @@ public class GovKbServiceImpl implements GovKbService {
                 continue;
             }
             e.setCiteCnt((e.getCiteCnt() == null ? 0 : e.getCiteCnt()) + 1);
+            e.setLastAccessAt(new Date());
             entryMapper.updateById(e);
 
             GovKbCiteStat stat = citeStatMapper.selectOne(new QueryWrapper<GovKbCiteStat>().lambda()
@@ -564,6 +627,188 @@ public class GovKbServiceImpl implements GovKbService {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("acked", updated);
         return out;
+    }
+
+    @Override
+    public void touchLastAccess(List<String> entryIds) {
+        if (entryIds == null || entryIds.isEmpty()) {
+            return;
+        }
+        Date now = new Date();
+        for (String id : entryIds) {
+            if (StrUtil.isBlank(id)) {
+                continue;
+            }
+            try {
+                GovKbEntry e = entryMapper.selectById(id);
+                if (e == null || !NOT_DELETE.equals(e.getDeleteFlag())) {
+                    continue;
+                }
+                e.setLastAccessAt(now);
+                entryMapper.updateById(e);
+            } catch (Exception ignored) {
+                // soft
+            }
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void scoreMinutesEntry(String entryId) {
+        if (StrUtil.isBlank(entryId)) {
+            return;
+        }
+        GovKbEntry row = entryMapper.selectById(entryId);
+        if (row == null || !NOT_DELETE.equals(row.getDeleteFlag())) {
+            return;
+        }
+        if ("human".equalsIgnoreCase(row.getScoreSource()) && row.getQualityScore() != null) {
+            return;
+        }
+        String text = (StrUtil.nullToEmpty(row.getTitle()) + "\n" + StrUtil.nullToEmpty(row.getBody())).toLowerCase(Locale.ROOT);
+        double score = 4.0;
+        List<String> reasons = new ArrayList<>();
+        if (text.contains("结论") || text.contains("决策") || text.contains("里程碑")) {
+            score += 2.0;
+            reasons.add("含决策/结论/里程碑");
+        }
+        if (text.contains("风险")) {
+            score += 1.0;
+            reasons.add("含风险点");
+        }
+        if (text.contains("待办") || text.contains("责任人") || text.contains("ddl") || text.contains("截止")) {
+            score += 1.5;
+            reasons.add("含待办/责任人/时间点");
+        }
+        if (text.length() < 80) {
+            score -= 1.5;
+            reasons.add("内容过短");
+        }
+        if (text.contains("闲聊") || text.contains("哈哈哈") || text.contains("测试一下")) {
+            score -= 2.0;
+            reasons.add("疑似闲聊");
+        }
+        if (text.contains("重复") || text.contains("同上")) {
+            score -= 1.0;
+            reasons.add("疑似重复");
+        }
+        score = Math.max(0, Math.min(10, score));
+        row.setQualityScore(BigDecimal.valueOf(score).setScale(1, RoundingMode.HALF_UP));
+        row.setScoreSource("agent");
+        row.setScoreReason(reasons.isEmpty() ? "启发式默认分" : String.join("；", reasons));
+        if (StrUtil.isBlank(row.getLifecycleStatus())) {
+            row.setLifecycleStatus(LIFECYCLE_ACTIVE);
+        }
+        entryMapper.updateById(row);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> memoryPatrol() {
+        List<GovKbEntry> rows = entryMapper.selectList(new QueryWrapper<GovKbEntry>().lambda()
+                .eq(GovKbEntry::getDeleteFlag, NOT_DELETE)
+                .eq(GovKbEntry::getCat, CAT_MINUTES));
+        int archived = 0;
+        int purged = 0;
+        int protectedCnt = 0;
+        Date now = new Date();
+        for (GovKbEntry e : rows) {
+            if (e == null) {
+                continue;
+            }
+            String lc = StrUtil.blankToDefault(e.getLifecycleStatus(), LIFECYCLE_ACTIVE);
+            if (LIFECYCLE_DELETED.equalsIgnoreCase(lc)) {
+                continue;
+            }
+            if (isMemoryProtected(e)) {
+                protectedCnt++;
+                continue;
+            }
+            if (LIFECYCLE_ARCHIVE.equalsIgnoreCase(lc)) {
+                Date base = e.getUpdateTime() != null ? e.getUpdateTime() : e.getCreateTime();
+                if (base != null && daysBetween(base, now) >= ARCHIVE_PURGE_DAYS) {
+                    e.setLifecycleStatus(LIFECYCLE_DELETED);
+                    e.setDeleteFlag("DELETED");
+                    e.setRevision(e.getRevision() == null ? 1 : e.getRevision() + 1);
+                    entryMapper.updateById(e);
+                    purged++;
+                }
+                continue;
+            }
+            double q = e.getQualityScore() == null ? 5.0 : e.getQualityScore().doubleValue();
+            Date access = e.getLastAccessAt() != null ? e.getLastAccessAt()
+                    : (e.getUpdateTime() != null ? e.getUpdateTime() : e.getCreateTime());
+            long idle = access == null ? Long.MAX_VALUE : daysBetween(access, now);
+            boolean shouldArchive = (q <= 3 && idle >= LOW_SCORE_IDLE_DAYS)
+                    || (q <= 6 && idle >= MID_SCORE_IDLE_DAYS);
+            if (!shouldArchive) {
+                continue;
+            }
+            e.setLifecycleStatus(LIFECYCLE_ARCHIVE);
+            e.setRevision(e.getRevision() == null ? 1 : e.getRevision() + 1);
+            entryMapper.updateById(e);
+            try {
+                milvusClient.deleteByEntryId(e.getId());
+            } catch (Exception ignored) {
+                // soft
+            }
+            archived++;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("checked", rows.size());
+        out.put("archived", archived);
+        out.put("purged", purged);
+        out.put("protected", protectedCnt);
+        return out;
+    }
+
+    private static boolean isMemoryProtected(GovKbEntry e) {
+        if (e.getQualityScore() != null && e.getQualityScore().doubleValue() >= 7.0) {
+            return true;
+        }
+        String tags = StrUtil.nullToEmpty(e.getTagsJson()).toLowerCase(Locale.ROOT);
+        return tags.contains("里程碑") || tags.contains("milestone")
+                || tags.contains("决策") || tags.contains("decision")
+                || tags.contains("合同");
+    }
+
+    private static long daysBetween(Date from, Date to) {
+        if (from == null || to == null) {
+            return 0;
+        }
+        long ms = Math.max(0, to.getTime() - from.getTime());
+        return ms / (24L * 60L * 60L * 1000L);
+    }
+
+    private static double qualityBoost(GovKbEntry e) {
+        if (e == null || e.getQualityScore() == null) {
+            return 1.0;
+        }
+        double q = e.getQualityScore().doubleValue();
+        // 0→0.7 … 5→1.0 … 10→1.3
+        return 0.7 + (q / 10.0) * 0.6;
+    }
+
+    private static double accessRecencyBoost(GovKbEntry e) {
+        if (e == null || e.getLastAccessAt() == null) {
+            return 0;
+        }
+        long days = daysBetween(e.getLastAccessAt(), new Date());
+        if (days <= 7) {
+            return 0.08;
+        }
+        if (days <= 30) {
+            return 0.04;
+        }
+        return 0;
+    }
+
+    private static BigDecimal clampScore(BigDecimal s) {
+        if (s == null) {
+            return null;
+        }
+        double v = Math.max(0, Math.min(10, s.doubleValue()));
+        return BigDecimal.valueOf(v).setScale(1, RoundingMode.HALF_UP);
     }
 
     private int indexEntry(GovKbEntry row) {
@@ -760,6 +1005,12 @@ public class GovKbServiceImpl implements GovKbService {
         vo.setRefsJson(e.getRefsJson());
         vo.setRefs(parseRefs(e.getRefsJson()));
         vo.setCiteCnt(e.getCiteCnt());
+        vo.setQualityScore(e.getQualityScore());
+        vo.setScoreSource(e.getScoreSource());
+        vo.setScoreReason(e.getScoreReason());
+        vo.setLastAccessAt(e.getLastAccessAt());
+        vo.setLifecycleStatus(StrUtil.blankToDefault(e.getLifecycleStatus(), LIFECYCLE_ACTIVE));
+        vo.setTagsJson(e.getTagsJson());
         vo.setStatus(e.getStatus());
         vo.setIndexMode(parseIndexTag(e.getRemark(), "indexMode"));
         vo.setIndexError(parseIndexTag(e.getRemark(), "indexError"));
@@ -793,7 +1044,8 @@ public class GovKbServiceImpl implements GovKbService {
     private static String normalizeCat(String cat) {
         String c = StrUtil.blankToDefault(cat, "faq").trim().toLowerCase(Locale.ROOT);
         return switch (c) {
-            case "term", "dict", "practice", "faq", "manual" -> c;
+            case "term", "dict", "practice", "faq", "manual", "minutes", "memo" ->
+                    "memo".equals(c) ? CAT_MINUTES : c;
             default -> "faq";
         };
     }
