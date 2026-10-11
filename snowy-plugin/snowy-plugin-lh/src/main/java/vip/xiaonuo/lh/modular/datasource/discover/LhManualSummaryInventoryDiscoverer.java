@@ -33,18 +33,11 @@ import java.util.stream.Collectors;
 public class LhManualSummaryInventoryDiscoverer implements LhInventoryDiscoverer {
 
     /** 明确走手工摘要的类型（无专用 Discoverer 或自动扫描不适宜） */
-    private static final Set<String> MANUAL_TYPES = Set.of(
-            "mongodb",
-            "hdfs",
-            "file",
-            "ftp",
-            "http_api",
-            "pulsar",
-            "hbase",
-            "tableau",
-            "superset",
-            "airflow"
-    );
+    /**
+     * 无专用 Discoverer 时的兜底集合。
+     * 可登记类型均已有 Order(10) 发现器或 JDBC 路径；此处留空，仅作安全网接口实现。
+     */
+    private static final Set<String> MANUAL_TYPES = Set.of();
 
     @Override
     public boolean supports(String typeCode) {
@@ -85,13 +78,19 @@ public class LhManualSummaryInventoryDiscoverer implements LhInventoryDiscoverer
             case "s3", "minio", "s3_minio" ->
                     "S3/MinIO 请先保存后同步（path=minio_s3，ListBuckets；已填 bucket 时可列顶层前缀）。";
             case "mongodb" ->
-                    "MongoDB 暂不自动拉取集合清单，请维护「集合清单」后同步回填。";
-            case "hdfs", "file", "ftp" ->
+                    "MongoDB 请先保存后同步（path=mongo_list，listCollectionNames）；失败时可维护集合清单兜底。";
+            case "hdfs" ->
+                    "HDFS 请先保存后同步（path=webhdfs，NameNode HTTP LISTSTATUS）；失败时可维护路径清单兜底。";
+            case "file" ->
                     "文件/路径类源请维护「路径清单」后同步回填；不做全量目录扫描。";
-            case "http_api" ->
-                    "HTTP API 请维护「接口清单」后同步回填。";
+            case "ftp" ->
+                    "FTP/SFTP 请先保存后同步（path=ftp_list，LIST 远程目录限流）；失败时可维护路径清单兜底。";
+            case "http_api", "tableau", "superset", "airflow" ->
+                    "请先保存后同步（有 openapiSpec 则 path=openapi；否则回落接口清单摘要）。";
             case "pulsar" ->
-                    "Pulsar 暂不自动拉取 Topic，请维护 Topic 清单后同步回填。";
+                    "Pulsar 请先保存后同步（path=pulsar_admin，Admin 列举 Topic）；失败时可维护 Topic 清单兜底。";
+            case "hbase" ->
+                    "HBase 请先保存后同步（ZK 探测 + 可选 Stargate restUrl 列表）；否则维护表清单后同步回填。";
             default ->
                     "当前类型不支持自动发现" + kindLabel + "，请维护注册表单清单摘要后同步回填。";
         };

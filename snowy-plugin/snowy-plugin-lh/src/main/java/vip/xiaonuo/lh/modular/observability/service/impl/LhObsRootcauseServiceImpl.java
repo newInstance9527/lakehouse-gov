@@ -4,8 +4,10 @@ import cn.hutool.core.util.StrUtil;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 import vip.xiaonuo.common.exception.CommonException;
+import vip.xiaonuo.lh.core.auth.LhLoginUsers;
 import vip.xiaonuo.lh.modular.etl.param.IgEtlBackfillParam;
 import vip.xiaonuo.lh.modular.etl.service.IgEtlService;
+import vip.xiaonuo.lh.modular.inbox.LhInboxNotifier;
 import vip.xiaonuo.lh.modular.observability.service.LhObsRootcauseService;
 import vip.xiaonuo.lh.modular.observability.service.LhObsSpanService;
 import vip.xiaonuo.lh.modular.recon.support.ReconPartitionService;
@@ -24,6 +26,8 @@ public class LhObsRootcauseServiceImpl implements LhObsRootcauseService {
     private ReconPartitionService reconPartitionService;
     @Resource
     private IgEtlService igEtlService;
+    @Resource
+    private LhInboxNotifier inboxNotifier;
 
     @Override
     public Map<String, Object> alerts(String ws) {
@@ -180,9 +184,19 @@ public class LhObsRootcauseServiceImpl implements LhObsRootcauseService {
             r.put("backfill", null);
             r.put("backfillHint", "须提供 dagId/job + markValue 才触发 ETL 补数");
         }
+        String ownerId = StrUtil.blankToDefault(str(body.get("ownerId")), str(body.get("notifyUserId")));
+        String operatorId = null;
+        try {
+            operatorId = LhLoginUsers.requireUserId();
+        } catch (Exception ignored) {
+            /* 无登录上下文时仅按 owner / 空间 Owner 投递 */
+        }
+        boolean sent = inboxNotifier.notifyRemediateOwner(
+                ownerId, operatorId, str(body.get("ws")), dagId, markValue);
         r.put("notifyOwner", Map.of(
-                "status", "queued",
-                "hint", "通知 owner：对接站内信/webhook 后投递"));
+                "status", sent ? "sent" : "skipped",
+                "channel", "inbox",
+                "hint", sent ? "已投递站内信" : "无可用接收人（ownerId / 空间 Owner）"));
         r.put("ticket", Map.of(
                 "type", "remediate",
                 "status", "draft",

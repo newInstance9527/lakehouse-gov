@@ -23,6 +23,7 @@ import vip.xiaonuo.lh.modular.apply.param.ApplyTicketPageParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
 import vip.xiaonuo.lh.modular.apply.support.ApplyApprovalCandidateService;
 import vip.xiaonuo.lh.modular.apply.support.ApplyApprovalChain;
+import vip.xiaonuo.lh.modular.inbox.LhInboxNotifier;
 import vip.xiaonuo.lh.modular.catalog.entity.GovAsset;
 import vip.xiaonuo.lh.modular.catalog.mapper.GovAssetMapper;
 import vip.xiaonuo.lh.modular.compliance.support.GovDelProcessingGate;
@@ -96,6 +97,8 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     private ExportAuditService exportAuditService;
     @Resource
     private LhIdempotencyGuard idempotencyGuard;
+    @Resource
+    private LhInboxNotifier inboxNotifier;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -113,37 +116,32 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     private ApplyTicket createOnce(ApplyTicketCreateParam param) {
         String userId = LhLoginUsers.requireUserId();
         String type = normalizeTicketType(param.getTicketType());
+        ApplyTicket created;
         if (TYPE_LAKE_EXPORT.equals(type)) {
-            return createExport(param, userId);
+            created = createExport(param, userId);
+        } else if (TYPE_RESOURCE_MANAGE.equals(type)) {
+            created = createResourceManage(param, userId);
+        } else if (TYPE_COMPLIANCE_DELETE.equals(type)) {
+            created = createComplianceDelete(param, userId);
+        } else if (TYPE_API_PUBLISH.equals(type)) {
+            created = createApiPublish(param, userId);
+        } else if (TYPE_SCRIPT_PUBLISH.equals(type)) {
+            created = createScriptPublish(param, userId);
+        } else if (TYPE_API_SUBSCRIBE.equals(type)) {
+            created = createApiSubscribe(param, userId);
+        } else if (TYPE_METRIC.equals(type)) {
+            created = createMetric(param, userId);
+        } else if (TYPE_SCAN_ELEVATE.equals(type)) {
+            created = createScanElevate(param, userId);
+        } else if (TYPE_QUALITY_FIX.equals(type)) {
+            created = createQualityFix(param, userId);
+        } else if (TYPE_VAULT_ROTATE_FAIL.equals(type)) {
+            created = createVaultRotateFail(param, userId);
+        } else {
+            created = createTableRead(param, userId, type);
         }
-        if (TYPE_RESOURCE_MANAGE.equals(type)) {
-            return createResourceManage(param, userId);
-        }
-        if (TYPE_COMPLIANCE_DELETE.equals(type)) {
-            return createComplianceDelete(param, userId);
-        }
-        if (TYPE_API_PUBLISH.equals(type)) {
-            return createApiPublish(param, userId);
-        }
-        if (TYPE_SCRIPT_PUBLISH.equals(type)) {
-            return createScriptPublish(param, userId);
-        }
-        if (TYPE_API_SUBSCRIBE.equals(type)) {
-            return createApiSubscribe(param, userId);
-        }
-        if (TYPE_METRIC.equals(type)) {
-            return createMetric(param, userId);
-        }
-        if (TYPE_SCAN_ELEVATE.equals(type)) {
-            return createScanElevate(param, userId);
-        }
-        if (TYPE_QUALITY_FIX.equals(type)) {
-            return createQualityFix(param, userId);
-        }
-        if (TYPE_VAULT_ROTATE_FAIL.equals(type)) {
-            return createVaultRotateFail(param, userId);
-        }
-        return createTableRead(param, userId, type);
+        inboxNotifier.notifyOwnersNewTicket(created);
+        return created;
     }
 
     /**
@@ -691,6 +689,22 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> approve(ApplyTicketDecideParam param) {
+        Map<String, Object> r = doApprove(param);
+        notifyIfApproved(r);
+        return r;
+    }
+
+    private void notifyIfApproved(Map<String, Object> r) {
+        if (r == null) {
+            return;
+        }
+        Object ticket = r.get("ticket");
+        if (ticket instanceof ApplyTicket at && "approved".equals(at.getStatus())) {
+            inboxNotifier.notifyApplicantDecision(at, "approved");
+        }
+    }
+
+    private Map<String, Object> doApprove(ApplyTicketDecideParam param) {
         ApplyTicket t = requireTicket(param.getId());
         approvalCandidateService.assertCanDecide(t);
         if (!ApplyApprovalChain.isOpenForDecision(t.getStatus())) {
@@ -881,6 +895,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (TYPE_METRIC.equals(t.getTicketType())) {
             revertMetricAfterReject(t, param.getRemark());
         }
+        inboxNotifier.notifyApplicantDecision(t, "rejected");
         return t;
     }
 

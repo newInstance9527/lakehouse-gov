@@ -30,8 +30,10 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import java.nio.charset.StandardCharsets;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -99,7 +101,14 @@ public class LhEsInventoryDiscoverer implements LhInventoryDiscoverer {
 
         try {
             HttpRequest req = HttpRequest.get(url).timeout(12000);
-            if (StrUtil.isNotBlank(user)) {
+            String apiKey = first(secret, "apiKey", "apiKeyId", "api_key");
+            if (StrUtil.isNotBlank(apiKey) && !apiKey.contains("建议")) {
+                // ES ApiKey：整段 base64 或 id:key；原样放 Authorization
+                String token = apiKey.contains(":")
+                        ? Base64.getEncoder().encodeToString(apiKey.getBytes(StandardCharsets.UTF_8))
+                        : apiKey.trim();
+                req.header("Authorization", "ApiKey " + token);
+            } else if (StrUtil.isNotBlank(user)) {
                 req.basicAuth(user, StrUtil.nullToEmpty(password));
             }
             if (https && lhProperties.getHttp().isInsecureSsl()) {
@@ -157,7 +166,8 @@ public class LhEsInventoryDiscoverer implements LhInventoryDiscoverer {
             return false;
         }
         String s = ssl.toLowerCase(Locale.ROOT);
-        return s.contains("开启") || "true".equals(s) || "yes".equals(s) || "1".equals(s) || "https".equals(s);
+        return s.contains("开启") || s.contains("启用") || "true".equals(s) || "yes".equals(s)
+                || "1".equals(s) || "https".equals(s) || "ssl".equals(s);
     }
 
     /** 默认跳过 `.` 开头系统索引；Vault skipSystemIndices=false / includeSystem=true 可关闭 */

@@ -204,7 +204,8 @@ public class LhMinioInventoryDiscoverer implements LhInventoryDiscoverer {
             return "443".equals(port);
         }
         String s = secure.toLowerCase(Locale.ROOT);
-        return s.contains("开启") || "true".equals(s) || "yes".equals(s) || "1".equals(s) || "https".equals(s);
+        return s.contains("开启") || s.contains("启用") || "true".equals(s) || "yes".equals(s)
+                || "1".equals(s) || "https".equals(s) || "ssl".equals(s);
     }
 
     private static String first(Map<String, Object> m, String... keys) {

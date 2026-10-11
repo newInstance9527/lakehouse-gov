@@ -2,7 +2,9 @@ package vip.xiaonuo.lh.modular.datasource.support;
 
 import cn.hutool.core.util.StrUtil;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -53,16 +55,11 @@ public final class LhJdbcUrlBuilder {
                     + StrUtil.blankToDefault(db, "default")
                     + (StrUtil.isNotBlank(ex) ? "?" + ex : "");
             case "doris", "starrocks" -> "jdbc:mysql://" + h + ":" + p + "/" + db + "?useSSL=false";
-            case "trino" -> "jdbc:trino://" + h + ":" + p + "/" + StrUtil.blankToDefault(db, "hive");
+            case "trino" -> buildTrino(h, p, db, conn);
             case "oceanbase" -> "jdbc:oceanbase://" + h + ":" + p + "/" + db
                     + (StrUtil.isNotBlank(ex) ? "?" + ex : "");
-            case "hive" -> "jdbc:hive2://" + h + ":"
-                    + StrUtil.blankToDefault(p, "10000") + "/"
-                    + StrUtil.blankToDefault(db, "default")
-                    + (StrUtil.isNotBlank(ex) ? ";" + ex.replace("&", ";") : "");
-            case "mongodb" -> "jdbc:mongodb://" + h + ":"
-                    + StrUtil.blankToDefault(p, "27017") + "/"
-                    + StrUtil.blankToDefault(db, "admin");
+            case "hive" -> buildHive(h, p, db, ex, conn);
+            case "mongodb" -> buildMongo(h, p, db, ex, conn);
             case "elasticsearch", "es" -> buildElasticsearch(h, p);
             case "http_api", "tableau", "superset", "airflow" -> buildHttpRestful(conn, h, p);
             default -> "";
@@ -78,6 +75,69 @@ public final class LhJdbcUrlBuilder {
         String db = firstNonBlank(conn.get("database"), conn.get("db"), databaseName);
         String extra = firstNonBlank(conn.get("extra"));
         return build(type, host, port, db, extra, conn);
+    }
+
+    /**
+     * HiveServer2：NONE/LDAP 用用户名密码；Kerberos 追加 principal=
+     * 例 jdbc:hive2://hs2:10000/default;principal=hive/_HOST@REALM
+     */
+    private static String buildHive(String host, String port, String database, String extra,
+                                    Map<String, Object> conn) {
+        String db = StrUtil.blankToDefault(database, "default");
+        StringBuilder url = new StringBuilder("jdbc:hive2://")
+                .append(host).append(":")
+                .append(StrUtil.blankToDefault(port, "10000"))
+                .append("/").append(db);
+        List<String> parts = new ArrayList<>();
+        String auth = firstNonBlank(conn != null ? conn.get("auth") : null);
+        String principal = firstNonBlank(conn != null ? conn.get("principal") : null);
+        if (StrUtil.isNotBlank(auth) && "Kerberos".equalsIgnoreCase(auth.trim())
+                && StrUtil.isNotBlank(principal)) {
+            parts.add("principal=" + principal.trim());
+        } else if (StrUtil.isNotBlank(auth) && !"NONE".equalsIgnoreCase(auth.trim())
+                && !"Kerberos".equalsIgnoreCase(auth.trim())) {
+            // LDAP 等：auth=ldap（部分发行版识别）
+            parts.add("auth=" + auth.trim());
+        }
+        if (StrUtil.isNotBlank(extra)) {
+            parts.add(extra.replace("&", ";").replaceFirst("^;+", ""));
+        }
+        if (!parts.isEmpty()) {
+            url.append(";").append(String.join(";", parts));
+        }
+        return url.toString();
+    }
+
+    private static String buildMongo(String host, String port, String database, String extra,
+                                     Map<String, Object> conn) {
+        String db = StrUtil.blankToDefault(database, "admin");
+        StringBuilder url = new StringBuilder("jdbc:mongodb://")
+                .append(host).append(":").append(StrUtil.blankToDefault(port, "27017"))
+                .append("/").append(db);
+        List<String> q = new ArrayList<>();
+        String authSource = firstNonBlank(conn != null ? conn.get("authSource") : null);
+        if (StrUtil.isNotBlank(authSource)) {
+            q.add("authSource=" + authSource.trim());
+        }
+        String replicaSet = firstNonBlank(conn != null ? conn.get("replicaSet") : null);
+        if (StrUtil.isNotBlank(replicaSet)) {
+            q.add("replicaSet=" + replicaSet.trim());
+        }
+        if (StrUtil.isNotBlank(extra)) {
+            q.add(extra.startsWith("?") || extra.startsWith("&") ? extra.replaceFirst("^[?&]+", "") : extra);
+        }
+        if (!q.isEmpty()) {
+            url.append("?").append(String.join("&", q));
+        }
+        return url.toString();
+    }
+
+    /** jdbc:trino://host:port/catalog/schema */
+    private static String buildTrino(String host, String port, String database, Map<String, Object> conn) {
+        String catalog = firstNonBlank(conn != null ? conn.get("catalog") : null, "hive");
+        String schema = StrUtil.blankToDefault(database, "default");
+        return "jdbc:trino://" + host + ":" + StrUtil.blankToDefault(port, "8080")
+                + "/" + catalog + "/" + schema;
     }
 
     private static String buildOracle(String host, String port, String db) {

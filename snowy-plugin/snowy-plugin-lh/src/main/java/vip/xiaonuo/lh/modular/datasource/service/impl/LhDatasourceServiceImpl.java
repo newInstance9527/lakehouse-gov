@@ -52,7 +52,9 @@ import vip.xiaonuo.lh.modular.datasource.result.LhDatasourceVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhDsTableVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhMetaColumnVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhMetaObjectVo;
+import vip.xiaonuo.lh.modular.datasource.support.LhDatasourceProtocolProbe;
 import vip.xiaonuo.lh.modular.datasource.support.LhJdbcMetaBrowser;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcUrlBuilder;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourcePostRegisterBridge;
@@ -445,26 +447,30 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(typeCode).orElse(null);
 
             if (typeEnum != null && typeEnum.isJdbc()) {
+                ensureJdbcDriver(typeCode);
                 String url = buildJdbcUrl(typeCode, n, conn);
                 if (StrUtil.isBlank(url)) {
-                    throw new CommonException("???? JDBC URL???? host/port/database");
+                    throw new CommonException("无法拼装 JDBC URL，请检查 host/port/database");
                 }
-                if (StrUtil.isBlank(n.user)) {
-                    throw new CommonException("???????");
+                boolean hiveKerberos = "hive".equalsIgnoreCase(typeCode)
+                        && "Kerberos".equalsIgnoreCase(StrUtil.blankToDefault(str(conn.get("auth")), ""));
+                if (!hiveKerberos && StrUtil.isBlank(n.user)) {
+                    throw new CommonException("请填写用户名");
                 }
-                if (StrUtil.isBlank(n.password)) {
-                    throw new CommonException("??????");
+                if (!hiveKerberos && StrUtil.isBlank(n.password)) {
+                    throw new CommonException("请填写密码");
                 }
-                try (Connection c = DriverManager.getConnection(url, n.user, n.password);
+                try (Connection c = hiveKerberos
+                        ? DriverManager.getConnection(url)
+                        : DriverManager.getConnection(url, n.user, n.password);
                      Statement st = c.createStatement()) {
-                    st.setQueryTimeout(5);
+                    st.setQueryTimeout(8);
                     st.execute("SELECT 1");
                 } catch (java.sql.SQLException jdbcEx) {
-                    // ClickHouse/Trino ????? classpath ???? TCP???????
                     String msg = StrUtil.blankToDefault(jdbcEx.getMessage(), "");
-                    if (msg.contains("No suitable driver") || msg.contains("????????")) {
-                        probeTcp(n.host, n.port, typeCode + " ??");
-                        result.put("warning", "??? " + typeCode + " JDBC ???? TCP ????");
+                    if (msg.contains("No suitable driver")) {
+                        probeTcp(n.host, n.port, typeCode);
+                        result.put("warning", "缺少 " + typeCode + " JDBC 驱动，已降级 TCP 探测");
                     } else {
                         throw jdbcEx;
                     }
@@ -476,24 +482,38 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                     || StrUtil.isNotBlank(str(conn.get("baseURL")))) {
                 String url = firstNonBlank(str(conn.get("baseURL")), str(conn.get("httpUrl")), n.host);
                 if (StrUtil.isBlank(url)) {
-                    throw new CommonException("baseURL ????");
+                    throw new CommonException("baseURL 不能为空");
                 }
                 if (!url.startsWith("http")) {
                     url = "https://" + url;
                 }
                 cn.hutool.http.HttpRequest.get(url).timeout(5000).execute();
             } else if (typeEnum == LhDatasourceTypeEnum.KAFKA) {
-                String bootstrap = firstNonBlank(str(conn.get("bootstrap")), str(conn.get("bootstrapServers")), n.host);
-                String port = firstNonBlank(str(conn.get("port")), n.port);
-                // ??????????????
-                if (StrUtil.isNotBlank(port) && StrUtil.isNotBlank(bootstrap) && !bootstrap.contains(":")) {
-                    bootstrap = bootstrap + ":" + port;
-                }
-                probeTcp(bootstrap, null, "Kafka bootstrap");
+                LhDatasourceProtocolProbe.probeKafka(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.FTP || typeEnum == LhDatasourceTypeEnum.FILE) {
+                LhDatasourceProtocolProbe.probeFtpOrSftp(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.PULSAR) {
+                LhDatasourceProtocolProbe.probePulsar(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.HBASE) {
+                LhDatasourceProtocolProbe.probeHbase(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.REDIS) {
+                LhDatasourceProtocolProbe.probeRedis(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.ELASTICSEARCH) {
+                LhDatasourceProtocolProbe.probeElasticsearch(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.RABBITMQ) {
+                LhDatasourceProtocolProbe.probeRabbitMq(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.S3) {
+                LhDatasourceProtocolProbe.probeS3(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.MONGODB) {
+                LhDatasourceProtocolProbe.probeMongo(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.HDFS) {
+                LhDatasourceProtocolProbe.probeHdfs(conn);
+            } else if (typeEnum == LhDatasourceTypeEnum.ICEBERG) {
+                LhDatasourceProtocolProbe.probeIceberg(conn);
             } else {
                 String host = firstNonBlank(n.host, str(conn.get("endpoint")), str(conn.get("zkQuorum")),
                         str(conn.get("nameNode")), str(conn.get("serviceUrl")));
-                probeTcp(host, n.port, "??");
+                probeTcp(host, n.port, typeCode);
             }
             result.putIfAbsent("ok", true);
             result.put("costMs", System.currentTimeMillis() - start);
@@ -1728,13 +1748,36 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
 
     private String buildJdbcUrl(String type, LhDatasourceConnNormalizer.NormalizedConn n,
                                 Map<String, Object> conn) {
-        return vip.xiaonuo.lh.modular.datasource.support.LhJdbcUrlBuilder.build(
+        return LhJdbcUrlBuilder.build(
                 type,
                 n != null ? n.host : null,
                 n != null ? n.port : null,
                 n != null ? n.database : null,
                 n != null ? n.extra : null,
                 conn);
+    }
+
+    /** 显式加载驱动，避免部分环境下 SPI 未注册 */
+    private void ensureJdbcDriver(String typeCode) {
+        String t = StrUtil.blankToDefault(typeCode, "").toLowerCase(Locale.ROOT);
+        String cls = switch (t) {
+            case "mysql", "mariadb", "doris", "starrocks" -> "com.mysql.cj.jdbc.Driver";
+            case "postgresql", "pg" -> "org.postgresql.Driver";
+            case "oracle" -> "oracle.jdbc.OracleDriver";
+            case "sqlserver" -> "com.microsoft.sqlserver.jdbc.SQLServerDriver";
+            case "clickhouse" -> "com.clickhouse.jdbc.ClickHouseDriver";
+            case "trino" -> "io.trino.jdbc.TrinoDriver";
+            case "hive" -> "org.apache.hive.jdbc.HiveDriver";
+            default -> null;
+        };
+        if (cls == null) {
+            return;
+        }
+        try {
+            Class.forName(cls);
+        } catch (ClassNotFoundException e) {
+            log.warn("JDBC driver missing type={} class={}: {}", t, cls, e.getMessage());
+        }
     }
 
     private void seedTablesFromSummary(LhDatasource entity) {

@@ -74,6 +74,15 @@ public class LhRedisInventoryDiscoverer implements LhInventoryDiscoverer {
         if (StrUtil.isBlank(host)) {
             throw new CommonException("Redis 清单同步需要 host（Vault / 端点）；请检查连接或维护 Key 前缀清单后重试");
         }
+        String mode = first(secret, "mode", "deployMode");
+        if (StrUtil.isNotBlank(mode)) {
+            String m = mode.toLowerCase(Locale.ROOT);
+            if (m.contains("cluster") || m.contains("哨兵") || m.contains("sentinel") || m.contains("集群")) {
+                throw new CommonException(
+                        "Redis 清单同步当前仅支持单机模式；请将 mode 设为单机，或手工维护 Key 前缀清单（mode={}）",
+                        mode);
+            }
+        }
         if (StrUtil.isBlank(port)) {
             port = "6379";
         }

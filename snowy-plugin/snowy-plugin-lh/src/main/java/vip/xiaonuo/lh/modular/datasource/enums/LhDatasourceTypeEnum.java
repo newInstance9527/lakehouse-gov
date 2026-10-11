@@ -117,6 +117,7 @@ public enum LhDatasourceTypeEnum {
      */
     public boolean isJdbc() {
         return this == MYSQL || this == PG || this == POSTGRESQL || this == ORACLE || this == SQLSERVER
-                || this == CLICKHOUSE || this == DORIS || this == STARROCKS || this == TRINO;
+                || this == CLICKHOUSE || this == DORIS || this == STARROCKS || this == TRINO
+                || this == HIVE;
     }
 }

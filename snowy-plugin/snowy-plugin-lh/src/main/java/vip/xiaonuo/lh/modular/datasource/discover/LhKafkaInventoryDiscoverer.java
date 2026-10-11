@@ -27,6 +27,7 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 /**
@@ -77,6 +78,7 @@ public class LhKafkaInventoryDiscoverer implements LhInventoryDiscoverer {
         props.put("request.timeout.ms", "15000");
         props.put("default.api.timeout.ms", "20000");
         props.put("client.id", "lh-ds-inventory-" + StrUtil.blankToDefault(ds.getId(), "x"));
+        applyKafkaSecurity(props, secret);
 
         try (AdminClient admin = AdminClient.create(props)) {
             Set<String> names = admin.listTopics(new ListTopicsOptions().listInternal(false))
@@ -127,6 +129,37 @@ public class LhKafkaInventoryDiscoverer implements LhInventoryDiscoverer {
             String msg = StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName());
             throw new CommonException("Kafka 清单同步失败（bootstrap={}）: {}", bootstrap, msg);
         }
+    }
+
+    /** 从 Vault conn 应用 security / saslMech / user / password */
+    private static void applyKafkaSecurity(Properties props, Map<String, Object> secret) {
+        String security = first(secret, "security", "securityProtocol", "security.protocol");
+        if (StrUtil.isBlank(security) || "PLAINTEXT".equalsIgnoreCase(security)) {
+            return;
+        }
+        props.put("security.protocol", security.trim());
+        String upper = security.toUpperCase(Locale.ROOT);
+        if (!upper.contains("SASL")) {
+            return;
+        }
+        String mech = StrUtil.blankToDefault(
+                first(secret, "saslMech", "sasl.mechanism", "saslMechanism"), "PLAIN");
+        props.put("sasl.mechanism", mech);
+        String user = first(secret, "user", "username", "saslUsername");
+        String password = first(secret, "password", "saslPassword");
+        if (StrUtil.isBlank(user)) {
+            return;
+        }
+        String module = mech.toUpperCase(Locale.ROOT).startsWith("SCRAM")
+                ? "org.apache.kafka.common.security.scram.ScramLoginModule"
+                : "org.apache.kafka.common.security.plain.PlainLoginModule";
+        String jaas = module + " required username=\"" + escapeJaas(user)
+                + "\" password=\"" + escapeJaas(password) + "\";";
+        props.put("sasl.jaas.config", jaas);
+    }
+
+    private static String escapeJaas(String raw) {
+        return StrUtil.nullToEmpty(raw).replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private static String first(Map<String, Object> m, String... keys) {
