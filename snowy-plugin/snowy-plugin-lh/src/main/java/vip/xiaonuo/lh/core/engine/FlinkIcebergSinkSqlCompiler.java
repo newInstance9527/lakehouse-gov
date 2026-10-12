@@ -2,6 +2,7 @@ package vip.xiaonuo.lh.core.engine;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlNode;
 
 import java.util.ArrayList;
@@ -10,8 +11,12 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Flink SQL：从上游 JDBC 落表（{@code lh_ods_*} / {@code lh_clean_*}）写入 Iceberg。
- * <p>Flink 标识符用反引号，禁止 ANSI 双引号（sql-client 会 {@code Encountered "\""}）。</p>
+ * Flink SQL：写入 Iceberg。
+ * <ul>
+ *   <li>默认：从上游 JDBC 落表（{@code lh_ods_*} / {@code lh_clean_*}）BATCH 入湖</li>
+ *   <li>{@code _lhFromKafka=true}：与 Kafka JSON 源同作业 STREAMING 入湖（source_kafka → sink_iceberg）</li>
+ * </ul>
+ * <p>Flink 标识符用反引号，禁止 ANSI 双引号。</p>
  */
 public final class FlinkIcebergSinkSqlCompiler {
 
@@ -21,6 +26,9 @@ public final class FlinkIcebergSinkSqlCompiler {
     public static String compile(IgEtlNode n, JSONObject conf) {
         if (conf == null) {
             conf = new JSONObject();
+        }
+        if (isKafkaPipeline(conf)) {
+            return compileKafkaToIceberg(n, conf);
         }
         String nodeKey = n == null ? "sink" : StrUtil.blankToDefault(n.getNodeKey(), "sink");
         String catalog = lakeCatalog(conf);
@@ -63,6 +71,161 @@ public final class FlinkIcebergSinkSqlCompiler {
         sb.append(compileIcebergCreateTable(conf, sinkAlias, catalog, schema, table, cols));
         sb.append("INSERT INTO `").append(sinkAlias).append("` SELECT * FROM `").append(srcAlias).append("`;\n");
         return sb.toString();
+    }
+
+    /**
+     * Kafka JSON → Iceberg（单 Flink 流作业；勿再套 JDBC 落表）。
+     */
+    public static String compileKafkaToIceberg(IgEtlNode n, JSONObject conf) {
+        if (conf == null) {
+            conf = new JSONObject();
+        }
+        String nodeKey = n == null ? "sink" : StrUtil.blankToDefault(n.getNodeKey(), "sink");
+        String catalog = lakeCatalog(conf);
+        String schema = firstNonBlank(conf.getStr("schema"), conf.getStr("database"), conf.getStr("layer"), "ods");
+        String table = LhStagingTables.bareTable(firstNonBlank(
+                conf.getStr("table"), conf.getStr("target"), conf.getStr("objectName"), "pc_app_event"));
+        String topic = FlinkKafkaSourceSqlCompiler.topicOf(conf);
+        if (StrUtil.isBlank(topic)) {
+            topic = firstNonBlank(conf.getStr("_lhKafkaTopic"), "pc_app_events");
+        }
+        if (StrUtil.isBlank(table)) {
+            return "SELECT 1 AS _lh_sink_probe";
+        }
+        List<FlinkSourceSqlCompiler.Column> cols = FlinkKafkaSourceSqlCompiler.resolveColumns(conf);
+        boolean pulsar = isPulsarPipeline(conf);
+        if (pulsar) {
+            topic = firstNonBlank(conf.getStr("_lhPulsarTopic"), FlinkPulsarSourceSqlCompiler.topicOf(conf), topic);
+        }
+        String kAlias = pulsar
+                ? FlinkPulsarSourceSqlCompiler.pulsarAlias(topic)
+                : FlinkKafkaSourceSqlCompiler.kafkaAlias(topic);
+        String sinkAlias = "_lh_sink_" + safeIdent(table);
+
+        String insertSelect = buildKafkaInsertSelect(conf, kAlias);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("SET 'execution.runtime-mode' = 'STREAMING';\n");
+        sb.append("-- sink ").append(nodeKey)
+                .append(" iceberg ").append(catalog).append('.').append(schema).append('.').append(table)
+                .append(pulsar ? " ← pulsar " : " ← kafka ").append(topic).append('\n');
+        if (conf.get("_lhStreamClean") != null || conf.get("_lhStreamMapping") != null) {
+            sb.append("-- stream process: clean/mapping folded into same FLINK_STREAM job\n");
+        }
+        sb.append(pulsar
+                ? "-- credentials: LH_PULSAR_SERVICE_URL（Vault）；Iceberg 走 HMS+warehouse\n"
+                : "-- credentials: LH_KAFKA_BOOTSTRAP / SASL（Vault）；Iceberg 走 HMS+warehouse\n");
+        if (pulsar) {
+            sb.append(FlinkPulsarSourceSqlCompiler.compilePulsarCreateTable(conf, kAlias, topic, cols));
+        } else {
+            sb.append(FlinkKafkaSourceSqlCompiler.compileKafkaCreateTable(conf, kAlias, topic, cols));
+        }
+        sb.append(compileIcebergCreateTable(conf, sinkAlias, catalog, schema, table, cols));
+        sb.append("INSERT INTO `").append(sinkAlias).append("`\n")
+                .append(insertSelect.trim());
+        if (!insertSelect.trim().endsWith(";")) {
+            sb.append(';');
+        }
+        sb.append('\n');
+        return sb.toString();
+    }
+
+    /**
+     * Kafka 源 →（可选 clean / mapping）→ SELECT；无加工时 {@code SELECT * FROM kafka}.
+     * <p>{@code _lhStreamProcess} 为从汇点向源走过的节点序列（近汇在前）；应用时倒序，贴近数据流。</p>
+     */
+    public static String buildKafkaInsertSelect(JSONObject conf, String kAlias) {
+        String alias = StrUtil.blankToDefault(kAlias, "_lh_kfk_events");
+        String from = "`" + alias.replace("`", "") + "`";
+        cn.hutool.json.JSONArray chain = conf == null ? null : conf.getJSONArray("_lhStreamProcess");
+        if (chain == null || chain.isEmpty()) {
+            // 兼容仅塞了 clean/mapping 单对象的旧调用
+            Object cleanObj = conf == null ? null : conf.get("_lhStreamClean");
+            Object mapObj = conf == null ? null : conf.get("_lhStreamMapping");
+            if (cleanObj == null && mapObj == null) {
+                return "SELECT * FROM " + from;
+            }
+            chain = new cn.hutool.json.JSONArray();
+            if (mapObj != null) {
+                JSONObject o = new JSONObject();
+                o.set("type", "mapping");
+                o.set("conf", mapObj);
+                chain.add(o);
+            }
+            if (cleanObj != null) {
+                JSONObject o = new JSONObject();
+                o.set("type", "clean");
+                o.set("conf", cleanObj);
+                chain.add(o);
+            }
+        }
+        String select = null;
+        // 近源先应用：chain 近汇在前 → 倒序
+        for (int i = chain.size() - 1; i >= 0; i--) {
+            JSONObject step = chain.getJSONObject(i);
+            if (step == null) {
+                continue;
+            }
+            String stepType = StrUtil.blankToDefault(step.getStr("type"), "");
+            JSONObject stepConf = step.getJSONObject("conf");
+            if (stepConf == null && step.get("conf") != null) {
+                stepConf = JSONUtil.parseObj(String.valueOf(step.get("conf")));
+            }
+            if (stepConf == null) {
+                continue;
+            }
+            String fromExpr = select == null ? from : "(" + stripTrailingSemi(select) + ") _lh_p" + i;
+            if ("clean".equals(stepType)) {
+                select = CleanSqlCompiler.compileStreaming(stepConf, fromExpr);
+            } else if ("mapping".equals(stepType)) {
+                select = MappingSqlCompiler.compile(stepConf, fromExpr);
+            } else if ("transform".equals(stepType)) {
+                // 流式折汇：自定义批 SQL 不进 Flink；透传上游，避免独立 Spark 任务读 _lh_kfk_*
+                select = select == null ? "SELECT * FROM " + from : stripTrailingSemi(select);
+            }
+        }
+        if (StrUtil.isBlank(select)) {
+            return "SELECT * FROM " + from;
+        }
+        return select;
+    }
+
+    private static String stripTrailingSemi(String sql) {
+        String s = StrUtil.blankToDefault(sql, "").trim();
+        return s.endsWith(";") ? s.substring(0, s.length() - 1).trim() : s;
+    }
+
+    /** Kafka 或 Pulsar 流式折汇（历史名保留）。 */
+    public static boolean isKafkaPipeline(JSONObject conf) {
+        if (conf == null) {
+            return false;
+        }
+        if (Boolean.TRUE.equals(conf.getBool("_lhFromKafka"))
+                || "true".equalsIgnoreCase(StrUtil.blankToDefault(conf.getStr("_lhFromKafka"), ""))
+                || Boolean.TRUE.equals(conf.getBool("_lhFromPulsar"))
+                || "true".equalsIgnoreCase(StrUtil.blankToDefault(conf.getStr("_lhFromPulsar"), ""))) {
+            return true;
+        }
+        String up = StrUtil.blankToDefault(conf.getStr("_lhUpstreamTable"), "");
+        return up.startsWith("_lh_kfk_") || up.startsWith("_lh_psr_");
+    }
+
+    public static boolean isPulsarPipeline(JSONObject conf) {
+        if (conf == null) {
+            return false;
+        }
+        if (Boolean.TRUE.equals(conf.getBool("_lhFromPulsar"))
+                || "true".equalsIgnoreCase(StrUtil.blankToDefault(conf.getStr("_lhFromPulsar"), ""))
+                || "pulsar".equalsIgnoreCase(conf.getStr("_lhMqKind"))) {
+            return true;
+        }
+        String up = StrUtil.blankToDefault(conf.getStr("_lhUpstreamTable"), "");
+        return up.startsWith("_lh_psr_");
+    }
+
+    /** 流式 MQ 源节点类型（SHELL 占位 + 折入下游汇）。 */
+    public static boolean isStreamMqSourceType(String nodeType) {
+        return "source_kafka".equals(nodeType) || "source_pulsar".equals(nodeType);
     }
 
     static String compileIcebergCreateTable(

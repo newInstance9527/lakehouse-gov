@@ -68,4 +68,19 @@ class FlinkIcebergSinkSqlCompilerTest {
         assertFalse(sql.contains("prod_catalog"), sql);
         assertFalse(sql.contains("\""), sql);
     }
+
+    @Test
+    void isKafkaPipeline_detects_alias_and_flag() {
+        JSONObject flag = new JSONObject();
+        flag.set("_lhFromKafka", true);
+        assertTrue(FlinkIcebergSinkSqlCompiler.isKafkaPipeline(flag));
+
+        JSONObject alias = new JSONObject();
+        alias.set("_lhUpstreamTable", "_lh_kfk_pc_app_events");
+        assertTrue(FlinkIcebergSinkSqlCompiler.isKafkaPipeline(alias));
+
+        JSONObject jdbc = new JSONObject();
+        jdbc.set("_lhUpstreamTable", "lakehouse_gov.lh_ods_demo");
+        assertFalse(FlinkIcebergSinkSqlCompiler.isKafkaPipeline(jdbc));
+    }
 }

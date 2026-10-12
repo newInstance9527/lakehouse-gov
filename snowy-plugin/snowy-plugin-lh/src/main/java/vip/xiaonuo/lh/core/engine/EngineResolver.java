@@ -59,9 +59,18 @@ public class EngineResolver {
         } else if ("heterogeneous_sync".equalsIgnoreCase(cfg.getStr("pattern"))) {
             engine = "datax";
             rule = "hetero_to_datax";
+        } else if ("source_kafka".equals(nodeType) || "source_pulsar".equals(nodeType)) {
+            engine = "flink";
+            rule = "source_kafka".equals(nodeType) ? "source_kafka_to_flink" : "source_pulsar_to_flink";
+        } else if ("source_rabbitmq".equals(nodeType)) {
+            engine = "ds_sql";
+            rule = "source_rabbitmq_to_shell";
         } else if ("sink_kafka".equals(nodeType)) {
             engine = "flink";
             rule = "kafka_to_flink";
+        } else if ("sink_ck".equals(nodeType)) {
+            engine = "flink";
+            rule = "ck_to_flink";
         } else if ("sink_bi".equals(nodeType)) {
             engine = "ds_sql";
             rule = "bi_to_ds";
@@ -98,8 +107,9 @@ public class EngineResolver {
                         Map.of("when", "mode=cdc", "engine", "flink"),
                         Map.of("when", "hint=heavy_batch", "engine", "spark"),
                         Map.of("when", "pattern=heterogeneous_sync", "engine", "datax"),
-                        Map.of("when", "sink_ftp|sink_rdb", "engine", "datax"),
-                        Map.of("when", "sink_kafka", "engine", "flink"),
+                        Map.of("when", "sink_ftp|sink_rdb|sink_object|sink_search|source_api|source_file|source_mongo|source_hbase", "engine", "datax"),
+                        Map.of("when", "source_kafka|source_pulsar|sink_kafka|sink_ck", "engine", "flink"),
+                        Map.of("when", "source_rabbitmq", "engine", "ds_sql/SHELL"),
                         Map.of("when", "simple transform sql / quality / control", "engine", "ds_sql"),
                         Map.of("when", "clean / mapping (fieldRules)", "engine", "spark")
                 )
@@ -108,8 +118,11 @@ public class EngineResolver {
 
     private boolean preferDataxSink(String nodeType) {
         return "sink_ftp".equals(nodeType) || "sink_rdb".equals(nodeType)
-                || "sink_object".equals(nodeType) || "source_api".equals(nodeType)
-                || "source_file".equals(nodeType);
+                || "sink_object".equals(nodeType) || "sink_search".equals(nodeType)
+                || "source_api".equals(nodeType)
+                || "source_file".equals(nodeType)
+                || "source_mongo".equals(nodeType)
+                || "source_hbase".equals(nodeType);
     }
 
     /** CDC：mode/source_mode=cdc，或 conf.cdcEngine 含 flink（前端常 mode=batch 却勾选 Flink CDC） */

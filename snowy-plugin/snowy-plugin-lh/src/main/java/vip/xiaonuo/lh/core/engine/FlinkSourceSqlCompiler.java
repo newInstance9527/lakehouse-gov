@@ -426,11 +426,20 @@ public final class FlinkSourceSqlCompiler {
     }
 
     private enum Dialect {
-        MYSQL, POSTGRES, ORACLE, SQLSERVER, CLICKHOUSE, GENERIC;
+        MYSQL, POSTGRES, ORACLE, SQLSERVER, CLICKHOUSE, DORIS, STARROCKS, HIVE, GENERIC;
 
         static Dialect of(String dbType) {
             String t = StrUtil.blankToDefault(dbType, "").toLowerCase(Locale.ROOT);
-            if (t.contains("mysql") || t.contains("mariadb") || t.contains("tidb") || t.contains("doris")) {
+            if (t.contains("doris")) {
+                return DORIS;
+            }
+            if (t.contains("starrocks") || t.contains("star_rocks")) {
+                return STARROCKS;
+            }
+            if (t.contains("hive")) {
+                return HIVE;
+            }
+            if (t.contains("mysql") || t.contains("mariadb") || t.contains("tidb")) {
                 return MYSQL;
             }
             if (t.contains("postgres") || t.contains("pg") || t.contains("greenplum")) {
@@ -439,10 +448,10 @@ public final class FlinkSourceSqlCompiler {
             if (t.contains("oracle")) {
                 return ORACLE;
             }
-            if (t.contains("sqlserver") || t.contains("mssql")) {
+            if (t.contains("sqlserver") || t.contains("mssql") || t.contains("azuresql")) {
                 return SQLSERVER;
             }
-            if (t.contains("clickhouse") || t.contains("ck")) {
+            if (t.contains("clickhouse") || "ck".equals(t)) {
                 return CLICKHOUSE;
             }
             return GENERIC;
@@ -452,6 +461,7 @@ public final class FlinkSourceSqlCompiler {
             return name();
         }
 
+        /** CDC 仅经典 RDB；CK/Doris/SR/Hive 强制 JDBC 批 */
         boolean supportsCdc() {
             return this == MYSQL || this == POSTGRES || this == ORACLE || this == SQLSERVER;
         }
@@ -468,7 +478,10 @@ public final class FlinkSourceSqlCompiler {
 
         String defaultPort() {
             return switch (this) {
-                case MYSQL, CLICKHOUSE -> "3306";
+                case MYSQL -> "3306";
+                case CLICKHOUSE -> "8123";
+                case DORIS, STARROCKS -> "9030";
+                case HIVE -> "10000";
                 case POSTGRES -> "5432";
                 case ORACLE -> "1521";
                 case SQLSERVER -> "1433";
@@ -478,13 +491,15 @@ public final class FlinkSourceSqlCompiler {
 
         String jdbcUrl(String host, String port, String database, String tz) {
             return switch (this) {
-                case MYSQL -> "jdbc:mysql://" + host + ":" + port + "/" + database
+                case MYSQL, DORIS, STARROCKS -> "jdbc:mysql://" + host + ":" + port + "/" + database
                         + "?useSSL=false&serverTimezone=" + tz;
                 case POSTGRES -> "jdbc:postgresql://" + host + ":" + port + "/" + database;
                 case ORACLE -> "jdbc:oracle:thin:@//" + host + ":" + port + "/" + database;
                 case SQLSERVER -> "jdbc:sqlserver://" + host + ":" + port + ";databaseName=" + database;
                 case CLICKHOUSE -> "jdbc:clickhouse://" + host + ":" + port + "/" + database;
-                default -> "jdbc:mysql://" + host + ":" + port + "/" + database;
+                case HIVE -> "jdbc:hive2://" + host + ":" + port + "/" + database;
+                default -> "jdbc:mysql://" + host + ":" + port + "/" + database
+                        + "?useSSL=false&serverTimezone=" + tz;
             };
         }
     }

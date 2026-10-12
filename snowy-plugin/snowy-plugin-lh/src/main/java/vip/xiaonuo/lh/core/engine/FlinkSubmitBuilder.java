@@ -32,9 +32,12 @@ public final class FlinkSubmitBuilder {
         sb.append("cat > \"$SQL_FILE\" <<'LH_FLINK_SQL_EOF'\n");
         sb.append(StrUtil.blankToDefault(sql, "SELECT 1")).append('\n');
         sb.append("LH_FLINK_SQL_EOF\n");
-        // 展开 ${LH_JDBC_*}（URL/密码含 & 时禁止裸 sed）
+        // 展开 JDBC / Kafka SASL / CK / Pulsar（URL/密码含 & 时禁止裸 sed）
         LhEnvPlaceholderExpand.appendExpandFile(sb, "SQL_FILE",
-                "LH_JDBC_USER", "LH_JDBC_PASSWORD", "LH_JDBC_URL", "LH_HOST", "LH_DATABASE");
+                "LH_JDBC_USER", "LH_JDBC_PASSWORD", "LH_JDBC_URL", "LH_HOST", "LH_DATABASE",
+                "LH_KAFKA_BOOTSTRAP", "LH_KAFKA_USER", "LH_KAFKA_PASSWORD",
+                "LH_CK_JDBC_URL", "LH_CK_USER", "LH_CK_PASSWORD",
+                "LH_PULSAR_SERVICE_URL", "LH_PULSAR_USER", "LH_PULSAR_PASSWORD");
         sb.append("echo \"[lh-flink] sql file=$SQL_FILE\"\n");
         sb.append("head -n 5 \"$SQL_FILE\" || true\n");
 

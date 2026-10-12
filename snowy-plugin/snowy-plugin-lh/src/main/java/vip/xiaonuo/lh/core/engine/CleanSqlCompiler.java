@@ -3,6 +3,7 @@ package vip.xiaonuo.lh.core.engine;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +15,32 @@ import java.util.List;
 public final class CleanSqlCompiler {
 
     private CleanSqlCompiler() {
+    }
+
+    /**
+     * Kafka→Iceberg 同作业内清洗：禁止无界 ROW_NUMBER 去重（流式无 watermark 易状态膨胀）。
+     */
+    public static String compileStreaming(JSONObject conf, String upstreamAlias) {
+        JSONObject c = conf == null ? new JSONObject() : JSONUtil.parseObj(conf.toString());
+        c.set("dedup", false);
+        c.remove("dedupKeys");
+        if (c.getJSONObject("rules") != null) {
+            JSONObject rules = c.getJSONObject("rules");
+            rules.set("dedup", false);
+        }
+        String from = quoteFromAlias(upstreamAlias);
+        return compile(c, from);
+    }
+
+    private static String quoteFromAlias(String alias) {
+        String a = StrUtil.blankToDefault(alias, "").trim();
+        if (StrUtil.isBlank(a)) {
+            return a;
+        }
+        if (a.startsWith("`") || a.startsWith("(") || a.contains(" ")) {
+            return a;
+        }
+        return "`" + a.replace("`", "") + "`";
     }
 
     public static String compile(JSONObject conf, String upstreamTable) {

@@ -86,49 +86,76 @@ public final class DsWorkflowBuilder {
                     StrUtil.blankToDefault(n.getConfJson(), "{}"));
             String database = firstNonBlank(conf.getStr("database"), conf.getStr("schema"), conf.getStr("lhDatabase"));
             String bare = LhStagingTables.bareTable(firstNonBlank(
-                    conf.getStr("table"), conf.getStr("src"), conf.getStr("target"), conf.getStr("objectName")));
+                    conf.getStr("table"), conf.getStr("src"), conf.getStr("target"), conf.getStr("objectName"),
+                    conf.getStr("topic")));
             String type = StrUtil.blankToDefault(n.getNodeType(), "");
-            if (IgEtlNodeTypes.SOURCE.contains(type) && !succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
+            if (FlinkIcebergSinkSqlCompiler.isStreamMqSourceType(type)) {
+                String topic = firstNonBlank(conf.getStr("topic"), conf.getStr("table"), bare);
+                outputTableByNode.put(n.getNodeKey(), streamMqAlias(type, topic));
+            } else if (IgEtlNodeTypes.SOURCE.contains(type) && !succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
                 outputTableByNode.put(n.getNodeKey(),
                         LhStagingTables.qualify(database, LhStagingTables.odsTable(bare)));
-            } else if ("clean".equals(type)) {
-                String cleanOut = null;
+            } else if ("clean".equals(type) || "mapping".equals(type) || "transform".equals(type)) {
+                String kafkaUp = null;
                 for (IgEtlEdge e : edges == null ? List.<IgEtlEdge>of() : edges) {
                     if (!n.getNodeKey().equals(e.getToNodeKey())) {
                         continue;
                     }
                     String upOut = outputTableByNode.get(e.getFromNodeKey());
-                    if (StrUtil.isNotBlank(upOut)) {
-                        cleanOut = LhStagingTables.qualify(database,
-                                LhStagingTables.cleanTableFromUpstream(upOut));
+                    if (StrUtil.isNotBlank(upOut) && upOut.startsWith("_lh_kfk_")) {
+                        kafkaUp = upOut;
                         break;
                     }
                     IgEtlNode up = byKey.get(e.getFromNodeKey());
-                    if (up != null) {
+                    if (up != null && FlinkIcebergSinkSqlCompiler.isStreamMqSourceType(up.getNodeType())) {
                         cn.hutool.json.JSONObject uc = cn.hutool.json.JSONUtil.parseObj(
                                 StrUtil.blankToDefault(up.getConfJson(), "{}"));
-                        String upBare = LhStagingTables.bareTable(firstNonBlank(
-                                uc.getStr("table"), uc.getStr("src"), uc.getStr("objectName")));
-                        if (StrUtil.isNotBlank(upBare)) {
-                            cleanOut = LhStagingTables.qualify(database,
-                                    LhStagingTables.cleanTable(upBare));
-                            break;
-                        }
+                        kafkaUp = streamMqAlias(up.getNodeType(),
+                                firstNonBlank(uc.getStr("topic"), uc.getStr("table")));
+                        break;
                     }
                 }
-                if (StrUtil.isBlank(cleanOut) && StrUtil.isNotBlank(bare)) {
-                    cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable(bare));
+                if (StrUtil.isNotBlank(kafkaUp)) {
+                    // 流式：clean/mapping 不落 lh_clean_*，逻辑名沿用 Kafka alias，加工折叠进 sink
+                    outputTableByNode.put(n.getNodeKey(), kafkaUp);
+                } else if ("clean".equals(type)) {
+                    String cleanOut = null;
+                    for (IgEtlEdge e : edges == null ? List.<IgEtlEdge>of() : edges) {
+                        if (!n.getNodeKey().equals(e.getToNodeKey())) {
+                            continue;
+                        }
+                        String upOut = outputTableByNode.get(e.getFromNodeKey());
+                        if (StrUtil.isNotBlank(upOut)) {
+                            cleanOut = LhStagingTables.qualify(database,
+                                    LhStagingTables.cleanTableFromUpstream(upOut));
+                            break;
+                        }
+                        IgEtlNode up = byKey.get(e.getFromNodeKey());
+                        if (up != null) {
+                            cn.hutool.json.JSONObject uc = cn.hutool.json.JSONUtil.parseObj(
+                                    StrUtil.blankToDefault(up.getConfJson(), "{}"));
+                            String upBare = LhStagingTables.bareTable(firstNonBlank(
+                                    uc.getStr("table"), uc.getStr("src"), uc.getStr("objectName")));
+                            if (StrUtil.isNotBlank(upBare)) {
+                                cleanOut = LhStagingTables.qualify(database,
+                                        LhStagingTables.cleanTable(upBare));
+                                break;
+                            }
+                        }
+                    }
+                    if (StrUtil.isBlank(cleanOut) && StrUtil.isNotBlank(bare)) {
+                        cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable(bare));
+                    }
+                    if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
+                        cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable("staging"));
+                    }
+                    outputTableByNode.put(n.getNodeKey(), cleanOut);
+                } else if (!succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
+                    String outBare = StrUtil.isNotBlank(conf.getStr("target")) || StrUtil.isNotBlank(conf.getStr("destTable"))
+                            ? LhStagingTables.bareTable(firstNonBlank(conf.getStr("target"), conf.getStr("destTable")))
+                            : LhStagingTables.cleanTable(bare);
+                    outputTableByNode.put(n.getNodeKey(), LhStagingTables.qualify(database, outBare));
                 }
-                if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
-                    cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable("staging"));
-                }
-                outputTableByNode.put(n.getNodeKey(), cleanOut);
-            } else if (("transform".equals(type) || "mapping".equals(type))
-                    && !succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
-                String outBare = StrUtil.isNotBlank(conf.getStr("target")) || StrUtil.isNotBlank(conf.getStr("destTable"))
-                        ? LhStagingTables.bareTable(firstNonBlank(conf.getStr("target"), conf.getStr("destTable")))
-                        : LhStagingTables.cleanTable(bare);
-                outputTableByNode.put(n.getNodeKey(), LhStagingTables.qualify(database, outBare));
             } else if (type.startsWith("sink_")) {
                 outputTableByNode.put(n.getNodeKey(), LhStagingTables.qualify(database,
                         LhStagingTables.bareTable(firstNonBlank(conf.getStr("table"), conf.getStr("target"), bare))));
@@ -151,23 +178,11 @@ public final class DsWorkflowBuilder {
             task.put("engine", engine);
             task.put("rule", p.get("rule"));
             task.put("submitShape", submitShape);
-            task.put("taskType", dsTaskType);
             task.put("description", StrUtil.blankToDefault(n.getMeta(), ""));
             task.put("flag", "YES");
             task.put("taskPriority", "MEDIUM");
             task.put("failRetryTimes", 3);
             task.put("failRetryInterval", 3);
-            // Flink/Spark/DataX??? 30 ????????????? DsClient ?? timeoutFlag=OPEN ??
-            if ("FLINK".equals(dsTaskType) || "FLINK_STREAM".equals(dsTaskType)
-                    || "SPARK".equals(dsTaskType) || "DATAX".equals(dsTaskType)) {
-                task.put("timeoutFlag", "OPEN");
-                task.put("timeoutNotifyStrategy", "FAILED");
-                task.put("timeout", 30);
-            } else {
-                task.put("timeoutFlag", "CLOSE");
-                task.put("timeoutNotifyStrategy", "");
-                task.put("timeout", 0);
-            }
             task.put("delayTime", 0);
 
             List<String> preKeys = preds.getOrDefault(n.getNodeKey(), List.of());
@@ -179,47 +194,92 @@ public final class DsWorkflowBuilder {
             String type = StrUtil.blankToDefault(n.getNodeType(), "");
             String database = firstNonBlank(conf.getStr("database"), conf.getStr("schema"), conf.getStr("lhDatabase"));
             String bare = LhStagingTables.bareTable(firstNonBlank(
-                    conf.getStr("table"), conf.getStr("src"), conf.getStr("objectName")));
-            if (IgEtlNodeTypes.SOURCE.contains(type) && !succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
+                    conf.getStr("table"), conf.getStr("src"), conf.getStr("objectName"), conf.getStr("topic")));
+            // Kafka 流式入湖：不落 JDBC lh_ods_*；下游 sink_iceberg 同作业消费 Topic
+            if (FlinkIcebergSinkSqlCompiler.isStreamMqSourceType(type)) {
+                String topic = firstNonBlank(conf.getStr("topic"), conf.getStr("table"), bare);
+                String kAlias = streamMqAlias(type, topic);
+                if ("source_pulsar".equals(type)) {
+                    conf.set("_lhFromPulsar", true);
+                    conf.set("_lhMqKind", "pulsar");
+                    conf.set("_lhPulsarTopic", topic);
+                    conf.set("_lhPulsarAlias", kAlias);
+                } else {
+                    conf.set("_lhKafkaTopic", topic);
+                    conf.set("_lhKafkaAlias", kAlias);
+                }
+                outputTableByNode.put(n.getNodeKey(), kAlias);
+                n.setConfJson(conf.toString());
+            } else if (IgEtlNodeTypes.SOURCE.contains(type)
+                    && !succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
                 String land = LhStagingTables.qualify(database, LhStagingTables.odsTable(bare));
                 conf.set("_lhLandingTable", land);
                 conf.set("_lhBoundedChain", true);
                 n.setConfJson(conf.toString());
             }
-            if ("clean".equals(type)) {
-                String cleanOut = outputTableByNode.get(n.getNodeKey());
-                if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
-                    for (String pk : preKeys) {
-                        String upOut = outputTableByNode.get(pk);
-                        if (StrUtil.isNotBlank(upOut)) {
-                            cleanOut = LhStagingTables.qualify(database,
-                                    LhStagingTables.cleanTableFromUpstream(upOut));
-                            break;
-                        }
-                        IgEtlNode up = byKey.get(pk);
-                        if (up != null) {
-                            cn.hutool.json.JSONObject uc = cn.hutool.json.JSONUtil.parseObj(
-                                    StrUtil.blankToDefault(up.getConfJson(), "{}"));
-                            String upBare = LhStagingTables.bareTable(firstNonBlank(
-                                    uc.getStr("table"), uc.getStr("src"), uc.getStr("objectName")));
-                            if (StrUtil.isNotBlank(upBare)) {
+            if ("clean".equals(type) || "mapping".equals(type) || "transform".equals(type)) {
+                boolean onKafka = false;
+                String kafkaAlias = null;
+                for (String pk : preKeys) {
+                    String upOut = outputTableByNode.get(pk);
+                    if (StrUtil.isNotBlank(upOut)
+                            && (upOut.startsWith("_lh_kfk_") || upOut.startsWith("_lh_psr_"))) {
+                        onKafka = true;
+                        kafkaAlias = upOut;
+                        break;
+                    }
+                    IgEtlNode up = byKey.get(pk);
+                    if (up != null && FlinkIcebergSinkSqlCompiler.isStreamMqSourceType(up.getNodeType())) {
+                        onKafka = true;
+                        cn.hutool.json.JSONObject uc = cn.hutool.json.JSONUtil.parseObj(
+                                StrUtil.blankToDefault(up.getConfJson(), "{}"));
+                        kafkaAlias = streamMqAlias(up.getNodeType(),
+                                firstNonBlank(uc.getStr("_lhPulsarTopic"), uc.getStr("_lhKafkaTopic"),
+                                        uc.getStr("topic"), uc.getStr("table")));
+                        break;
+                    }
+                }
+                if (onKafka) {
+                    conf.set("_lhOnKafkaPipeline", true);
+                    conf.set("_lhKafkaAlias", kafkaAlias);
+                    outputTableByNode.put(n.getNodeKey(), kafkaAlias);
+                    n.setConfJson(conf.toString());
+                    dsTaskType = "SHELL";
+                } else if ("clean".equals(type)) {
+                    String cleanOut = outputTableByNode.get(n.getNodeKey());
+                    if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
+                        for (String pk : preKeys) {
+                            String upOut = outputTableByNode.get(pk);
+                            if (StrUtil.isNotBlank(upOut)) {
                                 cleanOut = LhStagingTables.qualify(database,
-                                        LhStagingTables.cleanTable(upBare));
+                                        LhStagingTables.cleanTableFromUpstream(upOut));
                                 break;
+                            }
+                            IgEtlNode up = byKey.get(pk);
+                            if (up != null) {
+                                cn.hutool.json.JSONObject uc = cn.hutool.json.JSONUtil.parseObj(
+                                        StrUtil.blankToDefault(up.getConfJson(), "{}"));
+                                String upBare = LhStagingTables.bareTable(firstNonBlank(
+                                        uc.getStr("table"), uc.getStr("src"), uc.getStr("objectName")));
+                                if (StrUtil.isNotBlank(upBare)) {
+                                    cleanOut = LhStagingTables.qualify(database,
+                                            LhStagingTables.cleanTable(upBare));
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
-                    if (StrUtil.isNotBlank(bare)) {
-                        cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable(bare));
-                    } else {
-                        cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable("staging"));
+                    if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
+                        if (StrUtil.isNotBlank(bare)) {
+                            cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable(bare));
+                        } else {
+                            cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable("staging"));
+                        }
                     }
+                    conf.set("_lhCleanTable", cleanOut);
+                    outputTableByNode.put(n.getNodeKey(), cleanOut);
+                    n.setConfJson(conf.toString());
                 }
-                conf.set("_lhCleanTable", cleanOut);
-                outputTableByNode.put(n.getNodeKey(), cleanOut);
-                n.setConfJson(conf.toString());
             }
 
             String upstreamTable = null;
@@ -241,6 +301,16 @@ public final class DsWorkflowBuilder {
                     n.setConfJson(conf.toString());
                 }
             }
+            // sink_* ← source_kafka（可穿越 clean/mapping）：折入汇点，单 FLINK_STREAM
+            if ("sink_iceberg".equals(type) || "sink_ck".equals(type) || "sink_kafka".equals(type)) {
+                mergeKafkaUpstreamIntoSink(conf, preKeys, byKey, preds);
+                n.setConfJson(conf.toString());
+                if (FlinkIcebergSinkSqlCompiler.isKafkaPipeline(conf)) {
+                    dsTaskType = "FLINK_STREAM";
+                    engine = "flink";
+                    task.put("engine", engine);
+                }
+            }
             Map<String, Object> taskParams = DsTaskScriptBuilder.buildTaskParams(n, engine, dsTaskType, upstreamTable);
             if (StrUtil.isNotBlank(upstreamDsId)) {
                 taskParams.put("lhUpstreamDsId", upstreamDsId);
@@ -254,6 +324,26 @@ public final class DsWorkflowBuilder {
             if (StrUtil.isNotBlank(conf.getStr("_lhCleanTable"))) {
                 taskParams.put("lhCleanTable", conf.getStr("_lhCleanTable"));
             }
+            if (FlinkIcebergSinkSqlCompiler.isStreamMqSourceType(type)) {
+                String topic = firstNonBlank(conf.getStr("_lhPulsarTopic"), conf.getStr("_lhKafkaTopic"),
+                        conf.getStr("topic"));
+                taskParams.put("rawScript",
+                        "#!/bin/bash\necho \"[lh] " + type + " bound topic=" + topic
+                                + " (ingest runs on downstream sink_* FLINK_STREAM)\"\nexit 0\n");
+            }
+            if ("source_rabbitmq".equals(type)) {
+                String queue = firstNonBlank(conf.getStr("queue"), conf.getStr("table"), conf.getStr("objectName"), "q");
+                String vhost = firstNonBlank(conf.getStr("vhost"), "/");
+                taskParams.put("rawScript", rabbitmqSourceShell(queue, vhost));
+                dsTaskType = "SHELL";
+            }
+            if (("clean".equals(type) || "mapping".equals(type) || "transform".equals(type))
+                    && Boolean.TRUE.equals(conf.getBool("_lhOnKafkaPipeline"))) {
+                taskParams.put("rawScript",
+                        "#!/bin/bash\necho \"[lh] " + type
+                                + " on kafka pipeline (folded into downstream sink_* FLINK_STREAM)\"\nexit 0\n");
+                dsTaskType = "SHELL";
+            }
             if ("datax".equalsIgnoreCase(engine) || "DS_SHELL_DATAX".equals(submitShape)
                     || "DATAX".equals(dsTaskType)) {
                 if (StrUtil.isNotBlank(upstreamTable)) {
@@ -264,7 +354,22 @@ public final class DsWorkflowBuilder {
                 }
                 taskParams.put("lhDataxJob", DataxJobBuilder.buildJob(n, conf));
                 taskParams.put("rawScript", DataxJobBuilder.buildShell(n, conf));
-                task.put("taskType", "DATAX");
+                dsTaskType = "DATAX";
+            }
+            task.put("taskType", dsTaskType);
+            if ("FLINK".equals(dsTaskType) || "FLINK_STREAM".equals(dsTaskType)
+                    || "SPARK".equals(dsTaskType) || "DATAX".equals(dsTaskType)) {
+                task.put("timeoutFlag", "OPEN");
+                task.put("timeoutNotifyStrategy", "FAILED");
+                // 流作业勿短超时；批/DataX 保持 30 分钟门闩
+                task.put("timeout", "FLINK_STREAM".equals(dsTaskType) ? 0 : 30);
+                if ("FLINK_STREAM".equals(dsTaskType)) {
+                    task.put("timeoutFlag", "CLOSE");
+                }
+            } else {
+                task.put("timeoutFlag", "CLOSE");
+                task.put("timeoutNotifyStrategy", "");
+                task.put("timeout", 0);
             }
             task.put("taskParams", taskParams);
             tasks.add(task);
@@ -296,6 +401,10 @@ public final class DsWorkflowBuilder {
         return wf;
     }
 
+    /**
+     * source_kafka 本身用短 SHELL 占位（流作业永不结束，不能作为下游依赖门闩）；
+     * 真正消费在 sink_iceberg 的 FLINK_STREAM 脚本里。
+     */
     static String mapDsTaskType(String nodeType, String engine, String submitShape) {
         if ("condition".equals(nodeType)) {
             return "SWITCH";
@@ -303,7 +412,10 @@ public final class DsWorkflowBuilder {
         if ("parallel".equals(nodeType) || "union".equals(nodeType)) {
             return "DEPENDENT";
         }
-        if ("quality".equals(nodeType)) {
+        if ("quality".equals(nodeType) || "sink_bi".equals(nodeType) || "source_rabbitmq".equals(nodeType)) {
+            return "SHELL";
+        }
+        if (FlinkIcebergSinkSqlCompiler.isStreamMqSourceType(nodeType)) {
             return "SHELL";
         }
         if ("DS_SQL".equals(submitShape) || "ds_sql".equalsIgnoreCase(engine)) {
@@ -335,6 +447,134 @@ public final class DsWorkflowBuilder {
             return "DS_SQL";
         }
         return "DS_SHELL";
+    }
+
+    /**
+     * 沿入边向上找 source_kafka（可穿越 clean/mapping），并把加工 conf 折入汇点。
+     */
+    static void mergeKafkaUpstreamIntoSink(
+            cn.hutool.json.JSONObject sinkConf, List<String> preKeys, Map<String, IgEtlNode> byKey,
+            Map<String, List<String>> preds) {
+        if (sinkConf == null || preKeys == null || byKey == null) {
+            return;
+        }
+        java.util.ArrayDeque<String> q = new java.util.ArrayDeque<>(preKeys);
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        // 近汇在前：sink←clean←mapping←kafka → [clean, mapping]
+        cn.hutool.json.JSONArray process = new cn.hutool.json.JSONArray();
+        IgEtlNode kafkaNode = null;
+        while (!q.isEmpty()) {
+            String pk = q.poll();
+            if (pk == null || !seen.add(pk)) {
+                continue;
+            }
+            IgEtlNode up = byKey.get(pk);
+            if (up == null) {
+                continue;
+            }
+            String ut = StrUtil.blankToDefault(up.getNodeType(), "");
+            if (FlinkIcebergSinkSqlCompiler.isStreamMqSourceType(ut)) {
+                kafkaNode = up;
+                break;
+            }
+            if ("clean".equals(ut) || "mapping".equals(ut) || "transform".equals(ut)) {
+                cn.hutool.json.JSONObject step = new cn.hutool.json.JSONObject();
+                step.set("type", ut);
+                step.set("conf", cn.hutool.json.JSONUtil.parseObj(
+                        StrUtil.blankToDefault(up.getConfJson(), "{}")));
+                process.add(step);
+            }
+            if (("clean".equals(ut) || "mapping".equals(ut) || "transform".equals(ut))
+                    && preds != null && preds.get(pk) != null) {
+                q.addAll(preds.get(pk));
+            }
+        }
+        if (kafkaNode != null) {
+            cn.hutool.json.JSONObject kc = cn.hutool.json.JSONUtil.parseObj(
+                    StrUtil.blankToDefault(kafkaNode.getConfJson(), "{}"));
+            boolean pulsar = "source_pulsar".equals(kafkaNode.getNodeType());
+            sinkConf.set("_lhFromKafka", !pulsar);
+            sinkConf.set("_lhFromPulsar", pulsar);
+            sinkConf.set("_lhMqKind", pulsar ? "pulsar" : "kafka");
+            // 源 Topic：Kafka→_lhKafkaTopic；Pulsar→_lhPulsarTopic；sink_kafka 的 topic 保留为目标
+            String srcTopic = firstNonBlank(kc.getStr("topic"), kc.getStr("table"),
+                    kc.getStr("_lhPulsarTopic"), kc.getStr("_lhKafkaTopic"), kc.getStr("src"));
+            if (StrUtil.isNotBlank(srcTopic)) {
+                if (pulsar) {
+                    sinkConf.set("_lhPulsarTopic", srcTopic);
+                } else {
+                    sinkConf.set("_lhKafkaTopic", srcTopic);
+                }
+            }
+            if (pulsar) {
+                copyIfAbsent(sinkConf, kc, "serviceUrl", "adminUrl", "host", "port", "subscription");
+            } else {
+                copyIfAbsent(sinkConf, kc, "bootstrap", "bootstrapServers", "host", "port");
+            }
+            // 禁止把 user/password 拷进汇点 conf（会进 rawScript）；SASL 走 LH_KAFKA_*
+            copyIfAbsent(sinkConf, kc, "groupId", "startupMode", "valueFormat",
+                    "security", "saslMech", "schemaTemplate");
+            String sec = firstNonBlank(kc.getStr("security"), sinkConf.getStr("security"));
+            if ((sec != null && sec.toUpperCase(java.util.Locale.ROOT).contains("SASL"))
+                    || StrUtil.isNotBlank(kc.getStr("saslMech"))
+                    || StrUtil.isNotBlank(kc.getStr("user")) || StrUtil.isNotBlank(kc.getStr("username"))) {
+                sinkConf.set("_lhKafkaSasl", true);
+            }
+            if (StrUtil.isBlank(sinkConf.getStr("topic")) && StrUtil.isNotBlank(srcTopic)) {
+                sinkConf.set("topic", srcTopic);
+            }
+            if (StrUtil.isBlank(sinkConf.getStr("dsId")) && StrUtil.isNotBlank(kc.getStr("dsId"))) {
+                sinkConf.set("_lhUpstreamDsId", kc.getStr("dsId"));
+                sinkConf.set("readerDsId", kc.getStr("dsId"));
+            } else if (StrUtil.isNotBlank(kc.getStr("dsId"))) {
+                sinkConf.set("_lhUpstreamDsId",
+                        firstNonBlank(sinkConf.getStr("_lhUpstreamDsId"), kc.getStr("dsId")));
+                sinkConf.set("readerDsId",
+                        firstNonBlank(sinkConf.getStr("readerDsId"), kc.getStr("dsId")));
+            }
+            String alias = firstNonBlank(
+                    kc.getStr("_lhPulsarAlias"), kc.getStr("_lhKafkaAlias"),
+                    streamMqAlias(kafkaNode.getNodeType(),
+                            firstNonBlank(srcTopic, sinkConf.getStr("topic"))));
+            sinkConf.set("_lhUpstreamTable", alias);
+            if (StrUtil.isBlank(sinkConf.getStr("schemaTemplate"))) {
+                sinkConf.set("schemaTemplate",
+                        StrUtil.blankToDefault(kc.getStr("schemaTemplate"), "analytics"));
+            }
+        }
+        if (!process.isEmpty()) {
+            sinkConf.set("_lhStreamProcess", process);
+            // 兼容旧字段：便于日志/调试
+            for (int i = 0; i < process.size(); i++) {
+                cn.hutool.json.JSONObject step = process.getJSONObject(i);
+                if ("clean".equals(step.getStr("type"))) {
+                    sinkConf.set("_lhStreamClean", step.get("conf"));
+                } else if ("mapping".equals(step.getStr("type"))) {
+                    sinkConf.set("_lhStreamMapping", step.get("conf"));
+                } else if ("transform".equals(step.getStr("type"))) {
+                    sinkConf.set("_lhStreamTransform", step.get("conf"));
+                }
+            }
+        }
+    }
+
+    private static void copyIfAbsent(cn.hutool.json.JSONObject to, cn.hutool.json.JSONObject from,
+                                     String... keys) {
+        if (to == null || from == null || keys == null) {
+            return;
+        }
+        for (String k : keys) {
+            if (StrUtil.isBlank(to.getStr(k)) && StrUtil.isNotBlank(from.getStr(k))) {
+                to.set(k, from.getStr(k));
+            }
+        }
+    }
+
+    static String streamMqAlias(String nodeType, String topic) {
+        if ("source_pulsar".equals(nodeType)) {
+            return FlinkPulsarSourceSqlCompiler.pulsarAlias(topic);
+        }
+        return FlinkKafkaSourceSqlCompiler.kafkaAlias(topic);
     }
 
     /** DS 任务名：始终带上 nodeKey，便于实例日志按 key 回查。 */
@@ -457,6 +697,51 @@ public final class DsWorkflowBuilder {
             }
         }
         return null;
+    }
+
+    /**
+     * RabbitMQ 入湖：优先平台消费命令；否则 SHELL 占位（凭证 Vault LH_RABBIT_*）。
+     * <p>queue/vhost 白名单转义，禁止注入；CONSUMER_CMD 必须为绝对路径且无空白元字符。</p>
+     */
+    static String rabbitmqSourceShell(String queue, String vhost) {
+        String q = sanitizeRabbitToken(queue, "q");
+        String vh = sanitizeRabbitVhost(vhost);
+        return "#!/bin/bash\nset -euo pipefail\n"
+                + "QUEUE='" + q + "'\n"
+                + "VHOST='" + vh + "'\n"
+                + "HOST=\"${LH_RABBIT_HOST:-}\"\n"
+                + "PORT=\"${LH_RABBIT_PORT:-5672}\"\n"
+                + "CMD=\"${LH_RABBIT_CONSUMER_CMD:-}\"\n"
+                + "if [ -n \"$CMD\" ]; then\n"
+                + "  if [[ \"$CMD\" != /* ]]; then echo '[lh] LH_RABBIT_CONSUMER_CMD must be absolute path'; exit 2; fi\n"
+                + "  if [[ \"$CMD\" =~ [[:space:]\\$\\`\\;\\|\\&] ]]; then echo '[lh] LH_RABBIT_CONSUMER_CMD has unsafe chars'; exit 2; fi\n"
+                + "  exec \"$CMD\" --host \"$HOST\" --port \"$PORT\""
+                + " --vhost \"$VHOST\" --queue \"$QUEUE\""
+                + " --user \"${LH_RABBIT_USER:-}\" --password \"${LH_RABBIT_PASSWORD:-}\"\n"
+                + "fi\n"
+                + "echo \"[lh] source_rabbitmq queue=$QUEUE vhost=$VHOST host=$HOST"
+                + " (set LH_RABBIT_CONSUMER_CMD for real ingest)\"\n"
+                + "exit 0\n";
+    }
+
+    /** AMQP queue / routing 名：字母数字 ._-: /  */
+    static String sanitizeRabbitToken(String raw, String fallback) {
+        String s = StrUtil.blankToDefault(raw, fallback).trim();
+        if (!s.matches("[A-Za-z0-9._\\-:/]{1,200}")) {
+            return fallback;
+        }
+        return s;
+    }
+
+    static String sanitizeRabbitVhost(String raw) {
+        String s = StrUtil.blankToDefault(raw, "/").trim();
+        if ("/".equals(s)) {
+            return "/";
+        }
+        if (!s.matches("[A-Za-z0-9._\\-/]{1,200}")) {
+            return "/";
+        }
+        return s.replace("'", "");
     }
 
     private static String firstNonBlank(String... vals) {

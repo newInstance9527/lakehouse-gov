@@ -131,6 +131,10 @@ public final class DsTaskScriptBuilder {
             String qualityShell = qualityGateShell(n, conf);
             params.put("rawScript", qualityShell);
             params.put("lhQualityGate", true);
+        } else if ("sink_bi".equals(StrUtil.blankToDefault(n.getNodeType(), ""))) {
+            String biShell = biRefreshShell(n, conf);
+            params.put("rawScript", biShell);
+            params.put("lhBiRefresh", true);
         } else {
             // SHELL 通用：优先 Trino，否则打印 SQL
             params.put("rawScript", shellWrapper(n, engine, sql, false));
@@ -166,6 +170,12 @@ public final class DsTaskScriptBuilder {
         if (type.startsWith("sink_")) {
             if ("sink_iceberg".equals(type) && isFlinkEngine(conf)) {
                 return FlinkIcebergSinkSqlCompiler.compile(n, conf);
+            }
+            if ("sink_kafka".equals(type) && isFlinkEngine(conf)) {
+                return FlinkKafkaSinkSqlCompiler.compile(n, conf);
+            }
+            if ("sink_ck".equals(type) && isFlinkEngine(conf)) {
+                return FlinkClickHouseSinkSqlCompiler.compile(n, conf);
             }
             // 汇：Iceberg/湖表才默认 catalog；RDB sink 用 database.table
             String fq = qualifyForSink(type, conf, table);
@@ -219,6 +229,19 @@ public final class DsTaskScriptBuilder {
      * <p>LIMIT 仅当 conf.previewLimit / conf.limit 显式给出时追加（发布全量不加）。</p>
      */
     static String buildSourceSql(IgEtlNode n, JSONObject conf, String table) {
+        String nodeType = n == null ? "" : StrUtil.blankToDefault(n.getNodeType(), "");
+        if ("source_pulsar".equals(nodeType)
+                || "pulsar".equalsIgnoreCase(detectDbType(conf))) {
+            return FlinkPulsarSourceSqlCompiler.compileCreateOnly(conf);
+        }
+        if ("source_kafka".equals(nodeType)
+                || "kafka".equalsIgnoreCase(detectDbType(conf))) {
+            // 真实入湖 SQL 在下游 sink_*；此处仅生成可读探针 DDL
+            return FlinkKafkaSourceSqlCompiler.compileCreateOnly(conf);
+        }
+        if (StrUtil.isBlank(table) && StrUtil.isBlank(FlinkKafkaSourceSqlCompiler.topicOf(conf))) {
+            return "SELECT 1 AS _lh_source_probe";
+        }
         if (StrUtil.isBlank(table)) {
             return "SELECT 1 AS _lh_source_probe";
         }
@@ -450,6 +473,51 @@ public final class DsTaskScriptBuilder {
         sb.append("  if [ \"$BLOCK_ON_FAIL\" = \"true\" ]; then exit 1; else exit 0; fi\n");
         sb.append("}\n");
         sb.append("echo \"[lh-quality] PASS\"\n");
+        sb.append("exit 0\n");
+        return sb.toString();
+    }
+
+    /**
+     * BI 出湖 SHELL：登记 ticket + 目标；可选 curl Superset dataset refresh（数字 datasetId）。
+     * <p>无 LH_SUPERSET_URL / 非数字 dataset 时仅审计日志后 exit 0（禁止直连业务库）。</p>
+     */
+    static String biRefreshShell(IgEtlNode n, JSONObject conf) {
+        String nodeKey = n == null ? "sink_bi" : StrUtil.blankToDefault(n.getNodeKey(), "sink_bi");
+        String ticket = conf == null ? "" : StrUtil.blankToDefault(conf.getStr("ticketNo"), "");
+        String target = conf == null ? "" : firstNonBlank(
+                conf.getStr("targetSystem"), conf.getStr("target"), "superset");
+        String dataset = conf == null ? "" : firstNonBlank(
+                conf.getStr("dataset"), conf.getStr("datasetId"), conf.getStr("table"), "");
+        String mode = conf == null ? "incremental"
+                : StrUtil.blankToDefault(firstNonBlank(conf.getStr("refreshMode"), conf.getStr("refresh")), "incremental");
+        StringBuilder sb = new StringBuilder();
+        sb.append("#!/bin/bash\n");
+        sb.append("set -euo pipefail\n");
+        sb.append("NODE_KEY='").append(escapeSh(nodeKey)).append("'\n");
+        sb.append("TICKET='").append(escapeSh(ticket)).append("'\n");
+        sb.append("TARGET='").append(escapeSh(target)).append("'\n");
+        sb.append("DATASET='").append(escapeSh(dataset)).append("'\n");
+        sb.append("MODE='").append(escapeSh(mode)).append("'\n");
+        sb.append("echo \"[lh-bi] node=$NODE_KEY ticket=$TICKET target=$TARGET dataset=$DATASET mode=$MODE\"\n");
+        sb.append("if [ -z \"$TICKET\" ]; then echo '[lh-bi] ticketNo empty (should be blocked by validate)'; exit 1; fi\n");
+        sb.append("SS=\"${LH_SUPERSET_URL:-}\"\n");
+        sb.append("TOKEN=\"${LH_SUPERSET_TOKEN:-}\"\n");
+        sb.append("if [ -n \"$SS\" ] && echo \"$DATASET\" | grep -Eq '^[0-9]+$'; then\n");
+        sb.append("  SS=\"${SS%/}\"\n");
+        sb.append("  echo \"[lh-bi] refreshing superset dataset id=$DATASET\"\n");
+        sb.append("  CODE=$(curl -sS -o /tmp/lh-bi-resp.json -w '%{http_code}' -m 60 -X PUT \"$SS/api/v1/dataset/$DATASET/refresh\" \\\n");
+        sb.append("    ${TOKEN:+-H \"Authorization: Bearer $TOKEN\"} \\\n");
+        sb.append("    -H 'Content-Type: application/json' || echo 000)\n");
+        sb.append("  echo \"[lh-bi] refresh http=$CODE body=$(head -c 200 /tmp/lh-bi-resp.json 2>/dev/null || true)\"\n");
+        sb.append("  if [ \"$CODE\" != \"200\" ] && [ \"$CODE\" != \"201\" ]; then\n");
+        sb.append("    CODE=$(curl -sS -o /tmp/lh-bi-resp.json -w '%{http_code}' -m 60 -X POST \"$SS/api/v1/dataset/$DATASET/refresh\" \\\n");
+        sb.append("      ${TOKEN:+-H \"Authorization: Bearer $TOKEN\"} \\\n");
+        sb.append("      -H 'Content-Type: application/json' || echo 000)\n");
+        sb.append("    echo \"[lh-bi] refresh POST http=$CODE\"\n");
+        sb.append("  fi\n");
+        sb.append("else\n");
+        sb.append("  echo \"[lh-bi] soft audit only (set LH_SUPERSET_URL + numeric dataset for live refresh)\"\n");
+        sb.append("fi\n");
         sb.append("exit 0\n");
         return sb.toString();
     }

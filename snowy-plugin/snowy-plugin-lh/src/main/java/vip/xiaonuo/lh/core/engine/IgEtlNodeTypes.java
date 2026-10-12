@@ -5,7 +5,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * ETL 18 类节点（与前端 NODE_TYPES 同名，禁止别名）
+ * ETL 节点类型（与前端 NODE_TYPES 同名，禁止别名）
  *
  * @author lakehouse
  * @date 2026/9/19
@@ -16,14 +16,17 @@ public final class IgEtlNodeTypes {
     }
 
     public static final List<String> ALL = List.of(
-            "source", "source_api", "source_file",
+            "source", "source_api", "source_file", "source_kafka", "source_pulsar",
+            "source_rabbitmq", "source_mongo", "source_hbase",
             "clean", "transform", "mapping",
             "quality", "parallel", "condition", "union",
             "sink_iceberg", "sink_ck", "sink_kafka",
             "sink_object", "sink_ftp", "sink_rdb", "sink_search", "sink_bi"
     );
 
-    public static final Set<String> SOURCE = Set.of("source", "source_api", "source_file");
+    public static final Set<String> SOURCE = Set.of(
+            "source", "source_api", "source_file", "source_kafka", "source_pulsar",
+            "source_rabbitmq", "source_mongo", "source_hbase");
     public static final Set<String> SINK = Set.of(
             "sink_iceberg", "sink_ck", "sink_kafka",
             "sink_object", "sink_ftp", "sink_rdb", "sink_search", "sink_bi"
@@ -42,6 +45,11 @@ public final class IgEtlNodeTypes {
             entry("source", "CDC / 库表", "source", List.of("out")),
             entry("source_api", "API 抽取", "source", List.of("out")),
             entry("source_file", "文件 / FTP", "source", List.of("out")),
+            entry("source_kafka", "Kafka 入湖", "source", List.of("out")),
+            entry("source_pulsar", "Pulsar 入湖", "source", List.of("out")),
+            entry("source_rabbitmq", "RabbitMQ 入湖", "source", List.of("out")),
+            entry("source_mongo", "MongoDB 抽取", "source", List.of("out")),
+            entry("source_hbase", "HBase 抽取", "source", List.of("out")),
             entry("clean", "清洗规则", "process", List.of("in", "out")),
             entry("transform", "转换 / SQL", "process", List.of("in", "out")),
             entry("mapping", "字段映射", "process", List.of("in", "out")),

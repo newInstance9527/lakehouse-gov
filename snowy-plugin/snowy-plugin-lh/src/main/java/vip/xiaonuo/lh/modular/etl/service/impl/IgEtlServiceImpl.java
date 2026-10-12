@@ -19,6 +19,9 @@ import vip.xiaonuo.lh.core.engine.DsClient;
 import vip.xiaonuo.lh.core.engine.DsWorkflowBuilder;
 import vip.xiaonuo.lh.core.engine.EngineResolver;
 import vip.xiaonuo.lh.core.engine.IgEtlNodeTypes;
+import vip.xiaonuo.lh.core.engine.LhEtlDsCapability;
+import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
+import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
 import vip.xiaonuo.lh.modular.etl.entity.CbEtlDeployWatermark;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlEdge;
@@ -130,6 +133,8 @@ public class IgEtlServiceImpl implements IgEtlService {
     private ContractService contractService;
     @Resource
     private ConsumerBindingSyncGate consumerBindingSyncGate;
+    @Resource
+    private LhDatasourceMapper datasourceMapper;
 
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
@@ -1315,6 +1320,8 @@ public class IgEtlServiceImpl implements IgEtlService {
         m.put("groups", IgEtlNodeTypes.GROUPS);
         m.put("meta", IgEtlNodeTypes.META);
         m.put("engines", engineResolver.policyMatrix());
+        m.put("dsCapabilities", LhEtlDsCapability.allAsMaps());
+        m.put("dsCapabilityDoc", "doc/ETL编排-跨模块待办.md §F");
         return m;
     }
 
@@ -1865,6 +1872,53 @@ public class IgEtlServiceImpl implements IgEtlService {
             if (StrUtil.isBlank(conf.getStr("basePath")) && StrUtil.isBlank(conf.getStr("bucket"))) {
                 issues.add(issue("node", n.getNodeKey(), "error", "source_file 须配置 basePath/bucket"));
             }
+        } else if ("source_kafka".equals(type)) {
+            if (StrUtil.isBlank(conf.getStr("dsId")) && StrUtil.isBlank(conf.getStr("bootstrap"))
+                    && StrUtil.isBlank(conf.getStr("host"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_kafka 须配置 dsId 或 bootstrap"));
+            }
+            if (StrUtil.isBlank(conf.getStr("topic")) && StrUtil.isBlank(conf.getStr("table"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_kafka 须配置 topic"));
+            }
+        } else if ("source_pulsar".equals(type)) {
+            if (StrUtil.isBlank(conf.getStr("dsId")) && StrUtil.isBlank(conf.getStr("serviceUrl"))
+                    && StrUtil.isBlank(conf.getStr("bootstrap")) && StrUtil.isBlank(conf.getStr("host"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_pulsar 须配置 dsId 或 serviceUrl"));
+            }
+            if (StrUtil.isBlank(conf.getStr("topic")) && StrUtil.isBlank(conf.getStr("table"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_pulsar 须配置 topic"));
+            }
+        } else if ("source_rabbitmq".equals(type)) {
+            if (StrUtil.isBlank(conf.getStr("dsId")) && StrUtil.isBlank(conf.getStr("host"))
+                    && StrUtil.isBlank(conf.getStr("bootstrap"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_rabbitmq 须配置 dsId 或 host"));
+            }
+            if (StrUtil.isBlank(conf.getStr("queue")) && StrUtil.isBlank(conf.getStr("table"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_rabbitmq 须配置 queue"));
+            }
+        } else if ("source_mongo".equals(type)) {
+            if (StrUtil.isBlank(conf.getStr("dsId")) && StrUtil.isBlank(conf.getStr("host"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_mongo 须配置 dsId 或 host"));
+            }
+            if (StrUtil.isBlank(conf.getStr("collection")) && StrUtil.isBlank(conf.getStr("table"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_mongo 须配置 collection"));
+            }
+        } else if ("source_hbase".equals(type)) {
+            if (StrUtil.isBlank(conf.getStr("dsId")) && StrUtil.isBlank(conf.getStr("host"))
+                    && StrUtil.isBlank(conf.getStr("zkQuorum"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_hbase 须配置 dsId 或 zkQuorum/host"));
+            }
+            if (StrUtil.isBlank(conf.getStr("table"))) {
+                issues.add(issue("node", n.getNodeKey(), "error", "source_hbase 须配置 table"));
+            }
+        } else if ("clean".equals(type)) {
+            if (Boolean.TRUE.equals(conf.getBool("dedup"))
+                    || (conf.getJSONObject("rules") != null
+                    && Boolean.TRUE.equals(conf.getJSONObject("rules").getBool("dedup")))) {
+                // 流式路径会折叠进 FLINK_STREAM 并强制关闭 ROW_NUMBER 去重
+                issues.add(issue("node", n.getNodeKey(), "warn",
+                        "Kafka 流式入湖路径不支持无界 dedup（将忽略）；批路径仍可去重"));
+            }
         } else if ("transform".equals(type)) {
             String sql = conf.getStr("sql");
             if (StrUtil.isBlank(sql) && !"passthrough".equals(conf.getStr("template"))) {
@@ -1948,7 +2002,53 @@ public class IgEtlServiceImpl implements IgEtlService {
                 issues.add(issue("node", n.getNodeKey(), "warn", "parallelism 建议 ≥ 2"));
             }
         }
+        issues.addAll(validateDsCapability(n.getNodeKey(), type, conf));
         return issues;
+    }
+
+    /** §F：绑定 dsId 时按 typeCode 能力矩阵给 warn/error */
+    private List<Map<String, Object>> validateDsCapability(String nodeKey, String nodeType, JSONObject conf) {
+        List<Map<String, Object>> issues = new ArrayList<>();
+        String dsId = firstNonBlank(conf.getStr("dsId"), conf.getStr("datasourceId"), conf.getStr("readerDsId"));
+        if (StrUtil.isBlank(dsId)) {
+            return issues;
+        }
+        if (!IgEtlNodeTypes.SOURCE.contains(nodeType) && !nodeType.startsWith("sink_")) {
+            return issues;
+        }
+        try {
+            LhDatasource ds = datasourceMapper.selectById(dsId.trim());
+            if (ds == null || StrUtil.isBlank(ds.getType())) {
+                return issues;
+            }
+            String advice = LhEtlDsCapability.bindAdvice(ds.getType(), nodeType);
+            if (StrUtil.isBlank(advice)) {
+                return issues;
+            }
+            LhEtlDsCapability.Cap cap = LhEtlDsCapability.of(ds.getType());
+            boolean hard = !LhEtlDsCapability.allowsBind(ds.getType(), nodeType)
+                    || (cap != null && (cap.ingest() == LhEtlDsCapability.Level.excluded
+                    || cap.export() == LhEtlDsCapability.Level.excluded)
+                    && (IgEtlNodeTypes.SOURCE.contains(nodeType)
+                    ? cap.ingest() == LhEtlDsCapability.Level.excluded
+                    : cap.export() == LhEtlDsCapability.Level.excluded));
+            issues.add(issue("node", nodeKey, hard ? "error" : "warn", advice));
+        } catch (Exception e) {
+            // soft-fail：能力声明不阻断未知异常
+        }
+        return issues;
+    }
+
+    private static String firstNonBlank(String... vals) {
+        if (vals == null) {
+            return null;
+        }
+        for (String v : vals) {
+            if (StrUtil.isNotBlank(v)) {
+                return v.trim();
+            }
+        }
+        return null;
     }
 
     /** 出湖 sink：ticketNo 须为已审批的 lake_export 单 */
