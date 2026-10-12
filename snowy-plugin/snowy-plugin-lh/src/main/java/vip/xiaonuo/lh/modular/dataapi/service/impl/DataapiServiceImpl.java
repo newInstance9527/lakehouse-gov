@@ -37,7 +37,9 @@ import vip.xiaonuo.lh.modular.dataapi.param.DataapiTrialParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiKeyIssueService;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
 import vip.xiaonuo.lh.modular.dataapi.support.DataapiCallStatsSupport;
+import vip.xiaonuo.lh.modular.dataapi.support.DataapiEsDslExecutor;
 import vip.xiaonuo.lh.modular.dataapi.support.DataapiOpenApiBuilder;
+import vip.xiaonuo.lh.modular.dataapi.support.DataapiRedisKvExecutor;
 import vip.xiaonuo.lh.modular.dataapi.support.DataapiRuntimeAuth;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
 import vip.xiaonuo.lh.modular.datasource.support.ApiBuildTableAccess;
@@ -96,6 +98,10 @@ public class DataapiServiceImpl implements DataapiService {
     private CpQueryColumnMaskResolver columnMaskResolver;
     @Resource
     private DataapiRuntimeAuth runtimeAuth;
+    @Resource
+    private DataapiEsDslExecutor esDslExecutor;
+    @Resource
+    private DataapiRedisKvExecutor redisKvExecutor;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -186,12 +192,21 @@ public class DataapiServiceImpl implements DataapiService {
             vo.put("publishTicketRemark", pubTicket.get("remark"));
             vo.put("publishTicketId", pubTicket.get("id"));
         }
-        if (withSqlrest && StrUtil.isNotBlank(b.getSqlrestApiId())) {
+        vo.put("engine", StrUtil.blankToDefault(b.getEngine(), "SQL"));
+        if (isPortalNativeEngine(b.getEngine()) && StrUtil.isNotBlank(b.getScriptText())) {
+            vo.put("sql", b.getScriptText());
+            vo.put("script", b.getScriptText());
+            vo.put("scriptText", b.getScriptText());
+            vo.put("contextList", List.of(b.getScriptText()));
+        }
+        if (withSqlrest && StrUtil.isNotBlank(b.getSqlrestApiId()) && !isPortalNativeEngine(b.getEngine())) {
             Map<String, Object> sr = sqlrestClient.detail(b.getSqlrestApiId());
             vo.put("sqlrest", sr);
             if (Boolean.TRUE.equals(sr.get("ok")) && sr.get("data") != null) {
                 cn.hutool.json.JSONObject data = JSONUtil.parseObj(sr.get("data"));
-                vo.put("engine", data.getStr("engine"));
+                if (StrUtil.isBlank(b.getEngine())) {
+                    vo.put("engine", data.getStr("engine"));
+                }
                 cn.hutool.json.JSONArray sqlList = data.getJSONArray("sqlList");
                 if (sqlList != null && !sqlList.isEmpty()) {
                     vo.put("sql", sqlList.getJSONObject(0).getStr("sqlText"));
@@ -300,12 +315,15 @@ public class DataapiServiceImpl implements DataapiService {
             assertEditable(binding);
         }
 
+        String engine = normalizeEngine(param.getEngine(), binding.getEngine());
+        binding.setEngine(engine);
+
         Long sqlrestId = parseLong(binding.getSqlrestApiId());
         String sql = param.getSql();
         if (StrUtil.isBlank(sql) && param.getContextList() != null && !param.getContextList().isEmpty()) {
             sql = param.getContextList().get(0);
         }
-        if (StrUtil.isBlank(sql) && sqlrestId != null) {
+        if (StrUtil.isBlank(sql) && sqlrestId != null && !isPortalNativeEngine(engine)) {
             Map<String, Object> detail = sqlrestClient.detail(String.valueOf(sqlrestId));
             if (Boolean.TRUE.equals(detail.get("ok")) && detail.get("data") != null) {
                 cn.hutool.json.JSONObject data = JSONUtil.parseObj(detail.get("data"));
@@ -316,12 +334,20 @@ public class DataapiServiceImpl implements DataapiService {
             }
         }
         if (StrUtil.isBlank(sql) && (param.getContextList() == null || param.getContextList().isEmpty())) {
-            throw new CommonException("构建需要 SQL 或 Groovy 脚本正文（经 SQLREST Manager API 写入）");
+            if (isPortalNativeEngine(engine) && StrUtil.isNotBlank(binding.getScriptText())) {
+                sql = binding.getScriptText();
+            } else {
+                throw new CommonException(isEsDsl(engine)
+                        ? "构建需要 ES Query DSL JSON 正文"
+                        : isRedisKv(engine)
+                            ? "构建需要 Redis KV JSON 正文（op/key）"
+                            : "构建需要 SQL 或 Groovy 脚本正文（经 SQLREST Manager API 写入）");
+            }
         }
 
-        String engine = StrUtil.blankToDefault(param.getEngine(), "SQL").trim().toUpperCase();
-        if (!"GROOVY".equals(engine)) {
-            engine = "SQL";
+        // ES_DSL / REDIS_KV：正文落门户 binding，不经 SQLREST
+        if (isPortalNativeEngine(engine)) {
+            return buildPortalNative(param, binding, insertBinding, engine, sql);
         }
 
         Long srDsId = resolveSqlrestDatasourceId(param, binding);
@@ -431,9 +457,40 @@ public class DataapiServiceImpl implements DataapiService {
                 }
             }
         }
+        String engine = normalizeEngine(param.getEngine(), bound != null ? bound.getEngine() : null);
         if (StrUtil.isNotBlank(portalDsId) && !secAuthGrantService.canUseDatasource(portalDsId)) {
             throw new CommonException("无权使用该数据源构建 API（须为拥有者或持有 EDIT/MANAGE）");
         }
+
+        List<String> contexts = param.getContextList();
+        if ((contexts == null || contexts.isEmpty()) && StrUtil.isNotBlank(sql)) {
+            contexts = List.of(sql);
+        }
+        if (isPortalNativeEngine(engine)) {
+            if ((contexts == null || contexts.isEmpty()) && bound != null && StrUtil.isNotBlank(bound.getScriptText())) {
+                contexts = List.of(bound.getScriptText());
+            }
+            if (contexts == null || contexts.isEmpty()) {
+                throw new CommonException(isRedisKv(engine)
+                        ? "试跑需要 Redis KV JSON"
+                        : "试跑需要 ES Query DSL JSON");
+            }
+            if (StrUtil.isBlank(portalDsId)) {
+                throw new CommonException(engine + " 试跑需要 portalDsId");
+            }
+            Map<String, Object> trialOut = isRedisKv(engine)
+                    ? redisKvExecutor.execute(portalDsId, contexts.get(0), portalParams)
+                    : esDslExecutor.execute(portalDsId, contexts.get(0), portalParams);
+            trialOut.put("rowFilterApplied", false);
+            trialOut.put("rowFilterDegraded", false);
+            trialOut.put("rowFilterPolicyFailed", false);
+            trialOut.put("rowFilterSource", CpQueryRowFilterInjector.SOURCE_NONE);
+            trialOut.put("maskCols", List.of());
+            trialOut.put("masked", false);
+            trialOut.put("edgeHint", engine + " 经门户直连，不经 SQLREST");
+            return trialOut;
+        }
+
         if (StrUtil.isNotBlank(portalDsId)) {
             Long resolved = sqlrestProjector.resolveSqlrestDatasourceId(portalDsId);
             if (resolved == null) {
@@ -444,15 +501,7 @@ public class DataapiServiceImpl implements DataapiService {
         if (dsId == null) {
             dsId = sqlrestClient.defaultDatasourceId();
         }
-        String engine = StrUtil.blankToDefault(param.getEngine(), "SQL").trim().toUpperCase();
-        if (!"GROOVY".equals(engine)) {
-            engine = "SQL";
-        }
 
-        List<String> contexts = param.getContextList();
-        if ((contexts == null || contexts.isEmpty()) && StrUtil.isNotBlank(sql)) {
-            contexts = List.of(sql);
-        }
         // 已发布绑定且未传 SQL：从 SQLREST 详情拉 sqlList 再走门户注入
         if ((contexts == null || contexts.isEmpty())
                 && bound != null
@@ -560,16 +609,42 @@ public class DataapiServiceImpl implements DataapiService {
         DataapiApiBinding binding = auth.binding;
         String subjectId = auth.subjectId;
 
-        if (StrUtil.isBlank(binding.getSqlrestApiId())) {
-            throw new CommonException("绑定缺少 sqlrestApiId，无法运行时调用");
-        }
-
         List<Map<String, Object>> portalParams = p.getParams();
         if (portalParams == null && StrUtil.isNotBlank(binding.getParamJson())) {
             portalParams = new ArrayList<>();
             for (Object o : JSONUtil.parseArray(binding.getParamJson())) {
                 portalParams.add(JSONUtil.parseObj(o));
             }
+        }
+
+        if (isPortalNativeEngine(binding.getEngine())) {
+            if (StrUtil.isBlank(binding.getScriptText())) {
+                throw new CommonException(binding.getEngine() + " 绑定缺少 script_text");
+            }
+            if (StrUtil.isBlank(binding.getPortalDsId())) {
+                throw new CommonException(binding.getEngine() + " 绑定缺少 portalDsId");
+            }
+            Map<String, Object> out = isRedisKv(binding.getEngine())
+                    ? redisKvExecutor.execute(binding.getPortalDsId(), binding.getScriptText(), portalParams)
+                    : esDslExecutor.execute(binding.getPortalDsId(), binding.getScriptText(), portalParams);
+            out.put("runtimePath", isRedisKv(binding.getEngine()) ? "portal-redis-kv" : "portal-es-dsl");
+            out.put("bindingId", binding.getId());
+            out.put("publicPath", binding.getPublicPath());
+            out.put("method", StrUtil.blankToDefault(binding.getMethod(), "GET"));
+            out.put("subjectId", subjectId);
+            out.put("keyId", auth.meta.getId());
+            out.put("rowFilterApplied", false);
+            out.put("rowFilterDegraded", false);
+            out.put("rowFilterPolicyFailed", false);
+            out.put("rowFilterSource", CpQueryRowFilterInjector.SOURCE_NONE);
+            out.put("maskCols", List.of());
+            out.put("masked", false);
+            out.put("edgeHint", binding.getEngine() + " 仅门户 runtime，不经 SQLREST Gateway");
+            return out;
+        }
+
+        if (StrUtil.isBlank(binding.getSqlrestApiId())) {
+            throw new CommonException("绑定缺少 sqlrestApiId，无法运行时调用");
         }
 
         Long dsId = null;
@@ -771,6 +846,40 @@ public class DataapiServiceImpl implements DataapiService {
     @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> publish(DataapiIdParam param) {
         DataapiApiBinding b = requireBinding(param.getId());
+        if (isPortalNativeEngine(b.getEngine())) {
+            if (StrUtil.isBlank(b.getScriptText()) || StrUtil.isBlank(b.getPortalDsId())) {
+                throw new CommonException("请先构建 " + b.getEngine() + " 接口（需 script_text 与数据源）");
+            }
+            boolean requireTicket = lhProperties.getDataapi() != null && lhProperties.getDataapi().isRequirePublishTicket();
+            String ticketNo = StrUtil.blankToDefault(param.getPublishTicketNo(), b.getPublishTicketNo());
+            if (StrUtil.isBlank(ticketNo) && requireTicket) {
+                ticketNo = applyTicketService.findLatestApprovedApiPublishTicketNo(b.getId());
+            }
+            if (requireTicket) {
+                applyTicketService.assertApprovedApiPublishTicket(ticketNo, b.getId());
+                b.setPublishTicketNo(ticketNo);
+            } else if (StrUtil.isNotBlank(ticketNo)) {
+                applyTicketService.assertApprovedApiPublishTicket(ticketNo, b.getId());
+                b.setPublishTicketNo(ticketNo);
+            }
+            b.setState("published");
+            b.setLastPublishAt(new Date());
+            b.setLastError(null);
+            b.setApisixRouteId(null);
+            b.setRevision(b.getRevision() == null ? 1 : b.getRevision() + 1);
+            bindingMapper.updateById(b);
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("ok", true);
+            result.put("degraded", false);
+            result.put("edgeMode", isRedisKv(b.getEngine()) ? "portal-redis-kv" : "portal-es-dsl");
+            result.put("gatewayUrl", null);
+            result.put("binding", toPortalCard(b, true));
+            result.put("sqlrestPublish", Map.of("ok", true, "skipped", true));
+            result.put("sqlrestDeploy", Map.of("ok", true, "skipped", true));
+            result.put("apisix", Map.of("ok", true, "skipped", true));
+            result.put("edgeHint", b.getEngine() + " 仅经 POST /lh/dataapi/runtime/invoke 调用");
+            return result;
+        }
         if (StrUtil.isBlank(b.getSqlrestApiId())) {
             throw new CommonException("请先构建 SQLREST 接口（build）");
         }
@@ -1450,6 +1559,29 @@ public class DataapiServiceImpl implements DataapiService {
         if (param == null || StrUtil.isBlank(param.getSql())) {
             throw new CommonException("sql 不能为空");
         }
+        String engine = normalizeEngine(param.getEngine(), null);
+        if (isPortalNativeEngine(engine)) {
+            List<String> names = isRedisKv(engine)
+                    ? DataapiRedisKvExecutor.extractParamNames(param.getSql())
+                    : DataapiEsDslExecutor.extractParamNames(param.getSql());
+            List<Map<String, Object>> params = new ArrayList<>();
+            for (String name : names) {
+                Map<String, Object> p = new LinkedHashMap<>();
+                p.put("name", name);
+                p.put("type", "string");
+                p.put("required", false);
+                p.put("isArray", false);
+                p.put("example", "");
+                p.put("desc", "");
+                params.add(p);
+            }
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("ok", true);
+            m.put("params", params);
+            m.put("data", params);
+            m.put("engine", engine);
+            return m;
+        }
         Map<String, Object> sr = sqlrestClient.parseParams(param.getSql());
         Map<String, Object> m = new LinkedHashMap<>(sr);
         if (Boolean.TRUE.equals(sr.get("ok")) && sr.get("data") instanceof List<?> list) {
@@ -1996,6 +2128,9 @@ public class DataapiServiceImpl implements DataapiService {
             b.setSqlrestApiId(param.getSqlrestApiId());
         }
         b.setSourceKind(StrUtil.blankToDefault(param.getSourceKind(), "sql"));
+        if (StrUtil.isNotBlank(param.getEngine())) {
+            b.setEngine(normalizeEngine(param.getEngine(), null));
+        }
         b.setSourceRef(param.getSourceRef());
         String portalDsId = StrUtil.blankToDefault(param.getPortalDsId(), param.getDsId());
         if (StrUtil.isNotBlank(portalDsId)) {
@@ -2053,6 +2188,7 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("apisixRouteId", b.getApisixRouteId());
         m.put("extId", b.getExtId());
         m.put("sourceKind", b.getSourceKind());
+        m.put("engine", StrUtil.blankToDefault(b.getEngine(), "SQL"));
         m.put("sourceRef", b.getSourceRef());
         m.put("portalDsId", b.getPortalDsId());
         m.put("sqlrestDatasourceId", b.getSqlrestDatasourceId());
@@ -2073,6 +2209,9 @@ public class DataapiServiceImpl implements DataapiService {
         m.put("sqlrestCommitId", b.getSqlrestCommitId());
         m.put("tags", parseTags(b.getTagsJson()));
         if (detail) {
+            if (StrUtil.isNotBlank(b.getScriptText())) {
+                m.put("scriptText", b.getScriptText());
+            }
             if (StrUtil.isNotBlank(b.getParamJson())) {
                 m.put("params", JSONUtil.parseArray(b.getParamJson()));
             }
@@ -2084,6 +2223,86 @@ public class DataapiServiceImpl implements DataapiService {
             }
         }
         return m;
+    }
+
+    private static String normalizeEngine(String raw, String fallback) {
+        String e = StrUtil.blankToDefault(raw, fallback);
+        e = StrUtil.blankToDefault(e, "SQL").trim().toUpperCase();
+        if ("ES_DSL".equals(e) || "ESDSL".equals(e) || "QUERY_DSL".equals(e) || "DSL".equals(e)) {
+            return "ES_DSL";
+        }
+        if ("REDIS_KV".equals(e) || "REDISKV".equals(e) || "REDIS".equals(e)) {
+            return "REDIS_KV";
+        }
+        if ("GROOVY".equals(e)) {
+            return "GROOVY";
+        }
+        return "SQL";
+    }
+
+    private static boolean isEsDsl(String engine) {
+        return "ES_DSL".equals(normalizeEngine(engine, null));
+    }
+
+    private static boolean isRedisKv(String engine) {
+        return "REDIS_KV".equals(normalizeEngine(engine, null));
+    }
+
+    private static boolean isPortalNativeEngine(String engine) {
+        String e = normalizeEngine(engine, null);
+        return "ES_DSL".equals(e) || "REDIS_KV".equals(e);
+    }
+
+    private Map<String, Object> buildPortalNative(DataapiBindingParam param, DataapiApiBinding binding,
+                                                   boolean insertBinding, String engine, String sql) {
+        String portalDsCheck = StrUtil.blankToDefault(param.getPortalDsId(),
+                StrUtil.blankToDefault(param.getDsId(), binding.getPortalDsId()));
+        if (StrUtil.isBlank(portalDsCheck)) {
+            throw new CommonException(engine + " 需要选择对应数据源");
+        }
+        if (!secAuthGrantService.canUseDatasource(portalDsCheck)) {
+            throw new CommonException("无权使用该数据源构建 API（须为拥有者或持有 EDIT/MANAGE）");
+        }
+        String body = sql;
+        if (param.getContextList() != null && !param.getContextList().isEmpty()) {
+            body = param.getContextList().get(0);
+        }
+        if (isRedisKv(engine)) {
+            DataapiRedisKvExecutor.validateStructure(body);
+        } else {
+            DataapiEsDslExecutor.validateStructure(body);
+        }
+        binding.setPortalDsId(portalDsCheck);
+        binding.setScriptText(body);
+        binding.setSourceKind(StrUtil.blankToDefault(param.getSourceKind(),
+                isRedisKv(engine) ? "redis_kv" : "es_dsl"));
+        binding.setLastError(null);
+        if (StrUtil.isBlank(binding.getState()) || "retired".equals(binding.getState())) {
+            binding.setState("draft");
+        }
+        ensureProjectionExtId(binding);
+        if (insertBinding || StrUtil.isBlank(binding.getId())) {
+            if (StrUtil.isBlank(binding.getId())) {
+                binding.setId(IdUtil.getSnowflakeNextIdStr());
+            }
+            bindingMapper.insert(binding);
+        } else {
+            binding.setRevision(binding.getRevision() == null ? 1 : binding.getRevision() + 1);
+            int updated = bindingMapper.updateById(binding);
+            if (updated == 0) {
+                bindingMapper.insert(binding);
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("binding", toPortalCard(binding, true));
+        result.put("sqlrest", Map.of("ok", true, "skipped", true, "message", engine + " 不经 SQLREST"));
+        result.put("degraded", false);
+        result.put("ok", true);
+        result.put("sqlrestOk", true);
+        result.put("portalSaved", true);
+        result.put("engine", engine);
+        result.put("edgeHint", engine + " 仅经门户 runtime/invoke 调用，不走 SQLREST Gateway");
+        return result;
     }
 
     /** 规范化标签：去空白、去重、单标签最长 32、最多 20 个 */

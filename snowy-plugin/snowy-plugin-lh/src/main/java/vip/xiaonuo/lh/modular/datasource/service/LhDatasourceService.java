@@ -73,6 +73,9 @@ public interface LhDatasourceService extends IService<LhDatasource> {
     /** SQLREST 可投影/可选的查询类数据源 */
     List<Map<String, Object>> listForSqlrest();
 
+    /** Elasticsearch SQL 能力探测（推荐 SQL vs ES_DSL） */
+    Map<String, Object> probeEsCapabilities(String id);
+
     /** 将指定 / 全部可投影数据源同步到 SQLREST Manager */
     Map<String, Object> projectToSqlrest(List<LhDatasourceIdParam> ids);
 

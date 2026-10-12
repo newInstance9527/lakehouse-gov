@@ -32,11 +32,17 @@ public final class LhRedisConnSupport {
         CLUSTER
     }
 
-    /** 测连 / SCAN 所需最小能力（兼容 Standalone / Sentinel / Cluster）。 */
+    /** 测连 / SCAN / KV 读（兼容 Standalone / Sentinel / Cluster）。 */
     public interface Session {
         String ping();
 
         ScanResult<String> scan(String cursor, ScanParams params);
+
+        String get(String key);
+
+        java.util.List<String> mget(String... keys);
+
+        java.util.Map<String, String> hgetAll(String key);
     }
 
     private LhRedisConnSupport() {
@@ -155,6 +161,21 @@ public final class LhRedisConnSupport {
             public ScanResult<String> scan(String cursor, ScanParams params) {
                 return jedis.scan(cursor, params);
             }
+
+            @Override
+            public String get(String key) {
+                return jedis.get(key);
+            }
+
+            @Override
+            public List<String> mget(String... keys) {
+                return jedis.mget(keys);
+            }
+
+            @Override
+            public Map<String, String> hgetAll(String key) {
+                return jedis.hgetAll(key);
+            }
         };
     }
 
@@ -168,6 +189,21 @@ public final class LhRedisConnSupport {
             @Override
             public ScanResult<String> scan(String cursor, ScanParams params) {
                 return cluster.scan(cursor, params);
+            }
+
+            @Override
+            public String get(String key) {
+                return cluster.get(key);
+            }
+
+            @Override
+            public List<String> mget(String... keys) {
+                return cluster.mget(keys);
+            }
+
+            @Override
+            public Map<String, String> hgetAll(String key) {
+                return cluster.hgetAll(key);
             }
         };
     }

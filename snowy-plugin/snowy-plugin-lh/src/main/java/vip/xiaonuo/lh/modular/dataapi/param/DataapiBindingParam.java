@@ -50,7 +50,7 @@ public class DataapiBindingParam {
     private String description;
     /** 自定义标签（字符串列表）；写入 tags_json；null=不改 */
     private List<String> tags;
-    /** SQL 或 GROOVY；写入 SQLREST assignment.engine */
+    /** SQL / GROOVY / ES_DSL；SQL·GROOVY 写 SQLREST，ES_DSL 写 binding.script_text */
     private String engine = "SQL";
     private Boolean open;
     private Boolean alarm;

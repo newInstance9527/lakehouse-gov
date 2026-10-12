@@ -117,6 +117,23 @@ public final class LhEsConnSupport {
         return resp;
     }
 
+    public static HttpResponse post(String base, String path, String jsonBody,
+                                    Map<String, Object> conn, boolean insecureSsl) {
+        HttpRequest req = HttpRequest.post(base + path)
+                .timeout(20000)
+                .header("Content-Type", "application/json")
+                .body(StrUtil.nullToEmpty(jsonBody));
+        applyAuth(req, conn);
+        if (base.startsWith("https://") && insecureSsl) {
+            trustAll(req);
+        }
+        HttpResponse resp = req.execute();
+        if (!resp.isOk()) {
+            throw new CommonException("HTTP {}：{}", resp.getStatus(), StrUtil.maxLength(resp.body(), 160));
+        }
+        return resp;
+    }
+
     public static void applyAuth(HttpRequest req, Map<String, Object> conn) {
         String apiKey = first(conn, "apiKey", "apiKeyId", "api_key");
         String user = first(conn, "user", "username");

@@ -28,6 +28,10 @@ public class DataapiApiBinding extends CommonEntity {
     private String sqlrestCommitId;
     private Integer sqlrestVersion;
     private String sourceKind;
+    /** SQL / GROOVY / ES_DSL */
+    private String engine;
+    /** 门户原生脚本（ES Query DSL 等）；SQL/Groovy 正文仍在 SQLREST */
+    private String scriptText;
     private String sourceRef;
     /** 门户 ig_datasource.id */
     private String portalDsId;

@@ -157,6 +157,12 @@ public class LhDatasourceController {
         return CommonResult.data(datasourceService.listForSqlrest());
     }
 
+    @Operation(summary = "Elasticsearch SQL 能力探测（推荐 SQL / ES_DSL）")
+    @GetMapping("/lh/datasource/esCapabilities")
+    public CommonResult<Map<String, Object>> esCapabilities(@RequestParam String id) {
+        return CommonResult.data(datasourceService.probeEsCapabilities(id));
+    }
+
     @Operation(summary = "投影到 SQLREST Manager")
     @CommonLog("投影数据源到 SQLREST")
     @PostMapping("/lh/datasource/projectToSqlrest")

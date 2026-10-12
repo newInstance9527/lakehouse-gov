@@ -120,6 +120,16 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     private vip.xiaonuo.lh.modular.datasource.support.LhSqlrestBindingEnricher sqlrestBindingEnricher;
     @Resource
     private vip.xiaonuo.lh.modular.datasource.support.ApiBuildTableAccess apiBuildTableAccess;
+    @Resource
+    private vip.xiaonuo.lh.modular.datasource.support.LhEsCapabilityProbe esCapabilityProbe;
+
+    @Override
+    public Map<String, Object> probeEsCapabilities(String id) {
+        if (!secAuthGrantService.canUseDatasource(id)) {
+            throw new CommonException("无权探测该数据源");
+        }
+        return esCapabilityProbe.probe(id);
+    }
 
     @Override
     public Page<LhDatasourceVo> page(LhDatasourcePageParam param) {
@@ -1615,7 +1625,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         List<Map<String, Object>> out = new ArrayList<>();
         for (LhDatasource ds : all) {
             boolean projectable = LhDatasourceSqlrestProjector.isProjectable(ds.getType());
-            if (!projectable && !"trino".equalsIgnoreCase(ds.getType())) {
+            // trino：查询网关占位；redis：门户 REDIS_KV 原生引擎（不经 SQLREST）
+            boolean portalNative = "redis".equalsIgnoreCase(ds.getType());
+            if (!projectable && !"trino".equalsIgnoreCase(ds.getType()) && !portalNative) {
                 continue;
             }
             LhConsumerBinding bind = bindingMapper.selectOne(new QueryWrapper<LhConsumerBinding>().lambda()
@@ -1631,6 +1643,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                     + (StrUtil.isNotBlank(ds.getEndpointPort()) ? ":" + ds.getEndpointPort() : ""));
             row.put("database", ds.getDatabaseName());
             row.put("projectable", projectable);
+            row.put("portalNative", portalNative);
+            if (portalNative) {
+                row.put("portalEngine", "REDIS_KV");
+            }
             row.put("recommended", "trino".equalsIgnoreCase(ds.getType())
                     || (ds.getPurposes() != null && ds.getPurposes().contains("query_gateway")));
             if (bind != null) {
