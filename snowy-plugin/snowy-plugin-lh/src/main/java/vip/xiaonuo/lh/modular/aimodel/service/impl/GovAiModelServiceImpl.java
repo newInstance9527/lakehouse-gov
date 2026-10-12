@@ -610,22 +610,45 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             if (StrUtil.isBlank(p.getScene())) {
                 throw new CommonException("scene 不能为空");
             }
-            GovAiRoute row;
+            String scene = p.getScene().trim();
+            String wsScope = StrUtil.blankToDefault(p.getWsScope(), "*").trim();
+            GovAiRoute row = null;
             if (StrUtil.isNotBlank(p.getId())) {
                 row = routeMapper.selectById(p.getId());
                 if (row == null || !NOT_DELETE.equals(row.getDeleteFlag())) {
                     throw new CommonException("路由不存在: {}", p.getId());
                 }
-            } else {
+            }
+            // 唯一键 uq_ai_route_scene_ws(scene, ws_scope)：无 id 或改键撞车时按业务键 upsert
+            if (row == null) {
+                row = routeMapper.selectOne(new QueryWrapper<GovAiRoute>().lambda()
+                        .eq(GovAiRoute::getDeleteFlag, NOT_DELETE)
+                        .eq(GovAiRoute::getScene, scene)
+                        .eq(GovAiRoute::getWsScope, wsScope)
+                        .last("LIMIT 1"));
+            }
+            boolean insert = row == null;
+            if (insert) {
                 row = new GovAiRoute();
                 row.setId(IdUtil.getSnowflakeNextIdStr());
                 row.setRevision(1);
                 row.setDeleteFlag(NOT_DELETE);
                 row.setStatus("ok");
                 row.setWs(StrUtil.blankToDefault(p.getWs(), WS_DEFAULT));
+            } else if (StrUtil.isNotBlank(p.getId())
+                    && (!scene.equals(row.getScene()) || !wsScope.equals(StrUtil.blankToDefault(row.getWsScope(), "*")))) {
+                GovAiRoute clash = routeMapper.selectOne(new QueryWrapper<GovAiRoute>().lambda()
+                        .eq(GovAiRoute::getDeleteFlag, NOT_DELETE)
+                        .eq(GovAiRoute::getScene, scene)
+                        .eq(GovAiRoute::getWsScope, wsScope)
+                        .ne(GovAiRoute::getId, row.getId())
+                        .last("LIMIT 1"));
+                if (clash != null) {
+                    throw new CommonException("场景「{}」在空间「{}」已有路由，请编辑已有记录", scene, wsScope);
+                }
             }
-            row.setScene(p.getScene().trim());
-            row.setWsScope(StrUtil.blankToDefault(p.getWsScope(), "*"));
+            row.setScene(scene);
+            row.setWsScope(wsScope);
             row.setPrimaryModelId(p.getPrimaryModelId());
             row.setFallbackModelId(p.getFallbackModelId());
             row.setEnabled(p.getEnabled() == null || Boolean.TRUE.equals(p.getEnabled()));
@@ -641,7 +664,7 @@ public class GovAiModelServiceImpl implements GovAiModelService {
             }
             row.setStatus(Boolean.TRUE.equals(row.getEnabled()) ? "ok" : "off");
             row.setRevision(row.getRevision() == null ? 1 : row.getRevision() + 1);
-            if (routeMapper.selectById(row.getId()) == null) {
+            if (insert) {
                 routeMapper.insert(row);
             } else {
                 routeMapper.updateById(row);
