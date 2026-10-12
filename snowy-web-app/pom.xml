@@ -144,6 +144,13 @@
                 <version>${spring-boot.version}</version>
                 <configuration>
                     <includeSystemScope>true</includeSystemScope>
+                    <!-- Hive/Hadoop 偶发漏排除时，禁止打进 fat jar（Jakarta Tomcat） -->
+                    <excludes>
+                        <exclude>javax.servlet:javax.servlet-api</exclude>
+                        <exclude>javax.servlet.jsp:javax.servlet.jsp-api</exclude>
+                        <exclude>javax.servlet.jsp:jsp-api</exclude>
+                        <exclude>org.glassfish.web:javax.servlet.jsp</exclude>
+                    </excludes>
                 </configuration>
                 <executions>
                     <execution>

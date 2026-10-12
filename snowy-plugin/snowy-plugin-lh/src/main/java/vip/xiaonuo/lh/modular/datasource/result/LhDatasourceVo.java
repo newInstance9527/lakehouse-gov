@@ -38,6 +38,15 @@ public class LhDatasourceVo {
     @Schema(description = "类型编码")
     private String typeCode;
 
+    @Schema(description = "源清单对象 kind：table/topic/queue/…")
+    private String objectKind;
+
+    @Schema(description = "源清单对象英文标签（OM）")
+    private String objectKindLabel;
+
+    @Schema(description = "源清单对象中文专名（门户 UI）")
+    private String objectKindLabelZh;
+
     @Schema(description = "分类编码")
     private String category;
 

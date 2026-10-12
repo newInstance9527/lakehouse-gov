@@ -201,6 +201,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     public LhDatasourceVo add(LhDatasourceAddParam param) {
         viewAssembler.enrichParamFromFe(param);
         String typeCode = formSchemaService.resolveTypeCode(param.getType());
+        LhDatasourceTypeEnum.validate(typeCode);
         param.setType(typeCode);
         Map<String, Object> conn = connNormalizer.mergeConn(param);
         formSchemaService.validateConn(typeCode, conn);
@@ -315,7 +316,9 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         String typeCode = entity.getType();
         if (StrUtil.isNotBlank(param.getType())) {
             typeCode = formSchemaService.resolveTypeCode(param.getType());
+            LhDatasourceTypeEnum.validate(typeCode);
             entity.setType(typeCode);
+            entity.setCategory(LhDatasourceTypeEnum.resolveCategory(typeCode));
         }
         if (touchConn) {
             formSchemaService.validateConn(typeCode, conn);
@@ -1064,6 +1067,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         result.put("path", bundle.path);
         result.put("objectKind", bundle.objectKind);
         result.put("objectKindLabel", LhInventoryObjectKinds.labelOf(bundle.objectKind));
+        result.put("objectKindLabelZh", LhInventoryObjectKinds.labelZh(bundle.objectKind));
         if (StrUtil.isNotBlank(bundle.hint)) {
             result.put("hint", bundle.hint);
         }
@@ -1155,36 +1159,70 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(typeCode).orElse(null);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("type", typeCode);
-        // ???????? Discoverer ???Hive/Kafka/ES/Redis/RMQ/MinIO ????????????
-        if (existing != null) {
-            LhInventoryDiscoverer discoverer = findInventoryDiscoverer(typeCode);
-            if (discoverer != null) {
-                DiscoverBundle bundle = discoverRemoteTables(existing);
-                List<Map<String, Object>> tables = new ArrayList<>();
-                for (RemoteTableMeta m : bundle.metas) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("name", m.name);
-                    row.put("comment", m.comment);
-                    row.put("engine", m.engine);
-                    row.put("encoding", m.encoding);
-                    row.put("rowCount", m.rowCount);
-                    tables.add(row);
+        // 已登记源或注册前探测：有专用 Discoverer 则走同一套（新建写临时 Vault 再删）
+        LhInventoryDiscoverer discoverer = findInventoryDiscoverer(typeCode);
+        if (discoverer != null) {
+            DiscoverBundle bundle;
+            String probePath = null;
+            try {
+                if (existing != null) {
+                    bundle = discoverRemoteTables(existing);
+                } else {
+                    probePath = "datasource/_probe/" + IdUtil.getSnowflakeNextIdStr();
+                    LhDatasource probe = new LhDatasource();
+                    probe.setId("_probe");
+                    probe.setType(typeCode);
+                    probe.setVaultPath(probePath);
+                    probe.setEndpointHost(n.host);
+                    probe.setEndpointPort(n.port);
+                    probe.setDatabaseName(n.database);
+                    String summary = n.schemaSummary;
+                    if (StrUtil.isBlank(summary)) {
+                        summary = StrUtil.blankToDefault(str(conn.get("schema")),
+                                StrUtil.blankToDefault(str(conn.get("topics")), str(conn.get("queues"))));
+                    }
+                    probe.setSchemaSummary(summary);
+                    Map<String, Object> secret = connNormalizer.secretPayload(conn, n);
+                    String jdbcUrl = buildJdbcUrl(typeCode, n, conn);
+                    if (StrUtil.isNotBlank(jdbcUrl)) {
+                        secret.put("jdbcUrl", jdbcUrl);
+                    }
+                    vaultClient.write(probePath, secret);
+                    bundle = fromInventory(discoverer.discover(probe));
                 }
-                result.put("ok", true);
-                result.put("source", bundle.fromRemote ? "remote"
-                        : ("manual".equals(bundle.path) ? "manual" : "fallback"));
-                result.put("path", bundle.path);
-                result.put("objectKind", bundle.objectKind);
-                result.put("objectKindLabel", LhInventoryObjectKinds.labelOf(bundle.objectKind));
-                if (StrUtil.isNotBlank(bundle.hint)) {
-                    result.put("hint", bundle.hint);
+            } finally {
+                if (probePath != null) {
+                    try {
+                        vaultClient.delete(probePath);
+                    } catch (Exception ignored) {
+                    }
                 }
-                result.put("discovered", tables.size());
-                result.put("tables", tables);
-                result.put("schema", tables.stream().map(t -> String.valueOf(t.get("name")))
-                        .collect(Collectors.joining(",")));
-                return result;
             }
+            List<Map<String, Object>> tables = new ArrayList<>();
+            for (RemoteTableMeta m : bundle.metas) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("name", m.name);
+                row.put("comment", m.comment);
+                row.put("engine", m.engine);
+                row.put("encoding", m.encoding);
+                row.put("rowCount", m.rowCount);
+                tables.add(row);
+            }
+            result.put("ok", true);
+            result.put("source", bundle.fromRemote ? "remote"
+                    : ("manual".equals(bundle.path) ? "manual" : "fallback"));
+            result.put("path", bundle.path);
+            result.put("objectKind", bundle.objectKind);
+            result.put("objectKindLabel", LhInventoryObjectKinds.labelOf(bundle.objectKind));
+            result.put("objectKindLabelZh", LhInventoryObjectKinds.labelZh(bundle.objectKind));
+            if (StrUtil.isNotBlank(bundle.hint)) {
+                result.put("hint", bundle.hint);
+            }
+            result.put("discovered", tables.size());
+            result.put("tables", tables);
+            result.put("schema", tables.stream().map(t -> String.valueOf(t.get("name")))
+                    .collect(Collectors.joining(",")));
+            return result;
         }
         if (typeEnum == null || !typeEnum.isJdbc()) {
             String kind = LhInventoryObjectKinds.ofType(typeCode);
@@ -1199,6 +1237,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             result.put("error", hint);
             result.put("objectKind", kind);
             result.put("objectKindLabel", kindLabel);
+            result.put("objectKindLabelZh", LhInventoryObjectKinds.labelZh(kind));
             result.put("path", "unsupported");
             result.put("tables", Collections.emptyList());
             return result;
@@ -1219,7 +1258,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             Map<String, Object> secret = new LinkedHashMap<>(conn);
             secret.put("database", n.database);
             List<RemoteTableMeta> metas;
-            if ("mysql".equals(typeCode) || "doris".equals(typeCode)) {
+            if ("mysql".equals(typeCode) || "doris".equals(typeCode) || "starrocks".equals(typeCode)) {
                 metas = discoverMysqlTables(c, secret, probe);
             } else if ("postgresql".equals(typeCode) || "pg".equals(typeCode)) {
                 metas = discoverPgTables(c);
@@ -1283,7 +1322,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             }
             try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
                 List<RemoteTableMeta> metas;
-                if ("mysql".equals(type) || "doris".equals(type)) {
+                if ("mysql".equals(type) || "doris".equals(type) || "starrocks".equals(type)) {
                     metas = discoverMysqlTables(conn, secret, ds);
                 } else if ("postgresql".equals(type) || "pg".equals(type)) {
                     metas = discoverPgTables(conn);
@@ -1694,6 +1733,12 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
     /** 拥有者或 MANAGE grant 方可改删/启停（超管不短路） */
     private LhDatasourceVo enrichVo(LhDatasourceVo vo) {
         userNameResolver.fillDatasource(vo);
+        if (vo != null) {
+            String kind = LhInventoryObjectKinds.ofType(vo.getTypeCode());
+            vo.setObjectKind(kind);
+            vo.setObjectKindLabel(LhInventoryObjectKinds.labelOf(kind));
+            vo.setObjectKindLabelZh(LhInventoryObjectKinds.labelZh(kind));
+        }
         return vo;
     }
 

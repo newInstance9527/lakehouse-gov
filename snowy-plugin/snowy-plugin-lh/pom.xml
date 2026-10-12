@@ -71,9 +71,18 @@
                     <groupId>org.apache.logging.log4j</groupId>
                     <artifactId>log4j-slf4j-impl</artifactId>
                 </exclusion>
+                <!-- 禁 javax Servlet/JSP：与 Spring Boot 3 Tomcat jakarta.servlet 冲突（JspServlet ClassCast） -->
                 <exclusion>
                     <groupId>javax.servlet</groupId>
                     <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>javax.servlet.jsp</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.glassfish.web</groupId>
+                    <artifactId>javax.servlet.jsp</artifactId>
                 </exclusion>
                 <exclusion>
                     <groupId>tomcat</groupId>
@@ -125,6 +134,25 @@
             <groupId>io.milvus</groupId>
             <artifactId>milvus-sdk-java</artifactId>
             <version>2.4.4</version>
+            <exclusions>
+                <!-- hadoop-client 传递 javax.servlet / jsp-api，与嵌入式 Tomcat Jakarta 冲突 -->
+                <exclusion>
+                    <groupId>javax.servlet</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>javax.servlet.jsp</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.eclipse.jetty</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.eclipse.jetty.websocket</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <!-- 知识库上传：真实抽取 pdf/docx/doc/txt/md/html 正文（禁止静默假内容；版本见父 POM） -->
         <dependency>

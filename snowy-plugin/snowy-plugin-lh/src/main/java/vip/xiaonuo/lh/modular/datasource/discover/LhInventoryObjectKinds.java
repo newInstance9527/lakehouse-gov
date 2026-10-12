@@ -7,7 +7,7 @@
  * 2.请不要删除和修改Snowy源码头部的版权声明。
  * 3.本项目代码可免费商业使用，商业使用请保留源码和相关描述文件的项目出处，作者声明等。
  * 4.分发源码时候，请注明软件出处 https://www.xiaonuo.vip
- * 5.不可二次分发开源参与同类竞品，如有想法可联系团队xiaonuobase@qq.com商议合作。
+ * 5.不可二次分发开源参与同类竞品，如有想法可联系yuki.t@example.com商议合作。
  * 6.若您的项目无法满足以上几点，需要更多功能代码，获取Snowy商业授权许可，请在官网购买授权，地址为 https://www.xiaonuo.vip
  */
 package vip.xiaonuo.lh.modular.datasource.discover;
@@ -17,7 +17,8 @@ import cn.hutool.core.util.StrUtil;
 import java.util.Locale;
 
 /**
- * 门户清单对象语义（共用既有 LhDsTable / ig_ds_table.table_name 存对象名；kind 仅 API/文案层）
+ * 门户清单对象语义（共用既有 LhDsTable / ig_ds_table.table_name 存对象名；kind 仅 API/文案层）。
+ * {@link #ofType} 覆盖 {@code LhDatasourceTypeEnum} 全部编码及常见别名。
  *
  * @author lakehouse
  * @date 2026/3/18
@@ -41,19 +42,22 @@ public final class LhInventoryObjectKinds {
     private LhInventoryObjectKinds() {
     }
 
+    /**
+     * 按数据源 typeCode 解析对象 kind（覆盖枚举 26 类 + 别名）。
+     */
     public static String ofType(String typeCode) {
         String t = StrUtil.blankToDefault(typeCode, "").toLowerCase(Locale.ROOT);
         return switch (t) {
             case "kafka", "pulsar" -> TOPIC;
             case "rabbitmq" -> QUEUE;
-            case "elasticsearch" -> INDEX;
+            case "elasticsearch", "opensearch" -> INDEX;
             case "redis" -> KEY_PREFIX;
             case "s3", "minio", "s3_minio" -> BUCKET;
-            case "hdfs", "file", "ftp" -> PATH;
+            case "hdfs", "file", "ftp", "sftp" -> PATH;
             case "mongodb" -> COLLECTION;
-            case "http_api" -> ENDPOINT;
-            case "hive", "iceberg", "hbase", "mysql", "pg", "postgresql", "oracle", "sqlserver",
-                    "clickhouse", "doris", "trino" -> TABLE;
+            case "http_api", "http", "rest", "openapi", "tableau", "superset", "airflow" -> ENDPOINT;
+            case "hive", "iceberg", "hbase", "mysql", "mariadb", "pg", "postgresql", "oracle", "sqlserver",
+                    "azuresql", "clickhouse", "doris", "starrocks", "trino", "presto" -> TABLE;
             default -> UNKNOWN;
         };
     }
@@ -74,5 +78,27 @@ public final class LhInventoryObjectKinds {
             case TABLE -> "Table";
             default -> "Object";
         };
+    }
+
+    /** 门户 UI 中文专名（清单标题用「{labelZh}清单」） */
+    public static String labelZh(String kind) {
+        return switch (StrUtil.blankToDefault(kind, UNKNOWN)) {
+            case TOPIC -> "Topic";
+            case QUEUE -> "Queue";
+            case INDEX -> "Index";
+            case BUCKET -> "Bucket";
+            case KEY_PREFIX -> "Key 前缀";
+            case KEY -> "Key";
+            case PATH -> "路径";
+            case COLLECTION -> "集合";
+            case FILESET -> "文件集";
+            case ENDPOINT -> "接口";
+            case TABLE -> "表";
+            default -> "对象";
+        };
+    }
+
+    public static String labelZhOfType(String typeCode) {
+        return labelZh(ofType(typeCode));
     }
 }

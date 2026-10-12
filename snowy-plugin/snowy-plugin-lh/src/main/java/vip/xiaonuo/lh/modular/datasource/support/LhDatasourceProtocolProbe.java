@@ -349,82 +349,27 @@ public final class LhDatasourceProtocolProbe {
     }
 
     public static void probeRedis(Map<String, Object> conn) throws Exception {
-        String host = first(conn, "host", "endpoint");
-        String port = StrUtil.blankToDefault(first(conn, "port"), "6379");
-        if (StrUtil.isBlank(host)) {
-            throw new CommonException("Redis 需要 host");
-        }
-        String mode = first(conn, "mode", "deployMode");
-        if (StrUtil.isNotBlank(mode)) {
-            String m = mode.toLowerCase(Locale.ROOT);
-            if (m.contains("cluster") || m.contains("哨兵") || m.contains("sentinel") || m.contains("集群")) {
-                throw new CommonException("Redis 测连当前仅支持单机模式（mode={}）", mode);
-            }
-        }
-        int db = 0;
-        String dbStr = first(conn, "db", "database");
-        if (StrUtil.isNotBlank(dbStr) && dbStr.chars().allMatch(Character::isDigit)) {
-            db = Integer.parseInt(dbStr.trim());
-        }
-        String password = first(conn, "password");
-        String user = first(conn, "user", "username");
-        redis.clients.jedis.DefaultJedisClientConfig.Builder cfg =
-                redis.clients.jedis.DefaultJedisClientConfig.builder()
-                        .connectionTimeoutMillis(3000)
-                        .socketTimeoutMillis(3000)
-                        .database(db);
-        if (StrUtil.isNotBlank(password)) {
-            if (StrUtil.isNotBlank(user)) {
-                cfg.user(user).password(password);
-            } else {
-                cfg.password(password);
-            }
-        }
-        int portNum = parsePort(port, 6379);
-        try (redis.clients.jedis.Jedis jedis = new redis.clients.jedis.Jedis(
-                new redis.clients.jedis.HostAndPort(host.trim(), portNum), cfg.build())) {
+        LhRedisConnSupport.DeployMode mode = LhRedisConnSupport.resolveMode(conn);
+        LhRedisConnSupport.withClient(conn, jedis -> {
             String pong = jedis.ping();
             if (!"PONG".equalsIgnoreCase(StrUtil.blankToDefault(pong, ""))) {
-                throw new CommonException("Redis PING 异常: {}", pong);
+                throw new CommonException("Redis PING 异常（mode={}）: {}", mode, pong);
             }
-        }
+            return Boolean.TRUE;
+        });
     }
 
     public static void probeElasticsearch(Map<String, Object> conn) throws Exception {
-        String host = first(conn, "host", "endpoint");
-        String port = StrUtil.blankToDefault(first(conn, "port"), "9200");
-        if (StrUtil.isBlank(host)) {
-            throw new CommonException("Elasticsearch 需要 host");
-        }
-        boolean https = truthySsl(first(conn, "ssl", "secure", "https"))
-                || StrUtil.startWithIgnoreCase(host, "https://");
-        host = host.replaceFirst("^https?://", "").replaceAll("/+$", "");
-        if (host.contains(":") && !host.startsWith("[")) {
-            int colon = host.lastIndexOf(':');
-            if (colon > 0 && StrUtil.isBlank(first(conn, "port"))) {
-                port = host.substring(colon + 1);
-                host = host.substring(0, colon);
+        // insecureSsl：测连阶段默认不信任自定义 CA 时仍可探测（与清单 discover 配置对齐由调用方决定）
+        boolean insecure = truthySsl(first(conn, "insecureSsl", "skipTlsVerify"));
+        LhEsConnSupport.withFirstHealthy(conn, insecure, base -> {
+            cn.hutool.http.HttpResponse resp = LhEsConnSupport.get(base, "/", conn, insecure);
+            if (!resp.isOk()) {
+                throw new CommonException("Elasticsearch HTTP {}：{}",
+                        resp.getStatus(), StrUtil.maxLength(resp.body(), 160));
             }
-        }
-        String base = (https ? "https://" : "http://") + host + ":" + port;
-        cn.hutool.http.HttpRequest req = cn.hutool.http.HttpRequest.get(base + "/")
-                .timeout(10000);
-        String apiKey = first(conn, "apiKey", "apiKeyId", "api_key");
-        String user = first(conn, "user", "username");
-        String password = first(conn, "password");
-        if (StrUtil.isNotBlank(apiKey) && !apiKey.contains("建议")) {
-            String token = apiKey.contains(":")
-                    ? java.util.Base64.getEncoder().encodeToString(apiKey.getBytes(StandardCharsets.UTF_8))
-                    : apiKey.trim();
-            req.header("Authorization", "ApiKey " + token);
-        } else if (StrUtil.isNotBlank(user)) {
-            req.basicAuth(user, StrUtil.nullToEmpty(password));
-        }
-        cn.hutool.http.HttpResponse resp = req.execute();
-        if (!resp.isOk()) {
-            throw new CommonException("Elasticsearch HTTP {}：{}",
-                    resp.getStatus(), StrUtil.maxLength(resp.body(), 160));
-        }
+            return Boolean.TRUE;
+        });
     }
 
     public static void probeRabbitMq(Map<String, Object> conn) throws Exception {

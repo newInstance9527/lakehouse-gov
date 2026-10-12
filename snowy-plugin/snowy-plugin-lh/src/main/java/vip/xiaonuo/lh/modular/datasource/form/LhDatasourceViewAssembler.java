@@ -16,6 +16,7 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import org.springframework.stereotype.Component;
+import vip.xiaonuo.lh.modular.datasource.discover.LhInventoryObjectKinds;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDsTable;
 import vip.xiaonuo.lh.modular.datasource.enums.LhDatasourceTypeEnum;
@@ -45,6 +46,7 @@ public class LhDatasourceViewAssembler {
             Map.entry("sqlserver", new String[]{"", "#e6f7ff", "#096dd9"}),
             Map.entry("clickhouse", new String[]{"", "#fffbe6", "#d48806"}),
             Map.entry("doris", new String[]{"", "#fff7e6", "#d46b08"}),
+            Map.entry("starrocks", new String[]{"", "#fff7e6", "#d46b08"}),
             Map.entry("hive", new String[]{"", "#fff7e6", "#d48806"}),
             Map.entry("iceberg", new String[]{"", "#e6f4ff", "#1677ff"}),
             Map.entry("hbase", new String[]{"", "#f6ffed", "#389e0d"}),
@@ -82,6 +84,10 @@ public class LhDatasourceViewAssembler {
         }
         vo.setType(label);
         vo.setTypeCode(typeCode);
+        String objectKind = LhInventoryObjectKinds.ofType(typeCode);
+        vo.setObjectKind(objectKind);
+        vo.setObjectKindLabel(LhInventoryObjectKinds.labelOf(objectKind));
+        vo.setObjectKindLabelZh(LhInventoryObjectKinds.labelZh(objectKind));
         vo.setCategory(e.getCategory());
         String[] vis = TYPE_VISUAL.getOrDefault(typeCode, new String[]{"", "#e8f0ff", "#1e6fff"});
         vo.setIcon(vis[0]);

@@ -87,7 +87,7 @@ public class LhDsFormSchemaService {
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> fieldsOf(String typeLabelOrCode) {
-        String label = resolveTypeLabel(typeLabelOrCode);
+        String label = resolveFormFieldsLabel(typeLabelOrCode);
         Object arr = fieldArrayOf(label);
         if (arr == null) {
             arr = fieldArrayOf(typeLabelOrCode);
@@ -141,10 +141,18 @@ public class LhDsFormSchemaService {
             }
             String name = String.valueOf(f.get("n"));
             Object val = c.get(name);
-            // Kafka 等：bootstrap / bootstrapServers / host 任一即可
+            // Kafka / Redis / ES：host 与 bootstrap、nodes 等互为兜底
             if ((val == null || StrUtil.isBlank(String.valueOf(val)))
                     && ("bootstrap".equals(name) || "bootstrapServers".equals(name) || "host".equals(name))) {
-                val = firstPresent(c, "bootstrap", "bootstrapServers", "host");
+                val = firstPresent(c, "bootstrap", "bootstrapServers", "host",
+                        "nodes", "hosts", "clusterNodes", "sentinels", "endpoints");
+            }
+            // Redis Cluster/Sentinel、ES 多节点：nodes 已含 host:port 时可不单独填 port
+            if ((val == null || StrUtil.isBlank(String.valueOf(val))) && "port".equals(name)) {
+                Object nodes = firstPresent(c, "nodes", "hosts", "clusterNodes", "sentinels", "host", "bootstrap");
+                if (nodes != null && String.valueOf(nodes).contains(":")) {
+                    val = "from-nodes";
+                }
             }
             if (val == null || StrUtil.isBlank(String.valueOf(val))) {
                 throw new CommonException("请填写：{}", f.get("l"));
@@ -171,106 +179,172 @@ public class LhDsFormSchemaService {
             throw new CommonException("数据源类型不能为空");
         }
         String raw = typeLabelOrCode.trim();
-        // 1) 已是内部编码
-        if (typeCode.containsValue(raw) || codeToLabel.containsKey(raw)) {
-            return "pg".equalsIgnoreCase(raw) ? "postgresql" : raw.toLowerCase(Locale.ROOT);
+        // 1) 已是内部编码（file 历史码归一为 ftp）
+        if (typeCode.containsValue(raw) || codeToLabel.containsKey(raw)
+                || LhDatasourceTypeEnum.of(raw).isPresent()) {
+            String code = raw.toLowerCase(Locale.ROOT);
+            if ("pg".equals(code)) {
+                return "postgresql";
+            }
+            if ("file".equals(code)) {
+                return "ftp";
+            }
+            return code;
         }
         if ("pg".equalsIgnoreCase(raw)) {
             return "postgresql";
         }
         // 2) 展示名在 typeCode 中有独立编码（即便表单字段 alias 到其它类型）
+        //    例：StarRocks→starrocks、Tableau→tableau，禁止被 alias 改成 doris/http_api
         if (typeCode.containsKey(raw)) {
-            return typeCode.get(raw);
+            return normalizePersistedCode(typeCode.get(raw));
         }
         for (Map.Entry<String, String> e : typeCode.entrySet()) {
             if (e.getKey() != null && e.getKey().equalsIgnoreCase(raw)) {
-                return e.getValue();
+                return normalizePersistedCode(e.getValue());
             }
         }
         // 3) 纯别名类型（如 MariaDB→MySQL 表单）落到目标编码
         if (alias.containsKey(raw)) {
             String formLabel = alias.get(raw);
             if (typeCode.containsKey(formLabel)) {
-                return typeCode.get(formLabel);
+                return normalizePersistedCode(typeCode.get(formLabel));
             }
         }
-        String label = resolveTypeLabel(raw);
-        String code = typeCode.get(label);
+        String identity = resolveTypeLabel(raw);
+        String code = typeCode.get(identity);
         if (StrUtil.isNotBlank(code)) {
-            return code;
+            return normalizePersistedCode(code);
         }
-        // 4) 兜底：枚举 label / value（避免 json 缺 typeCode 时 Kafka 等展示名解析失败）
+        String fieldsLabel = resolveFormFieldsLabel(raw);
+        code = typeCode.get(fieldsLabel);
+        if (StrUtil.isNotBlank(code) && !hasOwnTypeCode(identity) && !hasOwnTypeCode(raw)) {
+            // 仅当身份本身无独立 typeCode 时（MariaDB），才用表单借用目标码
+            return normalizePersistedCode(code);
+        }
+        // 4) 兜底：枚举 label / value
         Optional<LhDatasourceTypeEnum> byEnum = LhDatasourceTypeEnum.of(raw);
         if (byEnum.isPresent()) {
-            String v = byEnum.get().getValue();
-            return "pg".equalsIgnoreCase(v) ? "postgresql" : v;
+            return normalizePersistedCode(byEnum.get().getValue());
         }
         for (LhDatasourceTypeEnum e : LhDatasourceTypeEnum.values()) {
-            if (e.getLabel().equalsIgnoreCase(raw) || e.getLabel().equalsIgnoreCase(label)) {
-                String v = e.getValue();
-                return "pg".equalsIgnoreCase(v) ? "postgresql" : v;
+            if (e.getLabel().equalsIgnoreCase(raw) || e.getLabel().equalsIgnoreCase(identity)) {
+                return normalizePersistedCode(e.getValue());
             }
         }
         throw new CommonException("不支持的数据源类型: {}", typeLabelOrCode);
     }
 
+    private static String normalizePersistedCode(String code) {
+        String c = StrUtil.blankToDefault(code, "").toLowerCase(Locale.ROOT);
+        if ("pg".equals(c)) {
+            return "postgresql";
+        }
+        if ("file".equals(c)) {
+            return "ftp";
+        }
+        return c;
+    }
+
+    /** 展示名是否在 typeCode 映射中有独立编码（与表单 alias 目标区分） */
+    private boolean hasOwnTypeCode(String labelOrCode) {
+        if (StrUtil.isBlank(labelOrCode)) {
+            return false;
+        }
+        if (typeCode.containsKey(labelOrCode)) {
+            return true;
+        }
+        for (String k : typeCode.keySet()) {
+            if (k != null && k.equalsIgnoreCase(labelOrCode)) {
+                return true;
+            }
+        }
+        return codeToLabel.containsKey(labelOrCode.toLowerCase(Locale.ROOT));
+    }
+
     /**
-     * 解析为表单 schema 用的类型展示名（字段定义；可走 alias）
+     * 门户 / VO 用的类型身份展示名（禁止把 StarRocks/Tableau 等折叠成 Doris/HTTP API）。
      */
     public String resolveTypeLabel(String typeLabelOrCode) {
         if (StrUtil.isBlank(typeLabelOrCode)) {
             return typeLabelOrCode;
         }
         String raw = typeLabelOrCode.trim();
-        if (fieldArrayOf(raw) != null) {
-            // 返回 fields 中的真实键名
-            JSONObject fields = root.getJSONObject("fields");
-            for (String k : fields.keySet()) {
-                if (k.equalsIgnoreCase(raw)) {
-                    return k;
-                }
-            }
-            return raw;
+        if ("pg".equalsIgnoreCase(raw)) {
+            return "PostgreSQL";
         }
-        if (alias.containsKey(raw)) {
-            return alias.get(raw);
+        if ("file".equalsIgnoreCase(raw)) {
+            return "FTP/SFTP";
         }
-        // 编码 → 展示名（kafka → Kafka）
+        // 编码 → 独立展示名（tableau → Tableau）
         if (codeToLabel.containsKey(raw)) {
-            String label = codeToLabel.get(raw);
-            if (alias.containsKey(label) && fieldArrayOf(label) == null) {
-                return alias.get(label);
-            }
-            if (fieldArrayOf(label) != null) {
-                return label;
-            }
-            if (alias.containsKey(label)) {
-                return alias.get(label);
-            }
-            return label;
+            return codeToLabel.get(raw);
         }
-        // 枚举兜底
+        String lower = raw.toLowerCase(Locale.ROOT);
+        if (codeToLabel.containsKey(lower)) {
+            return codeToLabel.get(lower);
+        }
         Optional<LhDatasourceTypeEnum> byCode = LhDatasourceTypeEnum.of(raw);
         if (byCode.isPresent()) {
-            String label = byCode.get().getLabel();
-            if (alias.containsKey(label) && fieldArrayOf(label) == null) {
-                return alias.get(label);
+            return byCode.get().getLabel();
+        }
+        // 已是展示名 / 兼容大小写
+        if (typeCode.containsKey(raw)) {
+            return raw;
+        }
+        for (String k : typeCode.keySet()) {
+            if (k != null && k.equalsIgnoreCase(raw)) {
+                return k;
             }
-            return label;
         }
         for (LhDatasourceTypeEnum e : LhDatasourceTypeEnum.values()) {
             if (e.getLabel().equalsIgnoreCase(raw)) {
                 return e.getLabel();
             }
         }
-        if ("pg".equalsIgnoreCase(raw)) {
-            return "PostgreSQL";
+        if (fieldArrayOf(raw) != null) {
+            JSONObject fields = root.getJSONObject("fields");
+            for (String k : fields.keySet()) {
+                if (k != null && k.equalsIgnoreCase(raw)) {
+                    return k;
+                }
+            }
         }
         return raw;
     }
 
+    /**
+     * 表单字段 schema 键（可走 alias：Tableau→HTTP API、StarRocks→Doris）。
+     */
+    public String resolveFormFieldsLabel(String typeLabelOrCode) {
+        if (StrUtil.isBlank(typeLabelOrCode)) {
+            return typeLabelOrCode;
+        }
+        String raw = typeLabelOrCode.trim();
+        String identity = resolveTypeLabel(raw);
+        if (fieldArrayOf(identity) != null) {
+            return identity;
+        }
+        if (alias.containsKey(identity)) {
+            return alias.get(identity);
+        }
+        if (alias.containsKey(raw)) {
+            return alias.get(raw);
+        }
+        if (fieldArrayOf(raw) != null) {
+            JSONObject fields = root.getJSONObject("fields");
+            for (String k : fields.keySet()) {
+                if (k != null && k.equalsIgnoreCase(raw)) {
+                    return k;
+                }
+            }
+            return raw;
+        }
+        return identity;
+    }
+
     public String defaultPort(String typeLabelOrCode) {
-        String label = resolveTypeLabel(typeLabelOrCode);
+        String label = resolveFormFieldsLabel(typeLabelOrCode);
         JSONObject meta = root.getJSONObject("meta");
         if (meta != null) {
             Object byLabel = meta.getByPath(label + ".port");
@@ -291,15 +365,36 @@ public class LhDsFormSchemaService {
 
     private List<Map<String, Object>> listTypes() {
         List<Map<String, Object>> list = new ArrayList<>();
+        LinkedHashSet<String> labels = new LinkedHashSet<>();
         JSONObject fields = root.getJSONObject("fields");
-        if (fields == null) {
-            return list;
+        if (fields != null) {
+            labels.addAll(fields.keySet());
         }
-        for (String label : fields.keySet()) {
+        // 独立 typeCode 的展示名（StarRocks/Tableau/…），即使 fields 借用别名也要出现在注册下拉
+        for (String label : typeCode.keySet()) {
+            if (StrUtil.isBlank(label)) {
+                continue;
+            }
+            // 跳过纯编码键（mysql 等）
+            if (label.equals(label.toLowerCase(Locale.ROOT)) && codeToLabel.containsKey(label)) {
+                continue;
+            }
+            labels.add(label);
+        }
+        for (LhDatasourceTypeEnum e : LhDatasourceTypeEnum.values()) {
+            if ("pg".equals(e.getValue()) || "file".equals(e.getValue())) {
+                continue; // 归一到 postgresql / ftp，不单独暴露
+            }
+            labels.add(e.getLabel());
+        }
+        for (String label : labels) {
+            String code = typeCode.containsKey(label)
+                    ? typeCode.get(label)
+                    : resolveTypeCode(label);
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("label", label);
             m.put("value", label);
-            m.put("code", typeCode.getOrDefault(label, label));
+            m.put("code", code);
             m.put("port", defaultPort(label));
             list.add(m);
         }

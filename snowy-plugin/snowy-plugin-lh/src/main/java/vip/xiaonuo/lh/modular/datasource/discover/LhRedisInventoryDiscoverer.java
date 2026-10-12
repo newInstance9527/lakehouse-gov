@@ -18,24 +18,23 @@ import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
-import redis.clients.jedis.DefaultJedisClientConfig;
-import redis.clients.jedis.HostAndPort;
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisClientConfig;
 import redis.clients.jedis.params.ScanParams;
 import redis.clients.jedis.resps.ScanResult;
 import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
+import vip.xiaonuo.lh.modular.datasource.support.LhRedisConnSupport;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Redis 清单发现：登记 Key 前缀优先；否则 SCAN 限流列举（禁止 KEYS *）
- *
- * @author lakehouse
- * @date 2026/3/18
+ * Redis 清单发现：Standalone / Sentinel / Cluster；登记 Key 前缀优先，否则 SCAN 限流（禁止 KEYS *）
  */
 @Slf4j
 @Component
@@ -44,8 +43,6 @@ public class LhRedisInventoryDiscoverer implements LhInventoryDiscoverer {
 
     private static final int SCAN_MAX = 500;
     private static final int SCAN_COUNT = 50;
-    private static final int CONNECT_TIMEOUT_MS = 3000;
-    private static final int SOCKET_TIMEOUT_MS = 3000;
 
     @Resource
     private LhVaultClient vaultClient;
@@ -62,127 +59,87 @@ public class LhRedisInventoryDiscoverer implements LhInventoryDiscoverer {
 
     @Override
     public LhInventoryDiscoverResult discover(LhDatasource ds) {
-        Map<String, Object> secret = vaultClient.readOrEmpty(ds.getVaultPath());
-        String host = first(secret, "host", "endpoint");
-        String port = first(secret, "port");
-        if (StrUtil.isBlank(host) && StrUtil.isNotBlank(ds.getEndpointHost())) {
-            host = ds.getEndpointHost();
+        Map<String, Object> secret = new LinkedHashMap<>(vaultClient.readOrEmpty(ds.getVaultPath()));
+        if (StrUtil.isBlank(first(secret, "host", "endpoint", "nodes"))
+                && StrUtil.isNotBlank(ds.getEndpointHost())) {
+            secret.putIfAbsent("host", ds.getEndpointHost());
         }
-        if (StrUtil.isBlank(port) && StrUtil.isNotBlank(ds.getEndpointPort())) {
-            port = ds.getEndpointPort();
+        if (StrUtil.isBlank(first(secret, "port")) && StrUtil.isNotBlank(ds.getEndpointPort())) {
+            secret.putIfAbsent("port", ds.getEndpointPort());
         }
-        if (StrUtil.isBlank(host)) {
-            throw new CommonException("Redis 清单同步需要 host（Vault / 端点）；请检查连接或维护 Key 前缀清单后重试");
-        }
-        String mode = first(secret, "mode", "deployMode");
-        if (StrUtil.isNotBlank(mode)) {
-            String m = mode.toLowerCase(Locale.ROOT);
-            if (m.contains("cluster") || m.contains("哨兵") || m.contains("sentinel") || m.contains("集群")) {
-                throw new CommonException(
-                        "Redis 清单同步当前仅支持单机模式；请将 mode 设为单机，或手工维护 Key 前缀清单（mode={}）",
-                        mode);
-            }
-        }
-        if (StrUtil.isBlank(port)) {
-            port = "6379";
-        }
-        int portNum;
-        try {
-            portNum = Integer.parseInt(port.trim());
-        } catch (NumberFormatException e) {
-            throw new CommonException("Redis 端口无效: {}；请检查 Vault port", port);
-        }
-
-        int db = 0;
-        String dbStr = first(secret, "db", "database");
-        if (StrUtil.isBlank(dbStr) && StrUtil.isNotBlank(ds.getDatabaseName())
+        if (StrUtil.isBlank(first(secret, "db", "database")) && StrUtil.isNotBlank(ds.getDatabaseName())
                 && StrUtil.isNumeric(ds.getDatabaseName().trim())) {
-            dbStr = ds.getDatabaseName().trim();
-        }
-        if (StrUtil.isNotBlank(dbStr)) {
-            try {
-                db = Integer.parseInt(dbStr.trim());
-            } catch (NumberFormatException ignored) {
-                db = 0;
-            }
+            secret.putIfAbsent("db", ds.getDatabaseName().trim());
         }
 
+        LhRedisConnSupport.DeployMode mode = LhRedisConnSupport.resolveMode(secret);
         List<String> registered = resolveRegisteredPrefixes(ds, secret);
-        String password = first(secret, "password");
-        String user = first(secret, "user", "username");
 
-        DefaultJedisClientConfig.Builder cfg = DefaultJedisClientConfig.builder()
-                .connectionTimeoutMillis(CONNECT_TIMEOUT_MS)
-                .socketTimeoutMillis(SOCKET_TIMEOUT_MS)
-                .database(db);
-        if (StrUtil.isNotBlank(password)) {
-            if (StrUtil.isNotBlank(user)) {
-                cfg.user(user).password(password);
-            } else {
-                cfg.password(password);
-            }
-        }
-        JedisClientConfig clientConfig = cfg.build();
+        try {
+            return LhRedisConnSupport.withClient(secret, jedis -> {
+                jedis.ping();
+                if (!registered.isEmpty()) {
+                    List<LhRemoteInventoryItem> items = new ArrayList<>();
+                    for (String prefix : registered) {
+                        LhRemoteInventoryItem m = new LhRemoteInventoryItem();
+                        m.name = prefix;
+                        m.engine = "redis";
+                        m.encoding = "UTF-8";
+                        String match = toScanPattern(prefix);
+                        try {
+                            long sample = sampleMatchCount(jedis, match, 20);
+                            m.comment = "key_prefix; mode=" + mode + "; SCAN sample≈" + sample;
+                            m.rowCount = sample;
+                        } catch (Exception e) {
+                            m.comment = "key_prefix; mode=" + mode + "; SCAN 校验跳过: "
+                                    + StrUtil.maxLength(e.getMessage(), 80);
+                        }
+                        items.add(m);
+                    }
+                    return LhInventoryDiscoverResult.remote(
+                            "redis_prefix", LhInventoryObjectKinds.KEY_PREFIX, items);
+                }
 
-        try (Jedis jedis = new Jedis(new HostAndPort(host.trim(), portNum), clientConfig)) {
-            jedis.ping();
-            if (!registered.isEmpty()) {
+                List<String> keys = scanKeys(jedis, "*", SCAN_MAX);
                 List<LhRemoteInventoryItem> items = new ArrayList<>();
-                for (String prefix : registered) {
+                for (String key : keys) {
                     LhRemoteInventoryItem m = new LhRemoteInventoryItem();
-                    m.name = prefix;
+                    m.name = key;
                     m.engine = "redis";
                     m.encoding = "UTF-8";
-                    String match = toScanPattern(prefix);
-                    try {
-                        long sample = sampleMatchCount(jedis, match, 20);
-                        m.comment = "key_prefix; SCAN sample≈" + sample;
-                        m.rowCount = sample;
-                    } catch (Exception e) {
-                        m.comment = "key_prefix; SCAN 校验跳过: " + StrUtil.maxLength(e.getMessage(), 80);
-                    }
+                    m.comment = "key sample via SCAN; mode=" + mode + " (max=" + SCAN_MAX + ")";
                     items.add(m);
                 }
-                return LhInventoryDiscoverResult.remote("redis_prefix", LhInventoryObjectKinds.KEY_PREFIX, items);
-            }
-
-            // 无登记前缀：SCAN 限流列举 key 样本（禁止 KEYS *）
-            List<String> keys = scanKeys(jedis, "*", SCAN_MAX);
-            List<LhRemoteInventoryItem> items = new ArrayList<>();
-            for (String key : keys) {
-                LhRemoteInventoryItem m = new LhRemoteInventoryItem();
-                m.name = key;
-                m.engine = "redis";
-                m.encoding = "UTF-8";
-                m.comment = "key sample via SCAN (max=" + SCAN_MAX + ")";
-                items.add(m);
-            }
-            LhInventoryDiscoverResult r = LhInventoryDiscoverResult.remote(
-                    "redis_scan", LhInventoryObjectKinds.KEY, items);
-            if (items.size() >= SCAN_MAX) {
-                r.hint = "Redis SCAN 已达上限 " + SCAN_MAX + "，仅为样本；建议登记 Key 前缀清单后同步";
-            } else if (items.isEmpty()) {
-                r.hint = "Redis SCAN 未发现 Key（db=" + db + "）；可维护 schemaSummary 前缀清单后重试";
-            }
-            return r;
+                LhInventoryDiscoverResult r = LhInventoryDiscoverResult.remote(
+                        "redis_scan", LhInventoryObjectKinds.KEY, items);
+                if (items.size() >= SCAN_MAX) {
+                    r.hint = "Redis SCAN 已达上限 " + SCAN_MAX + "（" + mode + "），仅为样本；建议登记 Key 前缀清单后同步";
+                } else if (items.isEmpty()) {
+                    r.hint = "Redis SCAN 未发现 Key（mode=" + mode + "）；可维护 schemaSummary 前缀清单后重试";
+                }
+                if (mode == LhRedisConnSupport.DeployMode.CLUSTER) {
+                    String extra = "Cluster 模式忽略 DB Index；nodes 填 host:port 列表";
+                    r.hint = StrUtil.isBlank(r.hint) ? extra : r.hint + "；" + extra;
+                }
+                return r;
+            });
         } catch (CommonException e) {
             throw e;
         } catch (Exception e) {
             throw new CommonException(
-                    "Redis 清单同步失败（禁止 KEYS *；请检查 host/port/password/db 或登记 Key 前缀）: {}",
-                    e.getMessage());
+                    "Redis 清单同步失败（mode={}；禁止 KEYS *；请检查 host/nodes/masterName/password）: {}",
+                    mode, e.getMessage());
         }
     }
 
     private static List<String> resolveRegisteredPrefixes(LhDatasource ds, Map<String, Object> secret) {
         LinkedHashSet<String> out = new LinkedHashSet<>();
-        out.addAll(splitList(ds.getSchemaSummary()));
-        out.addAll(splitList(first(secret, "schema", "keyPrefixes", "prefixes", "keys")));
-        // conn_masked 可能残留非密前缀字段
+        out.addAll(LhRedisConnSupport.splitList(ds.getSchemaSummary()));
+        out.addAll(LhRedisConnSupport.splitList(first(secret, "schema", "keyPrefixes", "prefixes", "keys")));
         if (StrUtil.isNotBlank(ds.getConnMasked()) && JSONUtil.isTypeJSON(ds.getConnMasked())) {
             try {
                 Map<String, Object> masked = JSONUtil.parseObj(ds.getConnMasked());
-                out.addAll(splitList(first(masked, "schema", "keyPrefixes", "prefixes", "keys")));
+                out.addAll(LhRedisConnSupport.splitList(first(masked, "schema", "keyPrefixes", "prefixes", "keys")));
             } catch (Exception ignored) {
             }
         }
@@ -197,7 +154,7 @@ public class LhRedisInventoryDiscoverer implements LhInventoryDiscoverer {
         return p.endsWith(":") ? p + "*" : p + "*";
     }
 
-    private static long sampleMatchCount(Jedis jedis, String pattern, int limit) {
+    private static long sampleMatchCount(LhRedisConnSupport.Session jedis, String pattern, int limit) {
         ScanParams params = new ScanParams().match(pattern).count(Math.min(SCAN_COUNT, limit));
         String scanMark = ScanParams.SCAN_POINTER_START;
         long n = 0;
@@ -214,7 +171,7 @@ public class LhRedisInventoryDiscoverer implements LhInventoryDiscoverer {
         return n;
     }
 
-    private static List<String> scanKeys(Jedis jedis, String pattern, int max) {
+    private static List<String> scanKeys(LhRedisConnSupport.Session jedis, String pattern, int max) {
         ScanParams params = new ScanParams().match(pattern).count(SCAN_COUNT);
         String scanMark = ScanParams.SCAN_POINTER_START;
         LinkedHashSet<String> keys = new LinkedHashSet<>();
@@ -235,16 +192,6 @@ public class LhRedisInventoryDiscoverer implements LhInventoryDiscoverer {
             rounds++;
         } while (!"0".equals(scanMark) && rounds < 200);
         return new ArrayList<>(keys);
-    }
-
-    private static List<String> splitList(String raw) {
-        if (StrUtil.isBlank(raw)) {
-            return Collections.emptyList();
-        }
-        return Arrays.stream(raw.split("[,;/\\n]+"))
-                .map(String::trim)
-                .filter(StrUtil::isNotBlank)
-                .collect(Collectors.toList());
     }
 
     private static String first(Map<String, Object> m, String... keys) {

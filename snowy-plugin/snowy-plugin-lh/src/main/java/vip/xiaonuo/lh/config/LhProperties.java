@@ -847,4 +847,5 @@ public class LhProperties {
         /** 审批/到期时尝试写 Grav 表属性 lh.export.*；失败不阻断 */
         private boolean gravAuditEnabled = true;
     }
+
 }

@@ -13,7 +13,6 @@
 package vip.xiaonuo.lh.modular.datasource.discover;
 
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
 import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
@@ -26,23 +25,16 @@ import vip.xiaonuo.common.exception.CommonException;
 import vip.xiaonuo.lh.config.LhProperties;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
+import vip.xiaonuo.lh.modular.datasource.support.LhEsConnSupport;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
-import java.nio.charset.StandardCharsets;
-import java.security.cert.X509Certificate;
 import java.util.ArrayList;
-import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
 /**
- * Elasticsearch 清单发现：HTTP GET /_cat/indices?format=json
- *
- * @author lakehouse
- * @date 2026/3/18
+ * Elasticsearch 清单发现：多节点择优 GET /_cat/indices?format=json
  */
 @Slf4j
 @Component
@@ -66,87 +58,61 @@ public class LhEsInventoryDiscoverer implements LhInventoryDiscoverer {
 
     @Override
     public LhInventoryDiscoverResult discover(LhDatasource ds) {
-        Map<String, Object> secret = vaultClient.readOrEmpty(ds.getVaultPath());
-        String host = first(secret, "host", "endpoint");
-        String port = first(secret, "port");
-        if (StrUtil.isBlank(host) && StrUtil.isNotBlank(ds.getEndpointHost())) {
-            host = ds.getEndpointHost();
+        Map<String, Object> secret = new LinkedHashMap<>(vaultClient.readOrEmpty(ds.getVaultPath()));
+        if (StrUtil.isBlank(first(secret, "host", "endpoint", "nodes", "hosts"))
+                && StrUtil.isNotBlank(ds.getEndpointHost())) {
+            secret.putIfAbsent("host", ds.getEndpointHost());
         }
-        if (StrUtil.isBlank(port) && StrUtil.isNotBlank(ds.getEndpointPort())) {
-            port = ds.getEndpointPort();
+        if (StrUtil.isBlank(first(secret, "port")) && StrUtil.isNotBlank(ds.getEndpointPort())) {
+            secret.putIfAbsent("port", ds.getEndpointPort());
         }
-        if (StrUtil.isBlank(host)) {
-            throw new CommonException("Elasticsearch 清单同步需要 host（Vault / 端点）");
-        }
-        if (StrUtil.isBlank(port)) {
-            port = "9200";
+        if (StrUtil.isBlank(first(secret, "host", "nodes", "hosts"))) {
+            throw new CommonException("Elasticsearch 清单同步需要 host 或 nodes（Vault / 端点）");
         }
 
-        boolean https = useHttps(secret, host);
-        host = host.replaceFirst("^https?://", "").replaceAll("/+$", "");
-        if (host.contains(":") && !host.startsWith("[")) {
-            // host 已带端口则不再拼接
-            int colon = host.lastIndexOf(':');
-            if (colon > 0 && StrUtil.isBlank(first(secret, "port")) && StrUtil.isBlank(ds.getEndpointPort())) {
-                port = host.substring(colon + 1);
-                host = host.substring(0, colon);
-            }
-        }
-        String base = (https ? "https://" : "http://") + host + ":" + port;
-        String url = base + "/_cat/indices?format=json&h=index,docs.count,store.size";
-
-        String user = first(secret, "user", "username");
-        String password = first(secret, "password");
         boolean skipSystem = skipSystemIndices(secret);
+        boolean insecure = lhProperties.getHttp().isInsecureSsl();
 
         try {
-            HttpRequest req = HttpRequest.get(url).timeout(12000);
-            String apiKey = first(secret, "apiKey", "apiKeyId", "api_key");
-            if (StrUtil.isNotBlank(apiKey) && !apiKey.contains("建议")) {
-                // ES ApiKey：整段 base64 或 id:key；原样放 Authorization
-                String token = apiKey.contains(":")
-                        ? Base64.getEncoder().encodeToString(apiKey.getBytes(StandardCharsets.UTF_8))
-                        : apiKey.trim();
-                req.header("Authorization", "ApiKey " + token);
-            } else if (StrUtil.isNotBlank(user)) {
-                req.basicAuth(user, StrUtil.nullToEmpty(password));
-            }
-            if (https && lhProperties.getHttp().isInsecureSsl()) {
-                trustAll(req);
-            }
-            HttpResponse resp = req.execute();
-            if (!resp.isOk()) {
-                throw new CommonException("Elasticsearch /_cat/indices HTTP {}：{}",
-                        resp.getStatus(), StrUtil.maxLength(resp.body(), 200));
-            }
-            JSONArray arr = JSONUtil.parseArray(resp.body());
-            List<LhRemoteInventoryItem> items = new ArrayList<>();
-            for (int i = 0; i < arr.size(); i++) {
-                JSONObject row = arr.getJSONObject(i);
-                if (row == null) {
-                    continue;
+            return LhEsConnSupport.withFirstHealthy(secret, insecure, base -> {
+                HttpResponse resp = LhEsConnSupport.get(
+                        base, "/_cat/indices?format=json&h=index,docs.count,store.size", secret, insecure);
+                JSONArray arr = JSONUtil.parseArray(resp.body());
+                List<LhRemoteInventoryItem> items = new ArrayList<>();
+                for (int i = 0; i < arr.size(); i++) {
+                    JSONObject row = arr.getJSONObject(i);
+                    if (row == null) {
+                        continue;
+                    }
+                    String index = StrUtil.trim(row.getStr("index"));
+                    if (StrUtil.isBlank(index)) {
+                        continue;
+                    }
+                    if (skipSystem && index.startsWith(".")) {
+                        continue;
+                    }
+                    LhRemoteInventoryItem m = new LhRemoteInventoryItem();
+                    m.name = index;
+                    m.engine = "elasticsearch";
+                    m.encoding = "UTF-8";
+                    String docs = row.getStr("docs.count");
+                    String store = row.getStr("store.size");
+                    m.comment = "docs=" + StrUtil.blankToDefault(docs, "?")
+                            + ", size=" + StrUtil.blankToDefault(store, "?")
+                            + "; via=" + base;
+                    if (StrUtil.isNotBlank(docs) && StrUtil.isNumeric(docs)) {
+                        m.rowCount = Long.parseLong(docs);
+                    }
+                    items.add(m);
                 }
-                String index = StrUtil.trim(row.getStr("index"));
-                if (StrUtil.isBlank(index)) {
-                    continue;
+                LhInventoryDiscoverResult r = LhInventoryDiscoverResult.remote(
+                        "es_cat", LhInventoryObjectKinds.INDEX, items);
+                List<String> bases = LhEsConnSupport.resolveBases(secret);
+                if (bases.size() > 1) {
+                    r.hint = "多节点共 " + bases.size() + " 个，本次使用 " + base;
                 }
-                if (skipSystem && index.startsWith(".")) {
-                    continue;
-                }
-                LhRemoteInventoryItem m = new LhRemoteInventoryItem();
-                m.name = index;
-                m.engine = "elasticsearch";
-                m.encoding = "UTF-8";
-                String docs = row.getStr("docs.count");
-                String store = row.getStr("store.size");
-                m.comment = "docs=" + StrUtil.blankToDefault(docs, "?")
-                        + ", size=" + StrUtil.blankToDefault(store, "?");
-                if (StrUtil.isNotBlank(docs) && StrUtil.isNumeric(docs)) {
-                    m.rowCount = Long.parseLong(docs);
-                }
-                items.add(m);
-            }
-            return LhInventoryDiscoverResult.remote("es_cat", LhInventoryObjectKinds.INDEX, items);
+                return r;
+            });
         } catch (CommonException e) {
             throw e;
         } catch (Exception e) {
@@ -154,23 +120,6 @@ public class LhEsInventoryDiscoverer implements LhInventoryDiscoverer {
         }
     }
 
-    private static boolean useHttps(Map<String, Object> secret, String host) {
-        if (StrUtil.startWithIgnoreCase(host, "https://")) {
-            return true;
-        }
-        if (StrUtil.startWithIgnoreCase(host, "http://")) {
-            return false;
-        }
-        String ssl = first(secret, "ssl", "secure", "https");
-        if (StrUtil.isBlank(ssl)) {
-            return false;
-        }
-        String s = ssl.toLowerCase(Locale.ROOT);
-        return s.contains("开启") || s.contains("启用") || "true".equals(s) || "yes".equals(s)
-                || "1".equals(s) || "https".equals(s) || "ssl".equals(s);
-    }
-
-    /** 默认跳过 `.` 开头系统索引；Vault skipSystemIndices=false / includeSystem=true 可关闭 */
     private static boolean skipSystemIndices(Map<String, Object> secret) {
         String skip = first(secret, "skipSystemIndices", "skipSystem");
         if (StrUtil.isNotBlank(skip)) {
@@ -183,26 +132,6 @@ public class LhEsInventoryDiscoverer implements LhInventoryDiscoverer {
             return !("true".equals(s) || "1".equals(s) || "yes".equals(s) || s.contains("开启"));
         }
         return true;
-    }
-
-    private static void trustAll(HttpRequest req) {
-        try {
-            TrustManager[] trustAllCerts = new TrustManager[]{new X509TrustManager() {
-                public void checkClientTrusted(X509Certificate[] c, String a) {
-                }
-
-                public void checkServerTrusted(X509Certificate[] c, String a) {
-                }
-
-                public X509Certificate[] getAcceptedIssuers() {
-                    return new X509Certificate[0];
-                }
-            }};
-            SSLContext sc = SSLContext.getInstance("TLS");
-            sc.init(null, trustAllCerts, new java.security.SecureRandom());
-            req.setSSLSocketFactory(sc.getSocketFactory());
-        } catch (Exception ignored) {
-        }
     }
 
     private static String first(Map<String, Object> m, String... keys) {

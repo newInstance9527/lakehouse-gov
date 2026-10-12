@@ -82,6 +82,18 @@ public class LhDatasourceConnNormalizer {
         String host = first(c, "host", "bootstrap", "bootstrapServers", "endpoint",
                 "nameNode", "serviceUrl", "zkQuorum", "baseURL", "httpUrl");
         String port = first(c, "port");
+        // Redis Cluster/Sentinel、ES 多节点：仅填 nodes 时取首节点写入 endpoint 展示
+        if (StrUtil.isBlank(host)) {
+            String nodes = first(c, "nodes", "hosts", "clusterNodes", "sentinels", "endpoints");
+            if (StrUtil.isNotBlank(nodes)) {
+                String firstNode = nodes.split("[,;\\s]+")[0].trim()
+                        .replaceFirst("^https?://", "")
+                        .replaceFirst("^redis(s)?://", "");
+                if (StrUtil.isNotBlank(firstNode)) {
+                    host = firstNode;
+                }
+            }
+        }
 
         // HTTP API：以 Base URL 为准拆 hostname/port，避免 URL 内端口与表单 port 冲突
         HttpEndpoint http = parseHttpEndpoint(StrUtil.isNotBlank(baseUrl) ? baseUrl : null);
