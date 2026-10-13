@@ -135,6 +135,8 @@ public class IgEtlServiceImpl implements IgEtlService {
     private ConsumerBindingSyncGate consumerBindingSyncGate;
     @Resource
     private LhDatasourceMapper datasourceMapper;
+    @Resource
+    private vip.xiaonuo.lh.core.vault.LhVaultClient vaultClient;
 
     @Override
     public Page<Map<String, Object>> pageDags(IgEtlPageParam param) {
@@ -646,6 +648,10 @@ public class IgEtlServiceImpl implements IgEtlService {
         trialWf.put("runId", runId);
         trialWf.put("trial", true);
         Map<String, Object> vaultFx = vaultInjector.enrichWorkflow(trialWf, nodes);
+        if (Boolean.TRUE.equals(vaultFx.get("stagingBlocked"))) {
+            throw new CommonException("中间表未就绪（stagingAutoCreate=false 且表不存在）："
+                    + str(firstStagingMessage(vaultFx), "请开启自动创建或由 DBA 预建 lh_ods_*/lh_clean_*"));
+        }
         Map<String, Object> dsResp = dsClient.createOrUpdateWorkflow(trialWf);
         String wfCode = str(dsResp.get("workflowCode"), str(trialWf.get("workflowCode"), null));
         run.setDsRunId(wfCode);
@@ -965,6 +971,10 @@ public class IgEtlServiceImpl implements IgEtlService {
         String preferredCode = StrUtil.blankToDefault(dag.getDsWorkflowCode(), "WF_" + dag.getDagCode());
         Map<String, Object> workflow = DsWorkflowBuilder.build(dag, nodes, edges, plan, preferredCode);
         Map<String, Object> vaultFx = vaultInjector.enrichWorkflow(workflow, nodes);
+        if (Boolean.TRUE.equals(vaultFx.get("stagingBlocked"))) {
+            throw new CommonException("中间表未就绪（stagingAutoCreate=false 且表不存在）："
+                    + str(firstStagingMessage(vaultFx), "请开启自动创建或由 DBA 预建 lh_ods_*/lh_clean_*"));
+        }
         Map<String, Object> sinkFx = sinkTargetChecker.applyOnDeploy(dag, nodes, workflow);
         Map<String, Object> dsResp = dsClient.createOrUpdateWorkflow(workflow);
 
@@ -2216,6 +2226,61 @@ public class IgEtlServiceImpl implements IgEtlService {
             return "DS_SQL";
         }
         return "DS_SHELL";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String firstStagingMessage(Map<String, Object> vaultFx) {
+        if (vaultFx == null) {
+            return null;
+        }
+        Object staging = vaultFx.get("staging");
+        if (staging instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Map<?, ?> m) {
+            Object msg = m.get("message");
+            return msg == null ? null : String.valueOf(msg);
+        }
+        Object notes = vaultFx.get("notes");
+        if (notes instanceof List<?> nl && !nl.isEmpty()) {
+            return String.valueOf(nl.get(0));
+        }
+        return null;
+    }
+
+    @Override
+    public Map<String, Object> stagingCleanup(Map<String, Object> body) {
+        if (body == null) {
+            return Map.of("ok", false, "message", "body required");
+        }
+        String dsId = str(body.get("dsId"), null);
+        String mode = str(body.get("mode"), "none");
+        String database = str(body.get("database"), null);
+        String ods = str(body.get("odsTable"), null);
+        String clean = str(body.get("cleanTable"), null);
+        if (StrUtil.isBlank(dsId) || "none".equalsIgnoreCase(mode)) {
+            return Map.of("ok", true, "skipped", true);
+        }
+        LhDatasource ds = datasourceMapper.selectById(dsId);
+        if (ds == null || StrUtil.isBlank(ds.getVaultPath())) {
+            return Map.of("ok", false, "message", "数据源或 Vault 不可用");
+        }
+        Map<String, Object> secret = vaultClient.readOrEmpty(ds.getVaultPath());
+        Object url = secret.get("jdbcUrl") != null ? secret.get("jdbcUrl") : secret.get("url");
+        Object u = secret.get("username") != null ? secret.get("username") : secret.get("user");
+        Object p = secret.get("password");
+        if (url == null || u == null) {
+            return Map.of("ok", false, "message", "Vault 无 jdbcUrl/user");
+        }
+        if (StrUtil.isBlank(database)) {
+            database = ds.getDatabaseName();
+        }
+        vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.cleanupMysqlFamily(
+                ds, String.valueOf(url), String.valueOf(u),
+                p == null ? null : String.valueOf(p), database, ods, clean, mode);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("mode", mode);
+        out.put("odsTable", ods);
+        out.put("cleanTable", clean);
+        return out;
     }
 
     private String str(Object o, String def) {

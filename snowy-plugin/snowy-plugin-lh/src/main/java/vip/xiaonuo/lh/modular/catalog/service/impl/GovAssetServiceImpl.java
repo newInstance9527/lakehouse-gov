@@ -42,6 +42,12 @@ import vip.xiaonuo.lh.modular.catalog.param.GovAssetIdParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetMetaParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetPageParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetPreviewParam;
+import vip.xiaonuo.lh.modular.catalog.param.GovAssetSchemaColumnsParam;
+import vip.xiaonuo.lh.modular.lineage.entity.GovLineageChangeEval;
+import vip.xiaonuo.lh.modular.lineage.entity.GovLineageFieldEdge;
+import vip.xiaonuo.lh.modular.lineage.mapper.GovLineageChangeEvalMapper;
+import vip.xiaonuo.lh.modular.lineage.mapper.GovLineageFieldEdgeMapper;
+import vip.xiaonuo.lh.modular.lineage.service.GovLineageService;
 import vip.xiaonuo.lh.modular.catalog.preview.GovAssetPreviewContext;
 import vip.xiaonuo.lh.modular.catalog.preview.GovAssetPreviewRouter;
 import vip.xiaonuo.lh.modular.catalog.preview.PreviewAdapterSupport;
@@ -127,6 +133,12 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
     private vip.xiaonuo.lh.core.user.LhUserNameResolver userNameResolver;
     @Resource
     private vip.xiaonuo.lh.modular.domain.service.GovDomainService govDomainService;
+    @Resource
+    private GovLineageService govLineageService;
+    @Resource
+    private GovLineageFieldEdgeMapper lineageFieldEdgeMapper;
+    @Resource
+    private GovLineageChangeEvalMapper lineageChangeEvalMapper;
 
     @Override
     public Page<GovAssetVo> page(GovAssetPageParam param) {
@@ -243,6 +255,229 @@ public class GovAssetServiceImpl extends ServiceImpl<GovAssetMapper, GovAsset> i
         Map<String, LhDatasource> dsMap = loadDatasources(
                 links.stream().map(GovAssetSourceLink::getDsId).toList());
         return loadSchemaInternal(asset, links, dsMap);
+    }
+
+    @Override
+    public Map<String, Object> schemaAssess(GovAssetIdParam param) {
+        GovAsset asset = requireAsset(param.getId());
+        List<GovAssetSourceLink> links = linkMapper.selectList(new QueryWrapper<GovAssetSourceLink>().lambda()
+                .eq(GovAssetSourceLink::getAssetId, asset.getId())
+                .eq(GovAssetSourceLink::getDeleteFlag, NOT_DELETE));
+        Map<String, LhDatasource> dsMap = loadDatasources(
+                links.stream().map(GovAssetSourceLink::getDsId).toList());
+        Map<String, Object> schema = loadSchemaInternal(asset, links, dsMap);
+
+        String focusTable = resolveLineageFocusTable(asset, links, schema);
+        String ws = StrUtil.blankToDefault(asset.getWs(), WS_DEFAULT);
+        boolean omReady = StrUtil.isNotBlank(asset.getOmFqn())
+                && "table".equalsIgnoreCase(resolveOmEntityType(asset));
+        boolean relational = !Boolean.FALSE.equals(schema.get("relational"))
+                && !Boolean.TRUE.equals(schema.get("skipped"));
+
+        Map<String, Integer> downByField = countFieldDownstream(focusTable, ws);
+        Set<String> approvedFields = loadApprovedStructFields(focusTable, ws);
+
+        Map<String, Object> tableImpact;
+        try {
+            tableImpact = govLineageService.impact(null, focusTable, asset.getOmFqn(), 1, 3, ws);
+        } catch (Exception e) {
+            log.warn("[catalog] schemaAssess table impact soft-fail: {}", e.getMessage());
+            tableImpact = Map.of("downCount", 0, "down", List.of());
+        }
+        int tableDown = tableImpact.get("downCount") instanceof Number n
+                ? n.intValue()
+                : 0;
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> cols = schema.get("columns") instanceof List<?> list
+                ? (List<Map<String, Object>>) list
+                : List.of();
+        List<Map<String, Object>> assessed = new ArrayList<>();
+        for (Map<String, Object> c : cols) {
+            String en = StrUtil.blankToDefault(Objects.toString(c.get("name"), null), "").trim();
+            if (en.isEmpty()) {
+                continue;
+            }
+            int fieldDown = downByField.getOrDefault(en.toLowerCase(Locale.ROOT), 0);
+            boolean hasApproved = approvedFields.contains(en.toLowerCase(Locale.ROOT));
+            boolean metaWritable = relational && omReady;
+            // 结构永不在门户执行；structWritable 仅表示「可登记变更意图」
+            boolean structIntentOk = relational && (fieldDown == 0 || hasApproved);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("enName", en);
+            row.put("cnName", StrUtil.blankToDefault(
+                    Objects.toString(c.get("displayName"), null),
+                    Objects.toString(c.get("comment"), "")));
+            row.put("description", Objects.toString(c.get("comment"), ""));
+            row.put("dataType", Objects.toString(c.get("type"), ""));
+            row.put("downstreamCount", fieldDown);
+            row.put("metaWritable", metaWritable);
+            row.put("structWritable", structIntentOk);
+            row.put("schemaEditableStructural", false);
+            row.put("hasApprovedEval", hasApproved);
+            String reason;
+            if (!relational) {
+                reason = "非关系表资产，无字段编辑";
+            } else if (!omReady) {
+                reason = "无 omFqn 或非 table 实体，请先刷新对齐 OM";
+            } else if (fieldDown > 0 && !hasApproved) {
+                reason = "有 " + fieldDown + " 个下游字段边；人读可改；结构变更须 change-eval 通过（门户不执行 DDL）";
+            } else if (fieldDown > 0) {
+                reason = "下游 " + fieldDown + "；已有批准评估单，可登记结构变更意图（外置 DDL）";
+            } else {
+                reason = "无人读下游阻断；结构变更仍须外置 Grav/引擎 DDL";
+            }
+            row.put("reason", reason);
+            assessed.add(row);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("assetId", asset.getId());
+        out.put("assetCode", asset.getAssetCode());
+        out.put("focusTable", focusTable);
+        out.put("omFqn", asset.getOmFqn());
+        out.put("omReady", omReady);
+        out.put("relational", relational);
+        out.put("schemaSource", schema.get("source"));
+        out.put("tableDownstreamCount", tableDown);
+        out.put("schemaEditableStructural", false);
+        out.put("hint", "结构 SoT=Gravitino；门户仅写 OM 列人读；结构变更走血缘评估后外置 DDL");
+        out.put("changeEvalApi", "POST /lh/lineage/change-eval");
+        out.put("columns", assessed);
+        out.put("columnCount", assessed.size());
+        return out;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> updateSchemaColumns(GovAssetSchemaColumnsParam param) {
+        GovAsset asset = requireAsset(param.getId());
+        secAuthGrantService.assertCanEditAsset(asset);
+        if (StrUtil.isBlank(asset.getOmFqn())) {
+            throw new CommonException("资产尚未对齐 OM（无 omFqn），请先 refresh");
+        }
+        if (!"table".equalsIgnoreCase(resolveOmEntityType(asset))) {
+            throw new CommonException("仅 table 实体支持列人读写");
+        }
+        Map<String, Map<String, String>> patches = new LinkedHashMap<>();
+        for (GovAssetSchemaColumnsParam.ColumnMeta col : param.getColumns()) {
+            if (col == null || StrUtil.isBlank(col.getEnName())) {
+                continue;
+            }
+            Map<String, String> p = new LinkedHashMap<>();
+            if (col.getCnName() != null) {
+                p.put("displayName", col.getCnName());
+            }
+            if (col.getDescription() != null) {
+                p.put("description", col.getDescription());
+            }
+            if (p.isEmpty()) {
+                continue;
+            }
+            patches.put(col.getEnName().trim(), p);
+        }
+        if (patches.isEmpty()) {
+            throw new CommonException("请至少提供一列的 cnName 或 description");
+        }
+        Map<String, Object> om = openMetadataClient.patchTableColumnMeta(asset.getOmFqn(), patches);
+        om.put("assetId", asset.getId());
+        om.put("assetCode", asset.getAssetCode());
+        String eventId = platOutboxService.appendSoft(
+                "catalog.asset.om_column_meta.updated",
+                "gov_asset",
+                asset.getId(),
+                Map.of("omFqn", asset.getOmFqn(), "columns", patches.keySet()),
+                Map.of("source", "POST /lh/catalog/assets/schema/columns"));
+        if (eventId != null) {
+            om.put("auditEventId", eventId);
+        }
+        return om;
+    }
+
+    private String resolveLineageFocusTable(GovAsset asset, List<GovAssetSourceLink> links,
+                                            Map<String, Object> schema) {
+        if (schema != null) {
+            String t = Objects.toString(schema.get("table"), null);
+            String s = Objects.toString(schema.get("schema"), null);
+            if (StrUtil.isNotBlank(t) && StrUtil.isNotBlank(s)) {
+                return s + "." + t;
+            }
+            if (StrUtil.isNotBlank(t)) {
+                return t;
+            }
+        }
+        if (links != null && !links.isEmpty()) {
+            GovAssetSourceLink p = links.stream()
+                    .filter(l -> LINK_PRIMARY.equals(l.getLinkRole()))
+                    .findFirst().orElse(links.get(0));
+            if (StrUtil.isNotBlank(p.getObjectName())) {
+                return p.getObjectName().trim();
+            }
+        }
+        return StrUtil.blankToDefault(asset.getAssetCode(), asset.getName());
+    }
+
+    private Map<String, Integer> countFieldDownstream(String focusTable, String ws) {
+        Map<String, Integer> counts = new HashMap<>();
+        if (StrUtil.isBlank(focusTable)) {
+            return counts;
+        }
+        String tableBare = focusTable.contains(".")
+                ? focusTable.substring(focusTable.lastIndexOf('.') + 1)
+                : focusTable;
+        List<GovLineageFieldEdge> edges = lineageFieldEdgeMapper.selectList(
+                new QueryWrapper<GovLineageFieldEdge>().lambda()
+                        .eq(StrUtil.isNotBlank(ws), GovLineageFieldEdge::getWs, ws)
+                        .eq(GovLineageFieldEdge::getDeleteFlag, NOT_DELETE));
+        for (GovLineageFieldEdge e : edges) {
+            String from = StrUtil.blankToDefault(e.getFromTable(), "");
+            if (!tableMatch(from, focusTable, tableBare)) {
+                continue;
+            }
+            String field = StrUtil.blankToDefault(e.getFromField(), "").trim().toLowerCase(Locale.ROOT);
+            if (field.isEmpty() || "*".equals(field)) {
+                continue;
+            }
+            counts.merge(field, 1, Integer::sum);
+        }
+        return counts;
+    }
+
+    private static boolean tableMatch(String fromTable, String focusTable, String bare) {
+        if (StrUtil.isBlank(fromTable)) {
+            return false;
+        }
+        String f = fromTable.trim();
+        if (f.equalsIgnoreCase(focusTable) || f.equalsIgnoreCase(bare)) {
+            return true;
+        }
+        String fBare = f.contains(".") ? f.substring(f.lastIndexOf('.') + 1) : f;
+        return fBare.equalsIgnoreCase(bare);
+    }
+
+    private Set<String> loadApprovedStructFields(String focusTable, String ws) {
+        Set<String> out = new HashSet<>();
+        if (StrUtil.isBlank(focusTable)) {
+            return out;
+        }
+        String bare = focusTable.contains(".")
+                ? focusTable.substring(focusTable.lastIndexOf('.') + 1)
+                : focusTable;
+        List<GovLineageChangeEval> rows = lineageChangeEvalMapper.selectList(
+                new QueryWrapper<GovLineageChangeEval>().lambda()
+                        .eq(StrUtil.isNotBlank(ws), GovLineageChangeEval::getWs, ws)
+                        .eq(GovLineageChangeEval::getStatus, "approved")
+                        .eq(GovLineageChangeEval::getDeleteFlag, NOT_DELETE)
+                        .eq(GovLineageChangeEval::getPassed, 1));
+        for (GovLineageChangeEval row : rows) {
+            if (!tableMatch(row.getTableName(), focusTable, bare)) {
+                continue;
+            }
+            if (StrUtil.isNotBlank(row.getFieldName())) {
+                out.add(row.getFieldName().trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        return out;
     }
 
     @Override

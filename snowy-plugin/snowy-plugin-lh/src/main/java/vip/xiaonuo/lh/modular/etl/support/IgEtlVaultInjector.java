@@ -58,7 +58,9 @@ public class IgEtlVaultInjector {
         int missingVault = 0;
         int noDsId = 0;
         int columnsFilled = 0;
+        boolean stagingBlocked = false;
         List<String> notes = new ArrayList<>();
+        List<Map<String, Object>> stagingResults = new ArrayList<>();
 
         Object tasksObj = workflow.get("tasks");
         if (!(tasksObj instanceof List<?> tasks) || tasks.isEmpty()) {
@@ -277,16 +279,16 @@ public class IgEtlVaultInjector {
                     conf.set("_lhColumns", arr);
                     taskParams.put("lhColumnCount", cols.size());
                     columnsFilled++;
-                    // 源→清洗→入库：预建 lh_ods_* / lh_clean_*（Flink JDBC sink 不建物理表）
+                    // 源→清洗→入库：预建或预检 lh_ods_* / lh_clean_*
                     if (IgEtlNodeTypes.SOURCE.contains(nodeType) && StrUtil.isNotBlank(landingTable)) {
                         String jdbcUrl = firstNonBlank(conf.getStr("lhJdbcUrl"), conf.getStr("jdbcUrl"));
                         String u = firstNonBlank(conf.getStr("lhJdbcUser"), conf.getStr("user"));
                         String pw = firstNonBlank(conf.getStr("lhJdbcPassword"), conf.getStr("password"));
-                        // secret 尚未读：后面 Vault 段再 ensure 一次；此处有明文则先建
                         if (StrUtil.isNotBlank(jdbcUrl) && StrUtil.isNotBlank(u)) {
-                            LhStagingDdlEnsured.ensureMysqlFamily(ds, jdbcUrl, u, pw,
-                                    conf.getStr("database"), LhStagingTables.bareTable(colTable), cols);
-                            taskParams.put("_lhStagingColsReady", true);
+                            if (!applyStagingEnsure(ds, jdbcUrl, u, pw, conf, cols, nodeKey, notes,
+                                    taskParams, stagingResults)) {
+                                stagingBlocked = true;
+                            }
                         }
                     }
                 }
@@ -418,12 +420,11 @@ public class IgEtlVaultInjector {
                         cols = FlinkSourceSqlCompiler.columnsFromConf(conf);
                     }
                     if (url != null && u != null && !cols.isEmpty()) {
-                        LhStagingDdlEnsured.ensureMysqlFamily(ds, String.valueOf(url), String.valueOf(u),
-                                p == null ? null : String.valueOf(p),
-                                conf.getStr("database"),
-                                LhStagingTables.bareTable(firstNonBlank(conf.getStr("table"), conf.getStr("src"))),
-                                cols);
-                        taskParams.put("_lhStagingColsReady", true);
+                        if (!applyStagingEnsure(ds, String.valueOf(url), String.valueOf(u),
+                                p == null ? null : String.valueOf(p), conf, cols, nodeKey, notes,
+                                taskParams, stagingResults)) {
+                            stagingBlocked = true;
+                        }
                     }
                 }
             }
@@ -551,11 +552,51 @@ public class IgEtlVaultInjector {
         summary.put("missingVault", missingVault);
         summary.put("noDsId", noDsId);
         summary.put("columnsFilled", columnsFilled);
+        summary.put("stagingBlocked", stagingBlocked);
+        if (!stagingResults.isEmpty()) {
+            summary.put("staging", stagingResults.size() > 4 ? stagingResults.subList(0, 4) : stagingResults);
+        }
         if (!notes.isEmpty()) {
             summary.put("notes", notes.size() > 8 ? notes.subList(0, 8) : notes);
         }
         workflow.put("vaultInjection", summary);
         return summary;
+    }
+
+    /**
+     * @return false 表示应阻断发布（预建关闭且表不存在，或自动建表失败）
+     */
+    private boolean applyStagingEnsure(
+            LhDatasource ds, String jdbcUrl, String user, String password, JSONObject conf,
+            List<FlinkSourceSqlCompiler.Column> cols, String nodeKey, List<String> notes,
+            Map<String, Object> taskParams, List<Map<String, Object>> stagingResults) {
+        if (Boolean.TRUE.equals(taskParams.get("_lhStagingColsReady"))) {
+            return true;
+        }
+        String database = firstNonBlank(conf.getStr("database"), conf.getStr("lhDatabase"), ds.getDatabaseName());
+        String bare = LhStagingTables.bareTable(firstNonBlank(conf.getStr("table"), conf.getStr("src")));
+        LhStagingDdlEnsured.ResolvedTables rt = LhStagingDdlEnsured.resolveTables(database, bare, conf, null);
+        boolean autoCreate = LhStagingDdlEnsured.isAutoCreate(conf);
+        LhStagingDdlEnsured.EnsureResult er = LhStagingDdlEnsured.ensureMysqlFamilyDetailed(
+                ds, jdbcUrl, user, password, database, rt.landingBare, rt.cleanBare, cols, autoCreate);
+        Map<String, Object> one = LhStagingDdlEnsured.toMap(er);
+        one.put("nodeKey", nodeKey);
+        stagingResults.add(one);
+        conf.set("_lhLandingTable", rt.landingQualified);
+        conf.set("_lhCleanTable", rt.cleanQualified);
+        taskParams.put("lhLandingTable", rt.landingQualified);
+        taskParams.put("lhCleanTable", rt.cleanQualified);
+        if (er.ok) {
+            taskParams.put("_lhStagingColsReady", true);
+            return true;
+        }
+        notes.add(nodeKey + ": " + er.message);
+        if (StrUtil.isNotBlank(er.ddlHint)) {
+            notes.add(nodeKey + ": ddlHint → 见 sideEffects.vault.staging");
+            taskParams.put("_lhStagingDdlHint", er.ddlHint);
+        }
+        // 自动创建失败仍 soft（兼容旧行为）；关闭自动创建且缺表则阻断
+        return autoCreate;
     }
 
     private void fillDsIntoConf(LhDatasource ds, JSONObject conf, Map<String, Object> taskParams, String role,

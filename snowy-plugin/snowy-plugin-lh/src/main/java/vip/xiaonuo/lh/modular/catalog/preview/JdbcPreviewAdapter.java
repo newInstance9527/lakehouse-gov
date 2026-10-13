@@ -20,9 +20,9 @@ import org.springframework.stereotype.Component;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.support.LhIcebergNamespaceNames;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcConnections;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.Statement;
@@ -91,7 +91,7 @@ public class JdbcPreviewAdapter implements GovAssetPreviewAdapter {
             }
             List<String> columns = new ArrayList<>();
             List<Map<String, Object>> rows = new ArrayList<>();
-            try (Connection conn = DriverManager.getConnection(url, user, pwd);
+            try (Connection conn = LhJdbcConnections.open(ds.getType(), url, user, pwd);
                  Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery(sql)) {
                 ResultSetMetaData md = rs.getMetaData();

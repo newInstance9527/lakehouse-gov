@@ -53,6 +53,7 @@ import vip.xiaonuo.lh.modular.datasource.result.LhDsTableVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhMetaColumnVo;
 import vip.xiaonuo.lh.modular.datasource.result.LhMetaObjectVo;
 import vip.xiaonuo.lh.modular.datasource.support.LhDatasourceProtocolProbe;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcConnections;
 import vip.xiaonuo.lh.modular.datasource.support.LhJdbcMetaBrowser;
 import vip.xiaonuo.lh.modular.datasource.support.LhJdbcUrlBuilder;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceGravitinoProjector;
@@ -63,7 +64,6 @@ import vip.xiaonuo.lh.modular.datasource.service.LhPortalInventoryOmBridge;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
@@ -238,9 +238,17 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         entity.setLagDesc(StrUtil.blankToDefault(param.getLag(), n.accessMode));
         entity.setAssetName(param.getAsset());
         entity.setVer("v1.0");
-        entity.setHealthScore(100);
+        boolean draft = LhDatasourceStatusEnum.DRAFT.getValue()
+                .equalsIgnoreCase(StrUtil.blankToDefault(param.getStatus(), ""));
+        if (draft) {
+            LhDatasourceStatusEnum.validate(LhDatasourceStatusEnum.DRAFT.getValue());
+            entity.setStatus(LhDatasourceStatusEnum.DRAFT.getValue());
+            entity.setHealthScore(0);
+        } else {
+            entity.setHealthScore(100);
+            entity.setStatus(LhDatasourceStatusEnum.ONLINE.getValue());
+        }
         entity.setPurposes(connNormalizer.mapPurposes(param.getPurpose(), null));
-        entity.setStatus(LhDatasourceStatusEnum.ONLINE.getValue());
         entity.setEndpointHost(n.host);
         entity.setEndpointPort(n.port);
         entity.setDatabaseName(n.database);
@@ -255,8 +263,10 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         vaultClient.write(entity.getVaultPath(), secret);
         this.save(entity);
         seedTablesFromSummary(entity);
-        // Grav Catalog ? ????? ? OM?soft-fail???????
-        postRegisterBridge.afterPersist(entity);
+        // 草稿仅落库+Vault，跳过引擎投影/元数据同步（测连通过后再编排）
+        if (!draft) {
+            postRegisterBridge.afterPersist(entity);
+        }
         return enrichVo(viewAssembler.toVo(this.getById(entity.getId())));
     }
 
@@ -358,11 +368,25 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         if (StrUtil.isNotBlank(param.getSchema())) {
             entity.setSchemaSummary(param.getSchema());
         }
+        boolean stayDraft = false;
+        if (StrUtil.isNotBlank(param.getStatus())) {
+            LhDatasourceStatusEnum.validate(param.getStatus());
+            entity.setStatus(param.getStatus());
+            if (LhDatasourceStatusEnum.DRAFT.getValue().equals(param.getStatus())) {
+                entity.setHealthScore(0);
+                stayDraft = true;
+            } else if (LhDatasourceStatusEnum.ONLINE.getValue().equals(param.getStatus())) {
+                entity.setHealthScore(100);
+            }
+        } else if (LhDatasourceStatusEnum.DRAFT.getValue().equals(entity.getStatus())) {
+            stayDraft = true;
+        }
         entity.setRevision(Optional.ofNullable(entity.getRevision()).orElse(1) + 1);
         bumpVer(entity);
         this.updateById(entity);
-        // ??????? Grav / ??? / OM?soft-fail?
-        postRegisterBridge.afterPersist(entity);
+        if (!stayDraft) {
+            postRegisterBridge.afterPersist(entity);
+        }
         return enrichVo(viewAssembler.toVo(this.getById(entity.getId())));
     }
 
@@ -460,7 +484,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(typeCode).orElse(null);
 
             if (typeEnum != null && typeEnum.isJdbc()) {
-                ensureJdbcDriver(typeCode);
+                LhJdbcConnections.ensureDriver(typeCode);
                 String url = buildJdbcUrl(typeCode, n, conn);
                 if (StrUtil.isBlank(url)) {
                     throw new CommonException("无法拼装 JDBC URL，请检查 host/port/database");
@@ -474,16 +498,16 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                     throw new CommonException("请填写密码");
                 }
                 try (Connection c = hiveKerberos
-                        ? DriverManager.getConnection(url)
-                        : DriverManager.getConnection(url, n.user, n.password);
+                        ? LhJdbcConnections.open(typeCode, url, null, null)
+                        : LhJdbcConnections.open(typeCode, url, n.user, n.password);
                      Statement st = c.createStatement()) {
                     st.setQueryTimeout(8);
                     st.execute("SELECT 1");
                 } catch (java.sql.SQLException jdbcEx) {
                     String msg = StrUtil.blankToDefault(jdbcEx.getMessage(), "");
-                    if (msg.contains("No suitable driver")) {
+                    if (msg.contains("No suitable driver") || msg.contains("JDBC 驱动不可用")) {
                         probeTcp(n.host, n.port, typeCode);
-                        result.put("warning", "缺少 " + typeCode + " JDBC 驱动，已降级 TCP 探测");
+                        result.put("warning", "缺少或损坏 " + typeCode + " JDBC 驱动，已降级 TCP 探测");
                     } else {
                         throw jdbcEx;
                     }
@@ -531,21 +555,33 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             result.putIfAbsent("ok", true);
             result.put("costMs", System.currentTimeMillis() - start);
             if (existing != null) {
+                boolean wasDraft = LhDatasourceStatusEnum.DRAFT.getValue().equals(existing.getStatus());
                 existing.setLastOkAt(new Date());
                 existing.setStatus(LhDatasourceStatusEnum.ONLINE.getValue());
                 existing.setHealthScore(100);
                 this.updateById(existing);
+                if (wasDraft) {
+                    try {
+                        postRegisterBridge.afterPersist(existing);
+                    } catch (Exception bridgeEx) {
+                        log.warn("draft promote afterPersist soft-fail dsId={}: {}",
+                                existing.getId(), bridgeEx.getMessage());
+                    }
+                }
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // LinkageError/NoClassDefFoundError 等不能当 Exception 吞掉，否则冒泡成 ServletException
             result.put("ok", false);
-            result.put("error", e.getMessage());
+            result.put("error", StrUtil.blankToDefault(e.getMessage(), e.toString()));
             result.put("costMs", System.currentTimeMillis() - start);
             if (StrUtil.isNotBlank(param.getId())) {
                 try {
                     LhDatasource ds = queryEntity(param.getId());
-                    ds.setStatus(LhDatasourceStatusEnum.WARN.getValue());
-                    ds.setHealthScore(40);
-                    this.updateById(ds);
+                    if (!LhDatasourceStatusEnum.DRAFT.getValue().equals(ds.getStatus())) {
+                        ds.setStatus(LhDatasourceStatusEnum.WARN.getValue());
+                        ds.setHealthScore(40);
+                        this.updateById(ds);
+                    }
                 } catch (Exception ignored) {
                 }
             }
@@ -588,7 +624,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                 String url = String.valueOf(secret.getOrDefault("jdbcUrl", ""));
                 String user = String.valueOf(secret.getOrDefault("username", ""));
                 String pwd = String.valueOf(secret.getOrDefault("password", ""));
-                try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
+                try (Connection conn = LhJdbcConnections.open(ds.getType(), url, user, pwd)) {
                     DatabaseMetaData meta = conn.getMetaData();
                     List<String> tableNames = new ArrayList<>();
                     for (LhDsTable t : registered) {
@@ -833,12 +869,14 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
         long online = all.stream().filter(d -> LhDatasourceStatusEnum.ONLINE.getValue().equals(d.getStatus())).count();
         long warn = all.stream().filter(d -> LhDatasourceStatusEnum.WARN.getValue().equals(d.getStatus())).count();
         long paused = all.stream().filter(d -> LhDatasourceStatusEnum.PAUSED.getValue().equals(d.getStatus())).count();
+        long draft = all.stream().filter(d -> LhDatasourceStatusEnum.DRAFT.getValue().equals(d.getStatus())).count();
         long typeCount = all.stream().map(LhDatasource::getType).filter(StrUtil::isNotBlank).distinct().count();
         Map<String, Object> kpi = new LinkedHashMap<>();
         kpi.put("total", all.size());
         kpi.put("online", online);
         kpi.put("warn", warn);
         kpi.put("paused", paused);
+        kpi.put("draft", draft);
         kpi.put("typeCount", typeCount);
         return kpi;
     }
@@ -1264,7 +1302,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             probe.setType(typeCode);
             probe.setDatabaseName(n.database);
         }
-        try (Connection c = DriverManager.getConnection(url, n.user, n.password)) {
+        try (Connection c = LhJdbcConnections.open(typeCode, url, n.user, n.password)) {
             Map<String, Object> secret = new LinkedHashMap<>(conn);
             secret.put("database", n.database);
             List<RemoteTableMeta> metas;
@@ -1330,7 +1368,7 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
             if (StrUtil.isBlank(url)) {
                 throw new CommonException("Vault ??? jdbcUrl");
             }
-            try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
+            try (Connection conn = LhJdbcConnections.open(type, url, user, pwd)) {
                 List<RemoteTableMeta> metas;
                 if ("mysql".equals(type) || "doris".equals(type) || "starrocks".equals(type)) {
                     metas = discoverMysqlTables(conn, secret, ds);
@@ -1816,29 +1854,6 @@ public class LhDatasourceServiceImpl extends ServiceImpl<LhDatasourceMapper, LhD
                 n != null ? n.database : null,
                 n != null ? n.extra : null,
                 conn);
-    }
-
-    /** 显式加载驱动，避免部分环境下 SPI 未注册 */
-    private void ensureJdbcDriver(String typeCode) {
-        String t = StrUtil.blankToDefault(typeCode, "").toLowerCase(Locale.ROOT);
-        String cls = switch (t) {
-            case "mysql", "mariadb", "doris", "starrocks" -> "com.mysql.cj.jdbc.Driver";
-            case "postgresql", "pg" -> "org.postgresql.Driver";
-            case "oracle" -> "oracle.jdbc.OracleDriver";
-            case "sqlserver" -> "com.microsoft.sqlserver.jdbc.SQLServerDriver";
-            case "clickhouse" -> "com.clickhouse.jdbc.ClickHouseDriver";
-            case "trino" -> "io.trino.jdbc.TrinoDriver";
-            case "hive" -> "org.apache.hive.jdbc.HiveDriver";
-            default -> null;
-        };
-        if (cls == null) {
-            return;
-        }
-        try {
-            Class.forName(cls);
-        } catch (ClassNotFoundException e) {
-            log.warn("JDBC driver missing type={} class={}: {}", t, cls, e.getMessage());
-        }
     }
 
     private void seedTablesFromSummary(LhDatasource entity) {

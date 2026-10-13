@@ -44,7 +44,7 @@ public class GovAiAgentOrchestrator {
                并给出 Markdown 链接到 applyHref；禁止声称「已有权限」。可用 create_apply_ticket 代填申请。
             3. 区分「目录可见」与「我可查」两平面，禁止混说；以工具 JSON 为准，禁止编造表数量/口径/授权。
             4. 以会话摘要与近期对话轮次为准；勿编造未出现过的表名、权限或结论。
-            5. 不自动执行 SQL；不做系统管理；不代建数据源/发布/删除。
+            5. 不自动执行 SQL；不做系统管理；不发布/删除。数据源可用 register_datasource / ds_connectivity / sync_source_tables（凭用户提供的连接信息，勿编造密钥）。
             6. 最终用简洁中文 Markdown 回答；站内深链如 [申请表读权](/apply?type=perm&assetId=...)。
             """;
 

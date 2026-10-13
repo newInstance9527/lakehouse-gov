@@ -17,6 +17,7 @@ import vip.xiaonuo.lh.modular.catalog.preview.PreviewAdapterSupport;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
 import vip.xiaonuo.lh.modular.datasource.support.LhIcebergNamespaceNames;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcConnections;
 import vip.xiaonuo.lh.modular.quality.entity.GovDqRule;
 import vip.xiaonuo.lh.modular.schemasync.entity.CbGravAssetRef;
 import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
@@ -24,7 +25,6 @@ import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.Statement;
@@ -221,7 +221,7 @@ public class GovDqRuleProbeService {
             return d;
         }
         List<Map<String, Object>> rows = new ArrayList<>();
-        try (Connection conn = DriverManager.getConnection(url, user, StrUtil.nullToEmpty(pwd));
+        try (Connection conn = LhJdbcConnections.open(target.dsType, url, user, StrUtil.nullToEmpty(pwd));
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
@@ -286,6 +286,7 @@ public class GovDqRuleProbeService {
             }
             t.engine = "jdbc";
             t.dialect = jdbcDialect(ds);
+            t.dsType = ds.getType();
             t.vaultPath = ds.getVaultPath();
             t.qualifiedSql = jdbcTableRef(obj, ds);
             return t;
@@ -538,6 +539,8 @@ public class GovDqRuleProbeService {
     private static final class Target {
         String engine;
         String dialect;
+        /** 门户数据源 typeCode，供 LhJdbcConnections 直连 */
+        String dsType;
         String catalog;
         String schema;
         String qualifiedSql;

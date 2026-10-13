@@ -19,6 +19,7 @@ import org.springframework.web.multipart.MultipartFile;
 import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.knowledge.param.GovKbCiteAckParam;
+import vip.xiaonuo.lh.modular.knowledge.param.GovKbEnsureTermParam;
 import vip.xiaonuo.lh.modular.knowledge.param.GovKbPageParam;
 import vip.xiaonuo.lh.modular.knowledge.param.GovKbSearchParam;
 import vip.xiaonuo.lh.modular.knowledge.param.GovKbUpsertParam;
@@ -161,5 +162,40 @@ public class GovKbController {
     @PostMapping("/lh/knowledge/memory/patrol")
     public CommonResult<Map<String, Object>> memoryPatrol() {
         return CommonResult.data(govKbService.memoryPatrol());
+    }
+
+    @Operation(summary = "业务术语只读图谱（KB term SoT）")
+    @GetMapping("/lh/knowledge/glossary/graph")
+    public CommonResult<Map<String, Object>> glossaryGraph(
+            @RequestParam(required = false) String root,
+            @RequestParam(required = false) Integer depth) {
+        return CommonResult.data(govKbService.glossaryGraph(root, depth));
+    }
+
+    @Operation(summary = "业务术语治理 KPI（覆盖率/断链率）")
+    @GetMapping("/lh/knowledge/glossary/stats")
+    public CommonResult<Map<String, Object>> glossaryStats() {
+        return CommonResult.data(govKbService.glossaryStats());
+    }
+
+    @Operation(summary = "重建术语类型化边（从 refs_json 物化）")
+    @CommonLog("重建术语边")
+    @PostMapping("/lh/knowledge/glossary/rebuild-edges")
+    public CommonResult<Map<String, Object>> rebuildGlossaryEdges() {
+        return CommonResult.data(govKbService.rebuildGlossaryEdges());
+    }
+
+    @Operation(summary = "幂等为指标补业务术语（cat=term）")
+    @CommonLog("确保指标术语")
+    @PostMapping("/lh/knowledge/glossary/ensure-term")
+    public CommonResult<Map<String, Object>> ensureTerm(@RequestBody GovKbEnsureTermParam param) {
+        return CommonResult.data(govKbService.ensureTermForMetric(param == null ? null : param.getMetricCode()));
+    }
+
+    @Operation(summary = "批量为未覆盖已启用指标补术语")
+    @CommonLog("批量确保指标术语")
+    @PostMapping("/lh/knowledge/glossary/ensure-terms-batch")
+    public CommonResult<Map<String, Object>> ensureTermsBatch() {
+        return CommonResult.data(govKbService.ensureTermsForUncovered());
     }
 }

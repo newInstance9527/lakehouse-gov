@@ -21,6 +21,7 @@ import vip.xiaonuo.lh.modular.catalog.param.GovAssetIdParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetMetaParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetPageParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetPreviewParam;
+import vip.xiaonuo.lh.modular.catalog.param.GovAssetSchemaColumnsParam;
 import vip.xiaonuo.lh.modular.catalog.result.GovAssetSourceVo;
 import vip.xiaonuo.lh.modular.catalog.result.GovAssetVo;
 
@@ -74,6 +75,16 @@ public interface GovAssetService extends IService<GovAsset> {
      * 列结构：Grav 优先，失败回退 OM
      */
     Map<String, Object> schema(GovAssetIdParam param);
+
+    /**
+     * 列可改性评估：人读 / 结构意图 + 下游字段边计数（不执行 DDL）
+     */
+    Map<String, Object> schemaAssess(GovAssetIdParam param);
+
+    /**
+     * 写 OM 列人读（cnName/description）；拒绝结构字段
+     */
+    Map<String, Object> updateSchemaColumns(GovAssetSchemaColumnsParam param);
 
     /**
      * 代理写 OM description / displayName / tags（人读 SoT）

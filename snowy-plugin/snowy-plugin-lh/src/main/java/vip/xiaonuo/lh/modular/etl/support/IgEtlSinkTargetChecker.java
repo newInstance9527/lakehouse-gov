@@ -20,6 +20,7 @@ import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDsTable;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDsTableMapper;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcConnections;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlDag;
 import vip.xiaonuo.lh.modular.etl.entity.IgEtlNode;
 import vip.xiaonuo.lh.modular.query.support.LakeQueryAssetBinder;
@@ -28,7 +29,6 @@ import vip.xiaonuo.lh.modular.schemasync.mapper.CbGravAssetRefMapper;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -363,7 +363,7 @@ public class IgEtlSinkTargetChecker {
             if (StrUtil.isBlank(url)) {
                 return ExistResult.degraded("Vault 无 jdbcUrl");
             }
-            try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
+            try (Connection conn = LhJdbcConnections.open(ds.getType(), url, user, pwd)) {
                 DatabaseMetaData md = conn.getMetaData();
                 // PostgreSQL：schema=public；MySQL：schema 常为空、catalog=库名
                 String catalog = null;

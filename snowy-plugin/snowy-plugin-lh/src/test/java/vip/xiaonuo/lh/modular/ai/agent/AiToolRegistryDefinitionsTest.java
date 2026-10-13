@@ -37,6 +37,8 @@ class AiToolRegistryDefinitionsTest {
         assertTrue(names.contains("list_etl_jobs"));
         assertTrue(names.contains("list_datasources"));
         assertTrue(names.contains("ds_connectivity"));
+        assertTrue(names.contains("register_datasource"));
+        assertTrue(names.contains("sync_source_tables"));
         assertTrue(names.contains("list_source_tables"));
         assertTrue(names.contains("query_history_mine"));
         assertTrue(names.contains("list_saved_queries"));

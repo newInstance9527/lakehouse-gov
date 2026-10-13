@@ -25,6 +25,7 @@ import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * OpenMetadata 客户端（Bot Token 来自 Vault）
@@ -1406,6 +1407,123 @@ public class OpenMetadataClient {
         r.put("displayName", updated.getStr("displayName"));
         r.put("tags", updated.get("tags"));
         r.put("entityType", collection);
+        return r;
+    }
+
+    /**
+     * 更新 OM 表列人读元数据（description / displayName），不改类型/可空等结构。
+     *
+     * @param tableFqn 表 FQN
+     * @param patches  key=列英文名；value 含 description / displayName（null=不改）
+     */
+    public Map<String, Object> patchTableColumnMeta(String tableFqn,
+                                                    Map<String, Map<String, String>> patches) {
+        if (StrUtil.isBlank(tableFqn)) {
+            throw new CommonException("OM table FQN 不能为空");
+        }
+        if (patches == null || patches.isEmpty()) {
+            throw new CommonException("列变更不能为空");
+        }
+        JSONObject existing = getCatalogEntity("table", tableFqn);
+        if (existing == null) {
+            throw new CommonException("OM 表不存在: {}", tableFqn);
+        }
+        JSONArray cols = existing.getJSONArray("columns");
+        if (cols == null || cols.isEmpty()) {
+            throw new CommonException("OM 表无列结构，请先同步 Schema");
+        }
+        Map<String, Map<String, String>> byLower = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, String>> e : patches.entrySet()) {
+            if (StrUtil.isBlank(e.getKey())) {
+                continue;
+            }
+            byLower.put(e.getKey().trim().toLowerCase(Locale.ROOT), e.getValue());
+        }
+        int touched = 0;
+        JSONArray outCols = new JSONArray();
+        Set<String> found = new HashSet<>();
+        for (int i = 0; i < cols.size(); i++) {
+            JSONObject c = cols.getJSONObject(i);
+            if (c == null) {
+                continue;
+            }
+            String name = c.getStr("name");
+            Map<String, String> p = StrUtil.isBlank(name)
+                    ? null
+                    : byLower.get(name.trim().toLowerCase(Locale.ROOT));
+            if (p != null) {
+                found.add(name.trim().toLowerCase(Locale.ROOT));
+                if (p.containsKey("description")) {
+                    c.set("description", p.get("description"));
+                    touched++;
+                }
+                if (p.containsKey("displayName")) {
+                    String dn = p.get("displayName");
+                    if (StrUtil.isBlank(dn)) {
+                        c.remove("displayName");
+                    } else {
+                        c.set("displayName", dn);
+                    }
+                    touched++;
+                }
+            }
+            outCols.add(c);
+        }
+        List<String> missing = byLower.keySet().stream()
+                .filter(k -> !found.contains(k))
+                .collect(Collectors.toList());
+        if (!missing.isEmpty()) {
+            throw new CommonException("OM 表无此列: {}", String.join(", ", missing));
+        }
+        if (touched == 0) {
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("skipped", true);
+            r.put("reason", "no_fields");
+            r.put("fqn", tableFqn);
+            return r;
+        }
+        JSONObject put = new JSONObject();
+        put.set("name", existing.getStr("name"));
+        put.set("tableType", existing.getStr("tableType", "Regular"));
+        put.set("columns", outCols);
+        String schemaFqn = existing.getStr("databaseSchema");
+        if (StrUtil.isBlank(schemaFqn) && existing.getJSONObject("databaseSchema") != null) {
+            schemaFqn = existing.getJSONObject("databaseSchema").getStr("fullyQualifiedName");
+        }
+        if (StrUtil.isBlank(schemaFqn)) {
+            // FQN = service.db.schema.table
+            String[] parts = tableFqn.split("\\.");
+            if (parts.length >= 4) {
+                schemaFqn = parts[0] + "." + parts[1] + "." + parts[2];
+            }
+        }
+        if (StrUtil.isNotBlank(schemaFqn)) {
+            put.set("databaseSchema", schemaFqn);
+        }
+        if (StrUtil.isNotBlank(existing.getStr("description"))) {
+            put.set("description", existing.getStr("description"));
+        }
+        if (StrUtil.isNotBlank(existing.getStr("displayName"))) {
+            put.set("displayName", existing.getStr("displayName"));
+        }
+        if (existing.get("owners") != null) {
+            put.set("owners", existing.get("owners"));
+        }
+        if (existing.get("tags") != null) {
+            put.set("tags", existing.get("tags"));
+        }
+        if (existing.get("extension") != null) {
+            put.set("extension", existing.get("extension"));
+        }
+        String body = authPut("/api/v1/tables", put.toString());
+        JSONObject updated = JSONUtil.parseObj(body);
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("ok", true);
+        r.put("fqn", updated.getStr("fullyQualifiedName", tableFqn));
+        r.put("omId", updated.getStr("id"));
+        r.put("omRevision", updated.getStr("version"));
+        r.put("columnsUpdated", found.size());
+        r.put("entityType", "tables");
         return r;
     }
 

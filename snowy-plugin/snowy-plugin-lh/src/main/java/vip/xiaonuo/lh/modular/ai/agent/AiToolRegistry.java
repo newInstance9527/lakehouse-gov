@@ -33,6 +33,7 @@ import vip.xiaonuo.lh.modular.contract.service.ContractService;
 import vip.xiaonuo.lh.modular.dataapi.entity.DataapiApiBinding;
 import vip.xiaonuo.lh.modular.dataapi.param.DataapiPageParam;
 import vip.xiaonuo.lh.modular.dataapi.service.DataapiService;
+import vip.xiaonuo.lh.modular.datasource.param.LhDatasourceAddParam;
 import vip.xiaonuo.lh.modular.datasource.param.LhDatasourceIdParam;
 import vip.xiaonuo.lh.modular.datasource.param.LhDatasourcePageParam;
 import vip.xiaonuo.lh.modular.datasource.param.LhDatasourceTestParam;
@@ -80,7 +81,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Copilot 技能白名单（查询 + 安全创建申请；服务端执行 + ACL）。
+ * Copilot 技能白名单（查询 + 安全创建申请 + 数据源登记/测连/同步清单；服务端执行 + ACL）。
  */
 @Slf4j
 @Component
@@ -327,12 +328,50 @@ public class AiToolRegistry {
                         "ws", propStr("工作空间"),
                         "q", propStr("关键词可选"),
                         "topN", propInt("条数，默认 12")), List.of())));
+        Map<String, Object> dsConnProps = new LinkedHashMap<>();
+        dsConnProps.put("dsId", propStr("已登记源 id（与连接参数二选一；有 id 时优先）"));
+        dsConnProps.put("type", propStr("类型编码或展示名，如 mysql / MySQL；无 dsId 时必填"));
+        dsConnProps.put("host", propStr("主机"));
+        dsConnProps.put("port", propStr("端口"));
+        dsConnProps.put("database", propStr("库名/SID/namespace"));
+        dsConnProps.put("user", propStr("用户名"));
+        dsConnProps.put("password", propStr("密码（仅用于测连，结果不回传）"));
+        dsConnProps.put("jdbcUrl", propStr("可选完整 JDBC URL"));
+        dsConnProps.put("bootstrap", propStr("Kafka bootstrap 等非 JDBC 连接串"));
+        dsConnProps.put("extra", propStr("扩展参数"));
         tools.add(fn("ds_connectivity",
-                "测试已登记数据源连通性（复用门户 test，不含密码回传）。问「这个源通不通/连得上吗」时用；须有数据源使用权。",
+                "测试数据源连通性（复用门户 test，结果不含密码）。"
+                        + "已登记源传 dsId（须有使用权）；未登记可传 type/host/port/database/user/password 做预检。"
+                        + "问「这个源通不通/连得上吗」时用。",
+                objectSchema(dsConnProps, List.of())));
+        Map<String, Object> registerDsProps = new LinkedHashMap<>();
+        registerDsProps.put("name", propStr("数据源名称"));
+        registerDsProps.put("type", propStr("类型，如 MySQL / mysql / PostgreSQL / Kafka"));
+        registerDsProps.put("host", propStr("主机"));
+        registerDsProps.put("port", propStr("端口"));
+        registerDsProps.put("database", propStr("库名"));
+        registerDsProps.put("user", propStr("用户名"));
+        registerDsProps.put("password", propStr("密码（写入 Vault，工具结果不回传）"));
+        registerDsProps.put("purpose", propStr("用途，默认 数据入湖"));
+        registerDsProps.put("desc", propStr("描述"));
+        registerDsProps.put("status", propStr("draft=草稿（默认）| online=正式登记"));
+        registerDsProps.put("jdbcUrl", propStr("可选 JDBC URL"));
+        registerDsProps.put("bootstrap", propStr("Kafka 等"));
+        registerDsProps.put("extra", propStr("扩展"));
+        registerDsProps.put("schema", propStr("可选表/Topic 清单摘要"));
+        registerDsProps.put("ws", propStr("工作空间"));
+        tools.add(fn("register_datasource",
+                "登记数据源到门户（写入连接元数据与 Vault；结果不含密码）。"
+                        + "须用户已明确提供连接信息；默认 status=draft（未测连也可存），测通后可 status=online。"
+                        + "问「帮我注册/登记 MySQL 源」时用；不要编造主机或密码。",
+                objectSchema(registerDsProps, List.of("name", "type"))));
+        tools.add(fn("sync_source_tables",
+                "从远端同步数据源表/对象清单到门户（复用 tableSync，非 mock）。"
+                        + "问「同步表清单/刷新这个源的表」时用；须对该源有编辑/使用权。成功后可用 list_source_tables 查看。",
                 objectSchema(Map.of(
-                        "dsId", propStr("数据源 id（list_datasources 返回）")), List.of("dsId"))));
+                        "dsId", propStr("数据源 id")), List.of("dsId"))));
         tools.add(fn("list_source_tables",
-                "列出数据源已登记表清单（门户 inventory，非实时 JDBC 全库扫）。问「这个源里有哪些表」时用；须有数据源使用权。",
+                "列出数据源已登记表清单（门户 inventory；同步后才完整）。问「这个源里有哪些表」时用；须有数据源使用权。",
                 objectSchema(Map.of(
                         "dsId", propStr("数据源 id"),
                         "q", propStr("表名/中文名关键词可选"),
@@ -496,7 +535,9 @@ public class AiToolRegistry {
                 case "list_domains" -> listDomains(ws, str(args.get("q")), str(args.get("status")),
                         intArg(args.get("topN"), 20));
                 case "list_etl_jobs" -> listEtlJobs(ws, str(args.get("q")), intArg(args.get("topN"), 12));
-                case "ds_connectivity" -> dsConnectivity(str(args.get("dsId")));
+                case "ds_connectivity" -> dsConnectivity(args);
+                case "register_datasource" -> registerDatasource(args, ws);
+                case "sync_source_tables" -> syncSourceTables(str(args.get("dsId")));
                 case "list_source_tables" -> listSourceTables(str(args.get("dsId")), str(args.get("q")),
                         intArg(args.get("topN"), 12));
                 case "query_history_mine" -> queryHistoryMine(ws, intArg(args.get("topN"), 10));
@@ -1673,45 +1714,44 @@ public class AiToolRegistry {
         }
     }
 
-    private Map<String, Object> dsConnectivity(String dsId) {
-        if (StrUtil.isBlank(dsId)) {
-            return Map.of("error", "dsId_required");
-        }
+    private Map<String, Object> dsConnectivity(Map<String, Object> args) {
+        String dsId = str(args.get("dsId"));
         try {
-            if (!secAuthGrantService.canUseDatasource(dsId)) {
-                return AiSkillDenyHelper.denyDs(dsId,
-                        "无权使用该数据源（须为拥有者或持有 EDIT/MANAGE）");
-            }
             LhDatasourceTestParam param = new LhDatasourceTestParam();
-            param.setId(dsId);
-            Map<String, Object> test = lhDatasourceService.test(param);
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("dsId", dsId);
-            if (test != null) {
-                for (Map.Entry<String, Object> e : test.entrySet()) {
-                    String k = e.getKey();
-                    if (k == null) {
-                        continue;
-                    }
-                    String lk = k.toLowerCase();
-                    if (lk.contains("password") || lk.contains("secret") || lk.contains("token")
-                            || "conn".equals(lk) || "vault".equals(lk)) {
-                        continue;
-                    }
-                    out.put(k, e.getValue());
+            if (StrUtil.isNotBlank(dsId)) {
+                if (!secAuthGrantService.canUseDatasource(dsId)) {
+                    return AiSkillDenyHelper.denyDs(dsId,
+                            "无权使用该数据源（须为拥有者或持有 EDIT/MANAGE）");
+                }
+                param.setId(dsId);
+            } else {
+                fillDatasourceConnFields(param, args);
+                if (StrUtil.isBlank(param.getType())) {
+                    return Map.of("error", "dsId_or_type_required",
+                            "message", "请提供已登记 dsId，或 type + 连接参数做预检",
+                            "href", "/datasource");
                 }
             }
-            try {
-                LhDatasourceIdParam idp = new LhDatasourceIdParam();
-                idp.setId(dsId);
-                LhDatasourceVo vo = lhDatasourceService.detail(idp);
-                if (vo != null) {
-                    out.putIfAbsent("name", vo.getName());
-                    out.putIfAbsent("type", StrUtil.blankToDefault(vo.getTypeCode(), vo.getType()));
-                    out.putIfAbsent("status", vo.getStatus());
+            Map<String, Object> test = lhDatasourceService.test(param);
+            Map<String, Object> out = sanitizeToolMap(test);
+            if (StrUtil.isNotBlank(dsId)) {
+                out.put("dsId", dsId);
+                try {
+                    LhDatasourceIdParam idp = new LhDatasourceIdParam();
+                    idp.setId(dsId);
+                    LhDatasourceVo vo = lhDatasourceService.detail(idp);
+                    if (vo != null) {
+                        out.putIfAbsent("name", vo.getName());
+                        out.putIfAbsent("type", StrUtil.blankToDefault(vo.getTypeCode(), vo.getType()));
+                        out.putIfAbsent("status", vo.getStatus());
+                    }
+                } catch (Exception ignored) {
+                    // soft
                 }
-            } catch (Exception ignored) {
-                // soft
+            } else {
+                out.put("type", param.getType());
+                out.put("host", param.getHost());
+                out.put("mode", "precheck");
             }
             out.put("href", "/datasource");
             out.put("note", "连通性探测；不含密码/凭证");
@@ -1720,6 +1760,171 @@ public class AiToolRegistry {
             return Map.of("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()),
                     "href", "/datasource");
         }
+    }
+
+    private Map<String, Object> registerDatasource(Map<String, Object> args, String ws) {
+        String name = str(args.get("name"));
+        String type = str(args.get("type"));
+        if (StrUtil.isBlank(name) || StrUtil.isBlank(type)) {
+            return Map.of("error", "name_type_required", "href", "/datasource");
+        }
+        try {
+            LhLoginUsers.requireUserId();
+            LhDatasourceAddParam param = new LhDatasourceAddParam();
+            fillDatasourceConnFields(param, args);
+            param.setName(name);
+            param.setType(type);
+            param.setWs(StrUtil.blankToDefault(str(args.get("ws")), ws));
+            if (StrUtil.isBlank(param.getPurpose())) {
+                param.setPurpose("数据入湖");
+            }
+            String status = StrUtil.blankToDefault(str(args.get("status")), "draft").toLowerCase();
+            if (!"online".equals(status) && !"draft".equals(status)) {
+                status = "draft";
+            }
+            param.setStatus(status);
+            LhDatasourceVo vo = lhDatasourceService.add(param);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            if (vo != null) {
+                out.put("id", vo.getId());
+                out.put("name", vo.getName());
+                out.put("type", StrUtil.blankToDefault(vo.getTypeCode(), vo.getType()));
+                out.put("status", vo.getStatus());
+                out.put("host", vo.getHost());
+                out.put("port", vo.getPort());
+                out.put("database", vo.getDatabase());
+            }
+            out.put("ws", param.getWs());
+            out.put("href", "/datasource");
+            out.put("note", "draft".equals(status)
+                    ? "已保存草稿；可用 ds_connectivity 测连，通过后 sync_source_tables 同步清单"
+                    : "已正式登记；建议 sync_source_tables 同步表清单");
+            return out;
+        } catch (Exception e) {
+            return Map.of("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()),
+                    "href", "/datasource");
+        }
+    }
+
+    private Map<String, Object> syncSourceTables(String dsId) {
+        if (StrUtil.isBlank(dsId)) {
+            return Map.of("error", "dsId_required", "href", "/datasource");
+        }
+        try {
+            if (!secAuthGrantService.canUseDatasource(dsId)) {
+                return AiSkillDenyHelper.denyDs(dsId, "无权同步该数据源表清单（须为拥有者或持有 EDIT/MANAGE）");
+            }
+            LhDatasourceIdParam idp = new LhDatasourceIdParam();
+            idp.setId(dsId);
+            Map<String, Object> raw = lhDatasourceService.tableSync(idp);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("dsId", dsId);
+            if (raw != null) {
+                for (String k : List.of("ok", "source", "path", "objectKind", "objectKindLabel",
+                        "objectKindLabelZh", "hint", "discovered", "added", "updated", "removed",
+                        "total", "schema", "error")) {
+                    if (raw.containsKey(k) && raw.get(k) != null) {
+                        out.put(k, raw.get(k));
+                    }
+                }
+                Object tables = raw.get("tables");
+                if (tables instanceof List<?> list) {
+                    List<String> names = new ArrayList<>();
+                    for (Object t : list) {
+                        if (names.size() >= MAX_ITEMS) {
+                            break;
+                        }
+                        if (t instanceof LhDsTableVo v && StrUtil.isNotBlank(v.getName())) {
+                            names.add(v.getName());
+                        } else if (t instanceof Map<?, ?> m) {
+                            Object n = m.get("name");
+                            if (n == null) {
+                                n = m.get("tableName");
+                            }
+                            if (n != null && StrUtil.isNotBlank(String.valueOf(n))) {
+                                names.add(String.valueOf(n));
+                            }
+                        }
+                    }
+                    out.put("tableNamesSample", names);
+                    out.put("tableNamesSampleCount", names.size());
+                }
+            }
+            out.put("href", "/datasource");
+            out.put("note", "已同步门户清单；完整列表用 list_source_tables");
+            return out;
+        } catch (Exception e) {
+            return Map.of("error", StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()),
+                    "href", "/datasource");
+        }
+    }
+
+    /** 填充登记/测连共用连接字段（不含 name/status） */
+    private static void fillDatasourceConnFields(LhDatasourceAddParam param, Map<String, Object> args) {
+        if (param == null || args == null) {
+            return;
+        }
+        if (StrUtil.isNotBlank(str(args.get("type")))) {
+            param.setType(str(args.get("type")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("host")))) {
+            param.setHost(str(args.get("host")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("port")))) {
+            param.setPort(str(args.get("port")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("database")))) {
+            param.setDatabase(str(args.get("database")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("user")))) {
+            param.setUser(str(args.get("user")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("password")))) {
+            param.setPassword(str(args.get("password")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("jdbcUrl")))) {
+            param.setJdbcUrl(str(args.get("jdbcUrl")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("bootstrap")))) {
+            param.setBootstrap(str(args.get("bootstrap")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("extra")))) {
+            param.setExtra(str(args.get("extra")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("schema")))) {
+            param.setSchema(str(args.get("schema")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("purpose")))) {
+            param.setPurpose(str(args.get("purpose")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("desc")))) {
+            param.setDesc(str(args.get("desc")));
+        }
+        if (StrUtil.isNotBlank(str(args.get("access")))) {
+            param.setAccess(str(args.get("access")));
+        }
+    }
+
+    /** 工具回传：剔除口令类字段 */
+    private static Map<String, Object> sanitizeToolMap(Map<String, Object> src) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (src == null) {
+            return out;
+        }
+        for (Map.Entry<String, Object> e : src.entrySet()) {
+            String k = e.getKey();
+            if (k == null) {
+                continue;
+            }
+            String lk = k.toLowerCase();
+            if (lk.contains("password") || lk.contains("secret") || lk.contains("token")
+                    || "conn".equals(lk) || "vault".equals(lk)) {
+                continue;
+            }
+            out.put(k, e.getValue());
+        }
+        return out;
     }
 
     private Map<String, Object> listSourceTables(String dsId, String q, int topN) {

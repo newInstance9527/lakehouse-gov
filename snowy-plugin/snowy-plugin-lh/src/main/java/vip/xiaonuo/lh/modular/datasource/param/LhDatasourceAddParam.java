@@ -99,6 +99,10 @@ public class LhDatasourceAddParam {
     @Schema(description = "密级")
     private String level = "内部";
 
+    /** draft=未测连草稿；空则登记为 online */
+    @Schema(description = "生命周期状态(draft/online/…)")
+    private String status;
+
     /** 类型专属原始字段；也可把 host/user 等再放一份 */
     @Schema(description = "类型专属连接参数")
     private Map<String, Object> conn;

@@ -60,4 +60,9 @@ public class GovMetricVo {
     private Map<String, Object> formulaAst;
     private String compiledSql;
     private String dialect;
+    /** 是否已有 KB 业务术语边（implements_metric） */
+    private Boolean hasTerm;
+    /** 启用闸门结果：ok / warn / blocked（仅 transition 返回时有意义） */
+    private String termGateStatus;
+    private String termGateMessage;
 }

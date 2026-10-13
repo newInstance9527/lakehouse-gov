@@ -29,6 +29,10 @@ import vip.xiaonuo.lh.modular.knowledge.result.GovKbEntryVo;
 import vip.xiaonuo.lh.modular.knowledge.service.GovKbService;
 import vip.xiaonuo.lh.modular.knowledge.support.KbChunker;
 import vip.xiaonuo.lh.modular.knowledge.support.KbDocumentParser;
+import vip.xiaonuo.lh.modular.knowledge.support.KbTermGraphHelper;
+import vip.xiaonuo.lh.modular.knowledge.support.KbTermRefs;
+import vip.xiaonuo.lh.modular.metric.entity.GovMetric;
+import vip.xiaonuo.lh.modular.metric.mapper.GovMetricMapper;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -82,6 +86,10 @@ public class GovKbServiceImpl implements GovKbService {
     private LhLiteLlmClient liteLlmClient;
     @Resource
     private LhProperties lhProperties;
+    @Resource
+    private KbTermGraphHelper termGraphHelper;
+    @Resource
+    private GovMetricMapper metricMapper;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -113,6 +121,15 @@ public class GovKbServiceImpl implements GovKbService {
         out.put("milvusReachable", probe.get("reachable"));
         out.put("retrievalMode", probe.get("mode"));
         out.put("milvusCollection", probe.get("collection"));
+        try {
+            Map<String, Object> gloss = termGraphHelper.glossaryStats();
+            out.put("glossary", gloss);
+            out.put("metricTermCoveragePct", gloss.get("metricTermCoveragePct"));
+            out.put("brokenEdgeRatePct", gloss.get("brokenEdgeRatePct"));
+            out.put("termLinkRatePct", gloss.get("termLinkRatePct"));
+        } catch (Exception e) {
+            log.debug("glossary stats soft-fail: {}", e.getMessage());
+        }
         return out;
     }
 
@@ -206,6 +223,11 @@ public class GovKbServiceImpl implements GovKbService {
         row.setDeleteFlag(NOT_DELETE);
         entryMapper.insert(row);
         indexEntry(row);
+        try {
+            termGraphHelper.syncEdgesForEntry(row);
+        } catch (Exception e) {
+            log.debug("term edge sync soft-fail: {}", e.getMessage());
+        }
         if (CAT_MINUTES.equals(row.getCat()) && !"human".equalsIgnoreCase(row.getScoreSource())) {
             try {
                 scoreMinutesEntry(row.getId());
@@ -337,6 +359,11 @@ public class GovKbServiceImpl implements GovKbService {
         } else {
             entryMapper.updateById(row);
         }
+        try {
+            termGraphHelper.syncEdgesForEntry(row);
+        } catch (Exception e) {
+            log.debug("term edge sync soft-fail: {}", e.getMessage());
+        }
         return toVo(row, true);
     }
 
@@ -351,6 +378,11 @@ public class GovKbServiceImpl implements GovKbService {
             milvusClient.deleteByEntryId(id);
         } catch (Exception ignored) {
             // soft-fail
+        }
+        try {
+            termGraphHelper.clearEdges(id);
+        } catch (Exception e) {
+            log.debug("term edge clear soft-fail: {}", e.getMessage());
         }
     }
 
@@ -1072,6 +1104,16 @@ public class GovKbServiceImpl implements GovKbService {
     }
 
     private static String resolveRefsJson(GovKbUpsertParam param) {
+        if (param == null) {
+            return null;
+        }
+        String cat = normalizeCat(param.getCat());
+        if (param.getRefsJson() != null || param.getRefs() != null) {
+            String normalized = KbTermRefs.normalizeJson(param.getRefsJson(), param.getRefs(), cat);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
         if (param.getRefsJson() != null) {
             return param.getRefsJson();
         }
@@ -1082,6 +1124,82 @@ public class GovKbServiceImpl implements GovKbService {
             return JSONUtil.toJsonStr(Map.of("label", param.getRefs()));
         }
         return null;
+    }
+
+    @Override
+    public Map<String, Object> glossaryGraph(String rootEntryId, Integer depth) {
+        return termGraphHelper.graph(rootEntryId, depth == null ? 2 : depth);
+    }
+
+    @Override
+    public Map<String, Object> glossaryStats() {
+        return termGraphHelper.glossaryStats();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> rebuildGlossaryEdges() {
+        return termGraphHelper.rebuildAllEdges();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> ensureTermForMetric(String metricCode) {
+        if (StrUtil.isBlank(metricCode)) {
+            throw new CommonException("metricCode 不能为空");
+        }
+        String code = metricCode.trim();
+        GovMetric metric = metricMapper.selectOne(new QueryWrapper<GovMetric>().lambda()
+                .eq(GovMetric::getDeleteFlag, NOT_DELETE)
+                .eq(GovMetric::getMetricCode, code)
+                .last("LIMIT 1"));
+        if (metric == null) {
+            List<GovMetric> all = metricMapper.selectList(new QueryWrapper<GovMetric>().lambda()
+                    .eq(GovMetric::getDeleteFlag, NOT_DELETE));
+            metric = all.stream()
+                    .filter(m -> m.getMetricCode() != null && code.equalsIgnoreCase(m.getMetricCode()))
+                    .findFirst()
+                    .orElse(null);
+        }
+        if (metric == null) {
+            throw new CommonException("指标不存在: " + metricCode);
+        }
+        return termGraphHelper.ensureTermForMetric(metric);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> ensureTermsForUncovered() {
+        Map<String, Object> stats = termGraphHelper.glossaryStats();
+        @SuppressWarnings("unchecked")
+        List<String> uncovered = (List<String>) stats.getOrDefault("uncoveredMetricCodes", List.of());
+        int created = 0;
+        int existed = 0;
+        int failed = 0;
+        List<String> errors = new ArrayList<>();
+        for (String code : uncovered) {
+            try {
+                Map<String, Object> r = ensureTermForMetric(code);
+                if (Boolean.TRUE.equals(r.get("created"))) {
+                    created++;
+                } else {
+                    existed++;
+                }
+            } catch (Exception e) {
+                failed++;
+                if (errors.size() < 10) {
+                    errors.add(code + ": " + e.getMessage());
+                }
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("uncovered", uncovered.size());
+        out.put("created", created);
+        out.put("existed", existed);
+        out.put("failed", failed);
+        out.put("errors", errors);
+        out.putAll(termGraphHelper.glossaryStats());
+        return out;
     }
 
     private static Object parseRefs(String refsJson) {

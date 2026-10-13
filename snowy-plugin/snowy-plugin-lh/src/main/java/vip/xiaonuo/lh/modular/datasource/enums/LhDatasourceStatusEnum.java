@@ -19,7 +19,7 @@ import java.util.Arrays;
 
 /**
  * 数据源生命周期状态
- * <p>online=在线 · warn=告警 · paused=停用 · revoked=已吊销（软删前标记）</p>
+ * <p>draft=草稿（未测连）· online=在线 · warn=告警 · paused=停用 · revoked=已吊销（软删前标记）</p>
  *
  * @author lakehouse
  * @date 2026/3/18
@@ -27,6 +27,7 @@ import java.util.Arrays;
 @Getter
 public enum LhDatasourceStatusEnum {
 
+    DRAFT("draft", "草稿"),
     ONLINE("online", "在线"),
     WARN("warn", "告警"),
     PAUSED("paused", "停用"),

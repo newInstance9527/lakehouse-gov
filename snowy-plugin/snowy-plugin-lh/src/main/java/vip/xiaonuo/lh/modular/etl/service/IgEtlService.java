@@ -76,4 +76,7 @@ public interface IgEtlService {
     Map<String, Object> resolveEngine(IgEtlEngineResolveParam param);
 
     Map<String, Object> nodeTypes();
+
+    /** 批处理中间表清理（truncate/drop）；供 DS 尾部 SHELL curl */
+    Map<String, Object> stagingCleanup(Map<String, Object> body);
 }

@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -93,8 +94,10 @@ public final class DsWorkflowBuilder {
                 String topic = firstNonBlank(conf.getStr("topic"), conf.getStr("table"), bare);
                 outputTableByNode.put(n.getNodeKey(), streamMqAlias(type, topic));
             } else if (IgEtlNodeTypes.SOURCE.contains(type) && !succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
-                outputTableByNode.put(n.getNodeKey(),
-                        LhStagingTables.qualify(database, LhStagingTables.odsTable(bare)));
+                vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.ResolvedTables rt =
+                        vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.resolveTables(
+                                database, bare, conf, null);
+                outputTableByNode.put(n.getNodeKey(), rt.landingQualified);
             } else if ("clean".equals(type) || "mapping".equals(type) || "transform".equals(type)) {
                 String kafkaUp = null;
                 for (IgEtlEdge e : edges == null ? List.<IgEtlEdge>of() : edges) {
@@ -120,32 +123,34 @@ public final class DsWorkflowBuilder {
                     outputTableByNode.put(n.getNodeKey(), kafkaUp);
                 } else if ("clean".equals(type)) {
                     String cleanOut = null;
+                    String upLand = null;
+                    String srcBare = bare;
+                    cn.hutool.json.JSONObject srcConf = conf;
                     for (IgEtlEdge e : edges == null ? List.<IgEtlEdge>of() : edges) {
                         if (!n.getNodeKey().equals(e.getToNodeKey())) {
                             continue;
                         }
                         String upOut = outputTableByNode.get(e.getFromNodeKey());
                         if (StrUtil.isNotBlank(upOut)) {
-                            cleanOut = LhStagingTables.qualify(database,
-                                    LhStagingTables.cleanTableFromUpstream(upOut));
-                            break;
+                            upLand = upOut;
                         }
                         IgEtlNode up = byKey.get(e.getFromNodeKey());
                         if (up != null) {
-                            cn.hutool.json.JSONObject uc = cn.hutool.json.JSONUtil.parseObj(
+                            srcConf = cn.hutool.json.JSONUtil.parseObj(
                                     StrUtil.blankToDefault(up.getConfJson(), "{}"));
-                            String upBare = LhStagingTables.bareTable(firstNonBlank(
-                                    uc.getStr("table"), uc.getStr("src"), uc.getStr("objectName")));
-                            if (StrUtil.isNotBlank(upBare)) {
-                                cleanOut = LhStagingTables.qualify(database,
-                                        LhStagingTables.cleanTable(upBare));
-                                break;
+                            // clean 可覆盖 cleanTable；landing 以 source conf 为准
+                            if (StrUtil.isNotBlank(conf.getStr("cleanTable"))) {
+                                srcConf.set("cleanTable", conf.getStr("cleanTable"));
                             }
+                            srcBare = LhStagingTables.bareTable(firstNonBlank(
+                                    srcConf.getStr("table"), srcConf.getStr("src"), srcConf.getStr("objectName"), bare));
                         }
+                        break;
                     }
-                    if (StrUtil.isBlank(cleanOut) && StrUtil.isNotBlank(bare)) {
-                        cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable(bare));
-                    }
+                    vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.ResolvedTables rt =
+                            vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.resolveTables(
+                                    database, srcBare, srcConf, upLand);
+                    cleanOut = rt.cleanQualified;
                     if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
                         cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable("staging"));
                     }
@@ -212,10 +217,18 @@ public final class DsWorkflowBuilder {
                 n.setConfJson(conf.toString());
             } else if (IgEtlNodeTypes.SOURCE.contains(type)
                     && !succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
-                String land = LhStagingTables.qualify(database, LhStagingTables.odsTable(bare));
-                conf.set("_lhLandingTable", land);
+                vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.ResolvedTables rt =
+                        vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.resolveTables(
+                                database, bare, conf, null);
+                conf.set("_lhLandingTable", rt.landingQualified);
+                conf.set("_lhCleanTable", rt.cleanQualified);
                 conf.set("_lhBoundedChain", true);
+                conf.set("_lhStagingAutoCreate",
+                        vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.isAutoCreate(conf));
+                conf.set("_lhStagingCleanup",
+                        vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.cleanupMode(conf));
                 n.setConfJson(conf.toString());
+                outputTableByNode.put(n.getNodeKey(), rt.landingQualified);
             }
             if ("clean".equals(type) || "mapping".equals(type) || "transform".equals(type)) {
                 boolean onKafka = false;
@@ -248,33 +261,35 @@ public final class DsWorkflowBuilder {
                 } else if ("clean".equals(type)) {
                     String cleanOut = outputTableByNode.get(n.getNodeKey());
                     if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
+                        String upLand = null;
+                        cn.hutool.json.JSONObject srcConf = conf;
+                        String srcBare = bare;
                         for (String pk : preKeys) {
                             String upOut = outputTableByNode.get(pk);
                             if (StrUtil.isNotBlank(upOut)) {
-                                cleanOut = LhStagingTables.qualify(database,
-                                        LhStagingTables.cleanTableFromUpstream(upOut));
-                                break;
+                                upLand = upOut;
                             }
                             IgEtlNode up = byKey.get(pk);
                             if (up != null) {
-                                cn.hutool.json.JSONObject uc = cn.hutool.json.JSONUtil.parseObj(
+                                srcConf = cn.hutool.json.JSONUtil.parseObj(
                                         StrUtil.blankToDefault(up.getConfJson(), "{}"));
-                                String upBare = LhStagingTables.bareTable(firstNonBlank(
-                                        uc.getStr("table"), uc.getStr("src"), uc.getStr("objectName")));
-                                if (StrUtil.isNotBlank(upBare)) {
-                                    cleanOut = LhStagingTables.qualify(database,
-                                            LhStagingTables.cleanTable(upBare));
-                                    break;
+                                if (StrUtil.isNotBlank(conf.getStr("cleanTable"))) {
+                                    srcConf.set("cleanTable", conf.getStr("cleanTable"));
                                 }
+                                srcBare = LhStagingTables.bareTable(firstNonBlank(
+                                        srcConf.getStr("table"), srcConf.getStr("src"),
+                                        srcConf.getStr("objectName"), bare));
                             }
+                            break;
                         }
+                        vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.ResolvedTables rt =
+                                vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.resolveTables(
+                                        database, srcBare, srcConf, upLand);
+                        cleanOut = rt.cleanQualified;
                     }
                     if (StrUtil.isBlank(cleanOut) || isPlaceholderClean(cleanOut)) {
-                        if (StrUtil.isNotBlank(bare)) {
-                            cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable(bare));
-                        } else {
-                            cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable("staging"));
-                        }
+                        cleanOut = LhStagingTables.qualify(database, LhStagingTables.cleanTable(
+                                StrUtil.isNotBlank(bare) ? bare : "staging"));
                     }
                     conf.set("_lhCleanTable", cleanOut);
                     outputTableByNode.put(n.getNodeKey(), cleanOut);
@@ -382,6 +397,8 @@ public final class DsWorkflowBuilder {
             locations.add(loc);
         }
 
+        appendStagingCleanupTask(tasks, relation, locations, nodes, byKey, taskCodeByNode, succs);
+
         Map<String, Object> wf = new LinkedHashMap<>();
         wf.put("workflowCode", workflowCode);
         wf.put("name", StrUtil.blankToDefault(dag.getName(), dag.getDagCode()));
@@ -399,6 +416,88 @@ public final class DsWorkflowBuilder {
         wf.put("taskCount", tasks.size());
         wf.put("edgeCount", relation.size());
         return wf;
+    }
+
+    /**
+     * 源节点配置 stagingCleanup=truncate|drop 时，在工作流末尾追加 SHELL（依赖所有无下游节点）。
+     */
+    private static void appendStagingCleanupTask(
+            List<Map<String, Object>> tasks,
+            List<Map<String, Object>> relation,
+            List<Map<String, Object>> locations,
+            List<IgEtlNode> nodes,
+            Map<String, IgEtlNode> ignoredByKey,
+            Map<String, Long> taskCodeByNode,
+            Map<String, List<String>> succs) {
+        for (IgEtlNode n : nodes) {
+            if (n == null || !IgEtlNodeTypes.SOURCE.contains(StrUtil.blankToDefault(n.getNodeType(), ""))) {
+                continue;
+            }
+            if (succs.getOrDefault(n.getNodeKey(), List.of()).isEmpty()) {
+                continue;
+            }
+            cn.hutool.json.JSONObject conf = cn.hutool.json.JSONUtil.parseObj(
+                    StrUtil.blankToDefault(n.getConfJson(), "{}"));
+            String mode = vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.cleanupMode(conf);
+            if ("none".equals(mode)) {
+                continue;
+            }
+            String database = firstNonBlank(conf.getStr("database"), conf.getStr("schema"), conf.getStr("lhDatabase"));
+            String bare = LhStagingTables.bareTable(firstNonBlank(
+                    conf.getStr("table"), conf.getStr("src"), conf.getStr("objectName")));
+            vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.ResolvedTables rt =
+                    vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.resolveTables(
+                            database, bare, conf, null);
+            String dsId = conf.getStr("dsId");
+            String cleanKey = "_lh_staging_cleanup_" + n.getNodeKey();
+            long cleanCode = Math.abs((cleanKey).hashCode()) + 9_000_000L;
+            Map<String, Object> taskParams = new LinkedHashMap<>();
+            taskParams.put("rawScript", vip.xiaonuo.lh.modular.etl.support.LhStagingDdlEnsured.cleanupShell(
+                    dsId, database, rt.landingBare, rt.cleanBare, mode));
+            taskParams.put("lhStagingCleanup", true);
+            taskParams.put("lhDsId", dsId);
+            Map<String, Object> task = new LinkedHashMap<>();
+            task.put("taskCode", cleanCode);
+            task.put("name", "staging_cleanup_" + n.getNodeKey());
+            task.put("nodeKey", cleanKey);
+            task.put("taskType", "SHELL");
+            task.put("engine", "shell");
+            task.put("timeoutFlag", "CLOSE");
+            task.put("timeout", 0);
+            List<Long> preCodes = new ArrayList<>();
+            for (IgEtlNode leaf : nodes) {
+                if (leaf == null) {
+                    continue;
+                }
+                String lk = leaf.getNodeKey();
+                if (succs.getOrDefault(lk, List.of()).isEmpty() && taskCodeByNode.containsKey(lk)) {
+                    preCodes.add(taskCodeByNode.get(lk));
+                }
+            }
+            if (preCodes.isEmpty()) {
+                Long srcCode = taskCodeByNode.get(n.getNodeKey());
+                if (srcCode != null) {
+                    preCodes.add(srcCode);
+                }
+            }
+            task.put("preTaskCodes", preCodes);
+            task.put("taskParams", taskParams);
+            tasks.add(task);
+            for (Long pre : preCodes) {
+                Map<String, Object> rel = new LinkedHashMap<>();
+                rel.put("preTaskCode", pre);
+                rel.put("postTaskCode", cleanCode);
+                relation.add(rel);
+            }
+            Map<String, Object> loc = new LinkedHashMap<>();
+            loc.put("taskCode", cleanCode);
+            loc.put("nodeKey", cleanKey);
+            loc.put("x", Optional.ofNullable(n.getPosX()).orElse(0) + 80);
+            loc.put("y", Optional.ofNullable(n.getPosY()).orElse(0) + 80);
+            locations.add(loc);
+            // 每个源只挂一个清理任务（取第一个需清理的）
+            break;
+        }
     }
 
     /**

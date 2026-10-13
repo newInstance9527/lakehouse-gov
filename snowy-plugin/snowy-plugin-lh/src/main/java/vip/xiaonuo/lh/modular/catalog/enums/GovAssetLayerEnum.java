@@ -21,7 +21,7 @@ import java.util.Locale;
 import java.util.Optional;
 
 /**
- * 湖内分层
+ * 资产分层（含源侧原始业务库 + 湖内 ODS→ADS）
  *
  * @author lakehouse
  * @date 2026/3/18
@@ -29,6 +29,8 @@ import java.util.Optional;
 @Getter
 public enum GovAssetLayerEnum {
 
+    /** 源系统业务库表（未入湖）；≠ 湖内 ODS */
+    SRC("src", "原始业务库"),
     ODS("ods", "ODS"),
     DWD("dwd", "DWD"),
     DIM("dim", "DIM"),

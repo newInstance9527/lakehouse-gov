@@ -14,10 +14,10 @@ import vip.xiaonuo.lh.core.vault.LhComponentCredentialResolver;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcConnections;
 import vip.xiaonuo.lh.modular.lifecycle.support.GovLcMetadataSql;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.LinkedHashMap;
@@ -188,7 +188,7 @@ public class GovDelSinkExecutor {
         String user = first(sa.get("username"), sa.get("user"),
                 str(secret.get("username")), str(secret.get("user")));
         String pwd = first(sa.get("password"), str(secret.get("password")), "");
-        return DriverManager.getConnection(url, user, pwd);
+        return LhJdbcConnections.open(ds.getType(), url, user, pwd);
     }
 
     private LhDatasource resolveDs(GovDelSinkSql.SinkRef ref) {

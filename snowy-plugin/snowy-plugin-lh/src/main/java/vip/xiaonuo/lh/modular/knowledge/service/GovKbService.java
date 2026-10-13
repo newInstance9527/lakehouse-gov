@@ -59,4 +59,28 @@ public interface GovKbService {
      * 纪要老化巡检：低分且长期未访问 → archive（去向量）→ 再过窗口 soft-delete。
      */
     Map<String, Object> memoryPatrol();
+
+    /**
+     * 业务术语只读图谱（节点=术语/指标/标准/资产/同义词；边=类型化）。
+     *
+     * @param rootEntryId 可选根术语；空则返回全量术语子图
+     * @param depth       1–3
+     */
+    Map<String, Object> glossaryGraph(String rootEntryId, Integer depth);
+
+    /** 术语覆盖率 / 断链率等治理 KPI */
+    Map<String, Object> glossaryStats();
+
+    /** 从现有 term 条目 refs_json 全量重建物化边 */
+    Map<String, Object> rebuildGlossaryEdges();
+
+    /**
+     * 幂等为指标补业务术语（cat=term + implements_metric 边）。
+     *
+     * @param metricCode 指标编码
+     */
+    Map<String, Object> ensureTermForMetric(String metricCode);
+
+    /** 为全部未覆盖的已启用指标批量 ensure-term（上限 50） */
+    Map<String, Object> ensureTermsForUncovered();
 }

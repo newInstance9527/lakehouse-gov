@@ -176,6 +176,13 @@ public class IgEtlController {
         return CommonResult.data(igEtlService.resolveEngine(param));
     }
 
+    @Operation(summary = "批处理中间表清理（truncate/drop）")
+    @CommonLog("ETL中间表清理")
+    @PostMapping("/lh/etl/staging/cleanup")
+    public CommonResult<Map<String, Object>> stagingCleanup(@RequestBody Map<String, Object> body) {
+        return CommonResult.data(igEtlService.stagingCleanup(body));
+    }
+
     @Operation(summary = "节点类型元数据")
     @GetMapping("/lh/etl/meta/node-types")
     public CommonResult<Map<String, Object>> nodeTypes() {

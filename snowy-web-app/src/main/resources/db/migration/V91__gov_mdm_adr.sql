@@ -1,0 +1,71 @@
+-- 轻量 MDM + 架构决策 ADR（波次 P1/P2 薄实现；§6.2 旁路：门户流程/指针，非第三 Catalog）
+
+CREATE TABLE IF NOT EXISTS `gov_mdm_entity_type` (
+  `id`              varchar(20)   NOT NULL COMMENT '主键',
+  `revision`        int           NOT NULL DEFAULT 1,
+  `status`          varchar(32)   NOT NULL DEFAULT 'active' COMMENT 'active/deprecated',
+  `ws`              varchar(64)   DEFAULT 'default',
+  `remark`          varchar(512)  DEFAULT NULL,
+  `type_code`       varchar(64)   NOT NULL COMMENT '实体类型编码 customer/product/…',
+  `type_name`       varchar(128)  NOT NULL COMMENT '展示名',
+  `domain_code`     varchar(64)   DEFAULT NULL COMMENT '可选数据域',
+  `match_keys_json` varchar(1024) DEFAULT NULL COMMENT '匹配键字段列表 JSON',
+  `term_entry_id`   varchar(20)   DEFAULT NULL COMMENT '可选挂 KB 术语',
+  `delete_flag`     varchar(32)   DEFAULT 'NOT_DELETE',
+  `create_time`     datetime      DEFAULT NULL,
+  `create_user`     varchar(20)   DEFAULT NULL,
+  `update_time`     datetime      DEFAULT NULL,
+  `update_user`     varchar(20)   DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uq_mdm_type_code` (`ws`, `type_code`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='轻量 MDM：实体类型';
+
+CREATE TABLE IF NOT EXISTS `gov_mdm_record` (
+  `id`              varchar(20)   NOT NULL COMMENT '主键',
+  `revision`        int           NOT NULL DEFAULT 1,
+  `status`          varchar(32)   NOT NULL DEFAULT 'active' COMMENT 'active/merged/deprecated',
+  `ws`              varchar(64)   DEFAULT 'default',
+  `remark`          varchar(512)  DEFAULT NULL,
+  `type_id`         varchar(20)   NOT NULL COMMENT 'gov_mdm_entity_type.id',
+  `business_key`    varchar(128)  NOT NULL COMMENT '业务键/黄金记录编码',
+  `display_name`    varchar(256)  NOT NULL COMMENT '展示名',
+  `attrs_json`      mediumtext    DEFAULT NULL COMMENT '属性 JSON',
+  `source_system`   varchar(64)   DEFAULT NULL COMMENT '来源系统',
+  `source_ref`      varchar(256)  DEFAULT NULL COMMENT '来源主键/FQN',
+  `is_golden`       tinyint       NOT NULL DEFAULT 1 COMMENT '是否黄金记录',
+  `merged_into_id`  varchar(20)   DEFAULT NULL COMMENT '合并目标',
+  `term_entry_id`   varchar(20)   DEFAULT NULL COMMENT '可选挂 KB 术语',
+  `delete_flag`     varchar(32)   DEFAULT 'NOT_DELETE',
+  `create_time`     datetime      DEFAULT NULL,
+  `create_user`     varchar(20)   DEFAULT NULL,
+  `update_time`     datetime      DEFAULT NULL,
+  `update_user`     varchar(20)   DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uq_mdm_rec_key` (`ws`, `type_id`, `business_key`) USING BTREE,
+  KEY `idx_mdm_rec_type` (`type_id`) USING BTREE,
+  KEY `idx_mdm_rec_golden` (`is_golden`, `status`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='轻量 MDM：主数据记录';
+
+CREATE TABLE IF NOT EXISTS `gov_adr` (
+  `id`              varchar(20)   NOT NULL COMMENT '主键',
+  `revision`        int           NOT NULL DEFAULT 1,
+  `status`          varchar(32)   NOT NULL DEFAULT 'proposed' COMMENT 'proposed/accepted/deprecated/superseded',
+  `ws`              varchar(64)   DEFAULT 'default',
+  `remark`          varchar(512)  DEFAULT NULL,
+  `adr_code`        varchar(64)   NOT NULL COMMENT 'ADR-0001',
+  `title`           varchar(256)  NOT NULL,
+  `context_text`    mediumtext    DEFAULT NULL COMMENT '背景',
+  `decision_text`   mediumtext    DEFAULT NULL COMMENT '决策',
+  `consequences`    mediumtext    DEFAULT NULL COMMENT '后果',
+  `owner`           varchar(128)  DEFAULT NULL,
+  `links_json`      varchar(2048) DEFAULT NULL COMMENT '相关链接/工单/文档',
+  `decided_at`      datetime      DEFAULT NULL,
+  `delete_flag`     varchar(32)   DEFAULT 'NOT_DELETE',
+  `create_time`     datetime      DEFAULT NULL,
+  `create_user`     varchar(20)   DEFAULT NULL,
+  `update_time`     datetime      DEFAULT NULL,
+  `update_user`     varchar(20)   DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uq_adr_code` (`ws`, `adr_code`) USING BTREE,
+  KEY `idx_adr_status` (`status`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='架构决策记录 ADR';

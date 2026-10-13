@@ -25,11 +25,11 @@ import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.enums.LhDatasourceTypeEnum;
 import vip.xiaonuo.lh.modular.datasource.param.LhDatasourceIdParam;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcConnections;
 import vip.xiaonuo.lh.modular.schemasync.param.LhSchemaSyncRunParam;
 import vip.xiaonuo.lh.modular.schemasync.service.LhSchemaSyncService;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.util.*;
 
@@ -299,7 +299,7 @@ public class LhDatasourcePostRegisterBridge {
         int upserted = 0;
         int errors = 0;
         List<String> msgs = new ArrayList<>();
-        try (Connection conn = DriverManager.getConnection(url, user, pwd)) {
+        try (Connection conn = LhJdbcConnections.open(ds.getType(), url, user, pwd)) {
             List<String> tables = listJdbcTableNames(conn, ds, secret);
             for (String tableRef : tables) {
                 try {

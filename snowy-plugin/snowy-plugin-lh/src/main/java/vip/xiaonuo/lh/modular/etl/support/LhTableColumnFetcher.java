@@ -9,10 +9,10 @@ import vip.xiaonuo.lh.core.engine.FlinkSourceSqlCompiler;
 import vip.xiaonuo.lh.core.vault.LhVaultClient;
 import vip.xiaonuo.lh.modular.datasource.entity.LhDatasource;
 import vip.xiaonuo.lh.modular.datasource.mapper.LhDatasourceMapper;
+import vip.xiaonuo.lh.modular.datasource.support.LhJdbcConnections;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -61,7 +61,7 @@ public class LhTableColumnFetcher {
         String catalog = catalogOf(ds, secret);
         Set<String> pks = parsePk(pkCsv);
         List<FlinkSourceSqlCompiler.Column> cols = new ArrayList<>();
-        try (Connection conn = DriverManager.getConnection(jdbcUrl, user, pwd)) {
+        try (Connection conn = LhJdbcConnections.open(ds.getType(), jdbcUrl, user, pwd)) {
             DatabaseMetaData meta = conn.getMetaData();
             // 主键
             try (ResultSet pkRs = meta.getPrimaryKeys(catalog, schemaHint, tableOnly)) {

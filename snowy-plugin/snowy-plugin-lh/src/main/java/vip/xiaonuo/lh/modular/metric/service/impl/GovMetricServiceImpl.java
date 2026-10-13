@@ -142,6 +142,8 @@ public class GovMetricServiceImpl implements GovMetricService {
     private GovBiDatasetMapper biDatasetMapper;
     @Resource
     private OpenMetadataClient openMetadataClient;
+    @Resource
+    private vip.xiaonuo.lh.modular.knowledge.support.KbTermGraphHelper termGraphHelper;
 
     @Override
     public Map<String, Object> overview(String ws) {
@@ -173,6 +175,25 @@ public class GovMetricServiceImpl implements GovMetricService {
         out.put("materializeReconOk", matOk);
         out.put("materializeBlocked", matBlocked);
         out.put("ws", StrUtil.isNotBlank(workspace) ? workspace : "all");
+        try {
+            Map<String, Object> gloss = termGraphHelper.glossaryStats();
+            out.put("metricTermCoveragePct", gloss.get("metricTermCoveragePct"));
+            out.put("metricWithTermCount", gloss.get("metricWithTermCount"));
+            out.put("activeMetricCount", gloss.get("activeMetricCount"));
+            out.put("uncoveredMetricCodes", gloss.get("uncoveredMetricCodes"));
+            out.put("brokenEdgeRatePct", gloss.get("brokenEdgeRatePct"));
+            out.put("termGateMode", resolveTermGateMode());
+            double warnPct = 80d;
+            if (lhProperties.getMetric() != null) {
+                warnPct = lhProperties.getMetric().getTermCoverageWarnPct();
+            }
+            out.put("termCoverageWarnPct", warnPct);
+            Object cov = gloss.get("metricTermCoveragePct");
+            boolean below = cov instanceof Number && ((Number) cov).doubleValue() < warnPct;
+            out.put("termCoverageBelowWarn", below);
+        } catch (Exception e) {
+            // soft-fail：术语 KPI 不影响指标 overview
+        }
         return out;
     }
 
@@ -509,11 +530,13 @@ public class GovMetricServiceImpl implements GovMetricService {
             }
             case "approve" -> {
                 requireStatus(from, "review");
+                applyTermGateOrThrow(head);
                 to = "active";
                 // 启用时编译并缓存
                 compileAndPersist(head, "trino");
                 syncOmMetricPointerSoft(head);
-                appendHistory(head.getId(), to, StrUtil.blankToDefault(note, head.getCurrentVer() + " 启用"));
+                appendHistory(head.getId(), to, StrUtil.blankToDefault(note, head.getCurrentVer() + " 启用")
+                        + termGateHistorySuffix(head));
             }
             case "reject" -> {
                 requireStatus(from, "review");
@@ -532,10 +555,11 @@ public class GovMetricServiceImpl implements GovMetricService {
             }
             case "approveVersion" -> {
                 requireStatus(from, "version_review");
+                applyTermGateOrThrow(head);
                 to = "active";
                 bumpVersion(head);
                 compileAndPersist(head, "trino");
-                appendHistory(head.getId(), to, head.getCurrentVer() + " 启用");
+                appendHistory(head.getId(), to, head.getCurrentVer() + " 启用" + termGateHistorySuffix(head));
             }
             case "cancelChange" -> {
                 requireStatus(from, "version_review");
@@ -557,7 +581,11 @@ public class GovMetricServiceImpl implements GovMetricService {
         head.setStatus(to);
         head.setRevision(head.getRevision() == null ? 1 : head.getRevision() + 1);
         metricMapper.updateById(head);
-        return toVo(requireMetric(head.getMetricCode(), head.getWs()), true);
+        GovMetricVo vo = toVo(requireMetric(head.getMetricCode(), head.getWs()), true);
+        if ("approve".equals(action) || "approveVersion".equals(action)) {
+            fillTermGateOnVo(vo, head);
+        }
+        return vo;
     }
 
     @Override
@@ -1613,6 +1641,11 @@ public class GovMetricServiceImpl implements GovMetricService {
         vo.setRevision(head.getRevision());
         vo.setCreateTime(head.getCreateTime());
         vo.setUpdateTime(head.getUpdateTime());
+        try {
+            vo.setHasTerm(termGraphHelper.hasTermForMetric(head.getMetricCode()));
+        } catch (Exception ignored) {
+            vo.setHasTerm(null);
+        }
 
         GovMetricVer ver = StrUtil.isBlank(head.getCurrentVerId()) ? null : verMapper.selectById(head.getCurrentVerId());
         if (ver != null) {
@@ -1736,6 +1769,83 @@ public class GovMetricServiceImpl implements GovMetricService {
         h.setNote(note);
         h.setCreateTime(new Date());
         historyMapper.insert(h);
+    }
+
+    private String resolveTermGateMode() {
+        LhProperties.Metric m = lhProperties == null ? null : lhProperties.getMetric();
+        String mode = m == null ? "soft" : StrUtil.blankToDefault(m.getTermGateMode(), "soft");
+        mode = mode.trim().toLowerCase(Locale.ROOT);
+        if (!"off".equals(mode) && !"soft".equals(mode) && !"hard".equals(mode)) {
+            return "soft";
+        }
+        return mode;
+    }
+
+    /** hard 缺术语抛错；soft/off 放行（soft 由 history/VO 提示） */
+    private void applyTermGateOrThrow(GovMetric head) {
+        String mode = resolveTermGateMode();
+        if ("off".equals(mode)) {
+            return;
+        }
+        boolean ok = false;
+        try {
+            ok = termGraphHelper.hasTermForMetric(head.getMetricCode());
+        } catch (Exception e) {
+            // 探活失败：soft 放行，hard 阻断
+            if ("hard".equals(mode)) {
+                throw new CommonException("术语闸门探活失败，无法启用: " + e.getMessage());
+            }
+            return;
+        }
+        if (ok) {
+            return;
+        }
+        String msg = "指标 " + head.getMetricCode()
+                + " 缺少业务术语（KB cat=term · implements_metric）。请在知识库补术语或调用 POST /lh/knowledge/glossary/ensure-term";
+        if ("hard".equals(mode)) {
+            throw new CommonException(msg);
+        }
+    }
+
+    private String termGateHistorySuffix(GovMetric head) {
+        if ("off".equals(resolveTermGateMode())) {
+            return "";
+        }
+        try {
+            if (termGraphHelper.hasTermForMetric(head.getMetricCode())) {
+                return "";
+            }
+        } catch (Exception ignored) {
+            return " · 术语闸门：探活失败（soft）";
+        }
+        if ("soft".equals(resolveTermGateMode())) {
+            return " · 术语闸门警告：缺 KB 业务术语（soft）";
+        }
+        return "";
+    }
+
+    private void fillTermGateOnVo(GovMetricVo vo, GovMetric head) {
+        String mode = resolveTermGateMode();
+        vo.setTermGateStatus("ok");
+        vo.setTermGateMessage(null);
+        if ("off".equals(mode)) {
+            return;
+        }
+        boolean ok;
+        try {
+            ok = termGraphHelper.hasTermForMetric(head.getMetricCode());
+        } catch (Exception e) {
+            vo.setTermGateStatus("warn");
+            vo.setTermGateMessage("术语闸门探活失败: " + e.getMessage());
+            return;
+        }
+        vo.setHasTerm(ok);
+        if (ok) {
+            return;
+        }
+        vo.setTermGateStatus("warn");
+        vo.setTermGateMessage("缺少业务术语边 implements_metric；mode=" + mode
+                + "。可 POST /lh/knowledge/glossary/ensure-term 或知识库新建术语。");
     }
 
     /** 草稿与列表 forceMineOnly 对齐：非特权不可窥探他人草稿详情 */

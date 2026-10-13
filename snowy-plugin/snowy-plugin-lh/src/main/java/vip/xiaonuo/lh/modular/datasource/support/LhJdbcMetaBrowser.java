@@ -15,7 +15,6 @@ import vip.xiaonuo.lh.modular.datasource.result.LhMetaObjectVo;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -96,7 +95,7 @@ public class LhJdbcMetaBrowser {
         String user = first(secret, "username", "user");
         String pwd = first(secret, "password", "passwd");
         LhDatasourceTypeEnum typeEnum = LhDatasourceTypeEnum.of(ds.getType()).orElse(null);
-        try (Connection conn = DriverManager.getConnection(jdbcUrl, user, pwd)) {
+        try (Connection conn = LhJdbcConnections.open(ds.getType(), jdbcUrl, user, pwd)) {
             return work.apply(new JdbcCtx(conn, ds, secret, typeEnum));
         } catch (CommonException e) {
             throw e;

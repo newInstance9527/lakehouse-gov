@@ -27,6 +27,7 @@ import vip.xiaonuo.lh.modular.catalog.param.GovAssetIdParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetMetaParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetPageParam;
 import vip.xiaonuo.lh.modular.catalog.param.GovAssetPreviewParam;
+import vip.xiaonuo.lh.modular.catalog.param.GovAssetSchemaColumnsParam;
 import vip.xiaonuo.lh.modular.catalog.result.GovAssetSourceVo;
 import vip.xiaonuo.lh.modular.catalog.result.GovAssetVo;
 import vip.xiaonuo.lh.modular.catalog.service.GovAssetService;
@@ -98,6 +99,20 @@ public class GovAssetController {
     @GetMapping("/lh/catalog/assets/schema")
     public CommonResult<Map<String, Object>> schema(@Valid GovAssetIdParam param) {
         return CommonResult.data(govAssetService.schema(param));
+    }
+
+    @Operation(summary = "列可改性评估（人读/结构意图+下游计数；不执行DDL）")
+    @GetMapping("/lh/catalog/assets/schema/assess")
+    public CommonResult<Map<String, Object>> schemaAssess(@Valid GovAssetIdParam param) {
+        return CommonResult.data(govAssetService.schemaAssess(param));
+    }
+
+    @Operation(summary = "写OM列人读（中文名/描述）；禁止结构字段")
+    @CommonLog("写资产列人读元数据")
+    @PostMapping("/lh/catalog/assets/schema/columns")
+    public CommonResult<Map<String, Object>> updateSchemaColumns(
+            @RequestBody @Valid GovAssetSchemaColumnsParam param) {
+        return CommonResult.data(govAssetService.updateSchemaColumns(param));
     }
 
     @Operation(summary = "写OM人读元数据（description/tags）")

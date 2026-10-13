@@ -734,6 +734,14 @@ public class LhProperties {
          * false=回落 skipped（不再伪造 1/1）。
          */
         private boolean reconLiveCount = true;
+        /**
+         * 启用（approve / approveVersion → active）时业务术语闸门。
+         * off=不检查；soft=缺术语仍启用但写 history 警告；hard=缺术语阻断。
+         * 判定：gov_kb_term_edge implements_metric → metric_code（非 broken）。
+         */
+        private String termGateMode = "soft";
+        /** 指标术语覆盖率低于该阈值时 overview/金路径标警告（默认 80） */
+        private double termCoverageWarnPct = 80d;
     }
 
     /** 湖/CK 对账与 rewrite_ck */

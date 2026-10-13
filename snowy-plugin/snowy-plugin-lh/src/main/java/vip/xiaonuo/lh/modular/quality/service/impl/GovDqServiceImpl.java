@@ -134,7 +134,60 @@ public class GovDqServiceImpl implements GovDqService {
         r.put("range", StrUtil.blankToDefault(range, "30"));
         // KPI 只认门户 gov_dq_rule_run；OM Profiler/Test 不进 overview（避免与平均分/通过率混读）
         r.put("stream", summarizeStreamRuns(runs));
+        r.put("dimensionScorecard", buildDimensionScorecard(rules, runs));
         return r;
+    }
+
+    /**
+     * 组织级质量维度分数卡：按 DAMA 六维聚合近窗运行（无跑则 score=null）。
+     */
+    private List<Map<String, Object>> buildDimensionScorecard(List<GovDqRule> rules, List<GovDqRuleRun> runs) {
+        Map<String, String> ruleDim = new LinkedHashMap<>();
+        for (GovDqRule rule : rules) {
+            ruleDim.put(rule.getId(), vip.xiaonuo.lh.modular.quality.support.GovDqDimensionMapper
+                    .toDimension(rule.getRuleType(), rule.getRuleCode()));
+        }
+        Map<String, List<Double>> scores = new LinkedHashMap<>();
+        Map<String, Long> ruleCnt = new LinkedHashMap<>();
+        for (String dim : List.of("completeness", "uniqueness", "validity", "consistency",
+                "timeliness", "accuracy", "other")) {
+            scores.put(dim, new ArrayList<>());
+            ruleCnt.put(dim, 0L);
+        }
+        for (GovDqRule rule : rules) {
+            String dim = ruleDim.getOrDefault(rule.getId(), "other");
+            ruleCnt.put(dim, ruleCnt.getOrDefault(dim, 0L) + 1);
+        }
+        for (GovDqRuleRun run : runs) {
+            if (run == null || StrUtil.isBlank(run.getRuleId())) {
+                continue;
+            }
+            String dim = ruleDim.getOrDefault(run.getRuleId(), "other");
+            double s = run.getOkPct() == null
+                    ? (Integer.valueOf(1).equals(run.getPass()) ? 100.0 : 0.0)
+                    : run.getOkPct().doubleValue();
+            scores.computeIfAbsent(dim, k -> new ArrayList<>()).add(s);
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (String dim : List.of("completeness", "uniqueness", "validity", "consistency",
+                "timeliness", "accuracy", "other")) {
+            List<Double> list = scores.getOrDefault(dim, List.of());
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("dimension", dim);
+            row.put("label", vip.xiaonuo.lh.modular.quality.support.GovDqDimensionMapper.labelZh(dim));
+            row.put("ruleCount", ruleCnt.getOrDefault(dim, 0L));
+            row.put("runCount", list.size());
+            if (list.isEmpty()) {
+                row.put("score", null);
+                row.put("empty", true);
+            } else {
+                double avg = list.stream().mapToDouble(Double::doubleValue).average().orElse(0);
+                row.put("score", round1(avg));
+                row.put("empty", false);
+            }
+            out.add(row);
+        }
+        return out;
     }
 
     /** 近窗 Flink 流式探针 runs（job_run_id=stream:…） */
