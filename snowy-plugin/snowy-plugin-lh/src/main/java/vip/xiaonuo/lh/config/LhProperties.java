@@ -64,11 +64,42 @@ public class LhProperties {
     private Outbox outbox = new Outbox();
     /** 出站 HTTPS 客户端（ES 等）是否跳过证书校验；默认 false */
     private Http http = new Http();
+    /** 门户自身埋点 BFF → Kafka（非多应用采集网关） */
+    private Analytics analytics = new Analytics();
 
     @Getter
     @Setter
     public static class Http {
         private boolean insecureSsl = false;
+    }
+
+    /**
+     * 门户第一方埋点：仅允许 {@code app-key}（默认 lakehouse-portal）经 BFF 写入 Kafka。
+     */
+    @Getter
+    @Setter
+    public static class Analytics {
+        /** false=接收后丢弃（本机默认） */
+        private boolean enabled = false;
+        /** 唯一允许的 appKey；拒绝第三方代投 */
+        private String appKey = "lakehouse-portal";
+        /** 单批最大事件数 */
+        private int maxBatch = 50;
+        private Kafka kafka = new Kafka();
+
+        @Getter
+        @Setter
+        public static class Kafka {
+            private String bootstrap = "";
+            private String topic = "lh_portal_events";
+            private String acks = "1";
+            private String clientId = "lh-portal-analytics";
+            /** 可选 SASL：PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512；空=无认证 */
+            private String saslMechanism = "";
+            private String saslUsername = "";
+            private String saslPassword = "";
+            private String securityProtocol = "";
+        }
     }
 
     @Getter

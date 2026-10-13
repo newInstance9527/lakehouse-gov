@@ -52,6 +52,14 @@ lh.compute.require-mr-merge=false
 lh.compute.require-script-publish-ticket=false
 lh.compute.publish-gate-hard-fail=false
 
+# —— 门户埋点 → Kafka（可选；默认关）——
+# lh.analytics.enabled=true
+# lh.analytics.kafka.bootstrap=127.0.0.1:9092
+# lh.analytics.kafka.topic=lh_portal_events
+# lh.analytics.kafka.sasl-mechanism=
+# lh.analytics.kafka.sasl-username=
+# lh.analytics.kafka.sasl-password=
+
 # =============================================================================
 # 湖仓外部组件（每块：地址 → 账号 → 密钥；运行时凭证优先 Vault）
 # =============================================================================

@@ -190,6 +190,9 @@ public class GlobalConfigure implements WebMvcConfigurer {
             /* 数据服务运行时门面（订阅 Key 鉴权，见 DataapiRuntimeAuth） */
             "/lh/dataapi/runtime/invoke",
 
+            /* 门户第一方埋点 BFF（appKey 校验；sendBeacon 可能无 token） */
+            "/lh/analytics/collect",
+
             /* 可视化大屏插件放行 */
             "/screen/project/releaseDetail",
             "/screen/project/verifyAccessPassword",
