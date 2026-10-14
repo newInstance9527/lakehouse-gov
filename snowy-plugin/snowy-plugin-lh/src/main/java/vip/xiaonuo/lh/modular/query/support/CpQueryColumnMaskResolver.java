@@ -96,6 +96,15 @@ public class CpQueryColumnMaskResolver {
                     source = SOURCE_GRAV;
                 }
             }
+            // plain 豁免：审批明文列不参与强制打标
+            Set<String> plain = loadGrantPlainColumns(subjectId, assets);
+            if (!plain.isEmpty()) {
+                Set<String> plainLower = new LinkedHashSet<>();
+                for (String p : plain) {
+                    plainLower.add(p.toLowerCase(Locale.ROOT));
+                }
+                policyCols.removeIf(c -> c != null && plainLower.contains(c.toLowerCase(Locale.ROOT)));
+            }
         }
 
         if (policyCols.isEmpty()) {
@@ -133,7 +142,7 @@ public class CpQueryColumnMaskResolver {
         return false;
     }
 
-    /** 解析 grant.column_mask JSON / CSV（单测与投影共用）。 */
+    /** 解析 grant.column_mask JSON / CSV（单测与投影共用）。忽略 plain 豁免键。 */
     public static Set<String> parseColumnMaskPayload(String raw) {
         Set<String> out = new LinkedHashSet<>();
         if (StrUtil.isBlank(raw)) {
@@ -155,6 +164,7 @@ public class CpQueryColumnMaskResolver {
             }
             if (trimmed.startsWith("{")) {
                 JSONObject jo = JSONUtil.parseObj(trimmed);
+                // 仅 plain、无 mask 键时视为豁免摘要，不产生脱敏列
                 Object cols = jo.get("columns");
                 if (cols == null) {
                     cols = jo.get("maskCols");
@@ -168,7 +178,7 @@ public class CpQueryColumnMaskResolver {
                             addCol(out, firstStr(one, "column", "columnName", "name", "col"));
                         }
                     }
-                } else {
+                } else if (cols != null) {
                     addCol(out, firstStr(jo, "column", "columnName", "name"));
                 }
                 return out;
@@ -178,6 +188,57 @@ public class CpQueryColumnMaskResolver {
         }
         for (String part : trimmed.split("[,;\\s]+")) {
             addCol(out, part);
+        }
+        return out;
+    }
+
+    /** 解析 column_mask.plain 明文豁免列。 */
+    public static Set<String> parsePlainColumns(String raw) {
+        Set<String> out = new LinkedHashSet<>();
+        if (StrUtil.isBlank(raw)) {
+            return out;
+        }
+        String trimmed = raw.trim();
+        try {
+            if (trimmed.startsWith("{")) {
+                JSONObject jo = JSONUtil.parseObj(trimmed);
+                Object plain = jo.get("plain");
+                if (plain instanceof JSONArray arr) {
+                    for (int i = 0; i < arr.size(); i++) {
+                        Object item = arr.get(i);
+                        if (item instanceof String s) {
+                            addCol(out, s);
+                        }
+                    }
+                } else if (plain instanceof String s) {
+                    for (String part : s.split("[,;\\s]+")) {
+                        addCol(out, part);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // ignore
+        }
+        return out;
+    }
+
+    private Set<String> loadGrantPlainColumns(String subjectId, List<CbGravAssetRef> assets) {
+        Set<String> out = new LinkedHashSet<>();
+        if (StrUtil.isBlank(subjectId) || assets.isEmpty()) {
+            return out;
+        }
+        List<String> gravIds = assets.stream().map(CbGravAssetRef::getId).filter(StrUtil::isNotBlank).toList();
+        if (gravIds.isEmpty()) {
+            return out;
+        }
+        List<SecAuthGrant> grants = grantMapper.selectList(new QueryWrapper<SecAuthGrant>().lambda()
+                .eq(SecAuthGrant::getSubjectId, subjectId)
+                .eq(SecAuthGrant::getStatus, "active")
+                .eq(SecAuthGrant::getDeleteFlag, NOT_DELETE)
+                .in(SecAuthGrant::getGravAssetId, gravIds)
+                .isNotNull(SecAuthGrant::getColumnMask));
+        for (SecAuthGrant g : grants) {
+            out.addAll(parsePlainColumns(g.getColumnMask()));
         }
         return out;
     }

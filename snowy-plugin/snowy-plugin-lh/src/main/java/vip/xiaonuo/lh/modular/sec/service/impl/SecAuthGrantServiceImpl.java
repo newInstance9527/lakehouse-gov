@@ -559,10 +559,20 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
     public SecAuthGrant recordSelectProjection(String ticketId, String subjectId, String assetId,
                                                String gravAssetId, Date expiresAt, String rowFilter,
                                                String policyId, String ws, String remark) {
+        return recordSelectProjection(ticketId, subjectId, assetId, gravAssetId, expiresAt, rowFilter,
+                null, null, policyId, ws, remark);
+    }
+
+    @Override
+    public SecAuthGrant recordSelectProjection(String ticketId, String subjectId, String assetId,
+                                               String gravAssetId, Date expiresAt, String rowFilter,
+                                               String allowedColumns, String columnMask,
+                                               String policyId, String ws, String remark) {
         if (StrUtil.hasBlank(subjectId, assetId)) {
             throw new CommonException("SELECT 投影缺少主体或资产");
         }
         Date now = new Date();
+        String normCols = normalizeAllowedColumns(allowedColumns);
         SecAuthGrant existing = grantMapper.selectOne(new QueryWrapper<SecAuthGrant>().lambda()
                 .eq(SecAuthGrant::getDeleteFlag, NOT_DELETE)
                 .eq(SecAuthGrant::getStatus, "active")
@@ -579,6 +589,10 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
             existing.setResourceId(assetId);
             existing.setGravAssetId(StrUtil.blankToDefault(gravAssetId, existing.getGravAssetId()));
             existing.setRowFilter(StrUtil.maxLength(StrUtil.nullToEmpty(rowFilter), 1024));
+            existing.setAllowedColumns(normCols);
+            if (columnMask != null) {
+                existing.setColumnMask(StrUtil.isBlank(columnMask) ? null : columnMask);
+            }
             if (StrUtil.isNotBlank(policyId)) {
                 existing.setGravPolicyId(policyId);
             }
@@ -606,6 +620,8 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         g.setGravAssetId(gravAssetId);
         g.setPrivilege("SELECT");
         g.setRowFilter(StrUtil.maxLength(StrUtil.nullToEmpty(rowFilter), 1024));
+        g.setAllowedColumns(normCols);
+        g.setColumnMask(StrUtil.isBlank(columnMask) ? null : columnMask);
         g.setGravPolicyId(StrUtil.blankToDefault(policyId, null));
         g.setGravProjected(1);
         g.setEffectiveAt(now);
@@ -619,6 +635,23 @@ public class SecAuthGrantServiceImpl implements SecAuthGrantService {
         }
         grantMapper.insert(g);
         return g;
+    }
+
+    /** 规范化列白名单：trim、去重、逗号拼接；空输入返回 null。 */
+    public static String normalizeAllowedColumns(String raw) {
+        if (StrUtil.isBlank(raw)) {
+            return null;
+        }
+        LinkedHashSet<String> cols = new LinkedHashSet<>();
+        for (String part : raw.trim().split("[,;\\s]+")) {
+            if (StrUtil.isNotBlank(part)) {
+                cols.add(part.trim());
+            }
+        }
+        if (cols.isEmpty()) {
+            return null;
+        }
+        return String.join(",", cols);
     }
 
     @Override

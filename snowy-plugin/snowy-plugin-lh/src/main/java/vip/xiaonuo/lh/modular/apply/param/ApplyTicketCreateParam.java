@@ -28,10 +28,10 @@ public class ApplyTicketCreateParam {
     @Schema(description = "时效文案，如 30天/长期")
     private String expireLabel;
 
-    @Schema(description = "行过滤条件，原样交给 Gravitino（table_read 可选）")
+    @Schema(description = "行过滤条件（table_read 可选；落门户 sec_auth_grant.row_filter，不写 Grav）")
     private String rowFilter;
 
-    @Schema(description = "申请列（可选）")
+    @Schema(description = "申请列白名单，逗号分隔（column/plain 必填；落 sec_auth_grant.allowed_columns）")
     private String columns;
 
     @Schema(description = "出湖源表名/编码（lake_export MUST）")

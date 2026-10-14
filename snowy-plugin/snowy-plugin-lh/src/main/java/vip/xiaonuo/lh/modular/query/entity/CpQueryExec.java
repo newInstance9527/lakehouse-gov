@@ -41,6 +41,10 @@ public class CpQueryExec {
     private Long scanBytes;
     private Long durMs;
     private String maskCols;
+    /** engine / policy_proj / grant / grav / none */
+    private String maskSource;
+    /** 1=无策略降级 */
+    private Integer maskDegraded;
     private String errorMsg;
     private String trinoQueryId;
     private String deleteFlag;

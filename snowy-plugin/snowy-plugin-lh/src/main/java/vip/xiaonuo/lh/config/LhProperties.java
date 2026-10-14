@@ -392,6 +392,16 @@ public class LhProperties {
         private String metricGlossaryName = "LakehouseMetric";
         /** false=升版/发布不写 OM 指标指针 */
         private boolean metricGlossarySync = true;
+        /**
+         * 列级敏感标签 FQN 前缀（逗号分隔）；命中则投影到 {@code sec_mask_policy_proj}。
+         * 默认含 PII / Sensitive / 中文密级关键词。
+         */
+        private String maskSensitiveTagPrefixes =
+                "PII,PersonalData,Sensitive,Tier.Confidential,Classification.Sensitive,敏感,机密,隐私";
+        /** false=关闭 OM→mask 同步接口与批处理 */
+        private boolean maskTagSyncEnabled = true;
+        /** 按空间批同步时最多处理资产数 */
+        private int maskTagSyncBatchLimit = 50;
     }
 
     @Getter

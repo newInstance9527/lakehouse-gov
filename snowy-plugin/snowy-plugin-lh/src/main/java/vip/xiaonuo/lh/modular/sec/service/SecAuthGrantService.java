@@ -141,6 +141,17 @@ public interface SecAuthGrantService {
                                         String gravAssetId, Date expiresAt, String rowFilter,
                                         String policyId, String ws, String remark);
 
+    /**
+     * 同 {@link #recordSelectProjection}，额外写入列白名单与 column_mask（如 plain 豁免）。
+     *
+     * @param allowedColumns 逗号分隔列白名单；空=不限制列
+     * @param columnMask     列脱敏/明文豁免摘要 JSON；可空
+     */
+    SecAuthGrant recordSelectProjection(String ticketId, String subjectId, String assetId,
+                                        String gravAssetId, Date expiresAt, String rowFilter,
+                                        String allowedColumns, String columnMask,
+                                        String policyId, String ws, String remark);
+
     /** Gravitino 回收成功后，把该申请单的 SELECT 投影标为 expired。 */
     int expireSelectProjection(String ticketId);
 }

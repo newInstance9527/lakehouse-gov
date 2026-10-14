@@ -107,7 +107,7 @@ public class CpQueryRowFilterInjector {
                 "行级谓词来自 sec_auth_grant.row_filter，已对 FROM/JOIN 表引用强制包裹");
     }
 
-    static boolean isSelectLike(String sql) {
+    public static boolean isSelectLike(String sql) {
         String s = CpQueryColumnMaskResolver.stripSqlComments(sql).trim();
         if (s.isEmpty()) {
             return false;

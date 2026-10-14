@@ -14,6 +14,7 @@ import vip.xiaonuo.lh.modular.apply.param.ApplyTicketCreateParam;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketDecideParam;
 import vip.xiaonuo.lh.modular.apply.param.ApplyTicketPageParam;
 import vip.xiaonuo.lh.modular.apply.service.ApplyTicketService;
+import vip.xiaonuo.lh.modular.sec.service.SecOmMaskSyncService;
 
 import java.util.Map;
 
@@ -24,6 +25,14 @@ public class ApplyTicketController {
 
     @Resource
     private ApplyTicketService applyTicketService;
+    @Resource
+    private SecOmMaskSyncService omMaskSyncService;
+
+    @Operation(summary = "表读申请预填：建议列 / 行过滤模板（OM 标签或 mask 投影）")
+    @GetMapping("/lh/apply/prefills/table-read")
+    public CommonResult<Map<String, Object>> tableReadPrefill(@RequestParam String assetId) {
+        return CommonResult.data(omMaskSyncService.tableReadPrefill(assetId));
+    }
 
     @Operation(summary = "提交申请")
     @CommonLog("提交申请单")

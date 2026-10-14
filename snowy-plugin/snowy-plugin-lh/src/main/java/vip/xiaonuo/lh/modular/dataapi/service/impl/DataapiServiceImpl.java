@@ -45,6 +45,7 @@ import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceSqlrestProjector;
 import vip.xiaonuo.lh.modular.datasource.support.ApiBuildTableAccess;
 import vip.xiaonuo.lh.modular.datasource.support.ConsumerBindingSyncGate;
 import vip.xiaonuo.lh.modular.query.service.impl.CpQueryServiceImpl;
+import vip.xiaonuo.lh.modular.query.support.CpQueryColumnAllowlistGate;
 import vip.xiaonuo.lh.modular.query.support.CpQueryColumnMaskResolver;
 import vip.xiaonuo.lh.modular.query.support.CpQueryRowFilterInjector;
 import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
@@ -94,6 +95,8 @@ public class DataapiServiceImpl implements DataapiService {
     private LhUserNameResolver userNameResolver;
     @Resource
     private CpQueryRowFilterInjector rowFilterInjector;
+    @Resource
+    private CpQueryColumnAllowlistGate columnAllowlistGate;
     @Resource
     private CpQueryColumnMaskResolver columnMaskResolver;
     @Resource
@@ -528,11 +531,20 @@ public class DataapiServiceImpl implements DataapiService {
         boolean anyApplied = false;
         boolean anyDegraded = false;
         boolean anyPolicyFailed = false;
+        boolean anyColumnGate = false;
         StringBuilder filterMsg = new StringBuilder();
         for (String c : contexts) {
             if ("GROOVY".equals(engine)) {
                 injectedContexts.add(c);
                 continue;
+            }
+            CpQueryColumnAllowlistGate.GateResult cg = columnAllowlistGate.check(c, subjectId);
+            if (cg.denied) {
+                throw new CommonException("试跑列权限未通过："
+                        + StrUtil.blankToDefault(cg.message, "列白名单校验失败"));
+            }
+            if (cg.applied) {
+                anyColumnGate = true;
             }
             CpQueryRowFilterInjector.InjectResult rf = rowFilterInjector.inject(c, subjectId);
             if (rf.policyFailed
@@ -583,6 +595,7 @@ public class DataapiServiceImpl implements DataapiService {
         if (filterMsg.length() > 0) {
             trialOut.put("rowFilterMessage", filterMsg.toString());
         }
+        trialOut.put("columnGateApplied", anyColumnGate);
 
         // 列级 mask 提示（试跑结果列）；运行时网关仍旁路，此处只打标
         String sqlForMask = injectedContexts.isEmpty() ? "" : injectedContexts.get(0);
@@ -672,8 +685,17 @@ public class DataapiServiceImpl implements DataapiService {
         boolean anyApplied = false;
         boolean anyDegraded = false;
         boolean anyPolicyFailed = false;
+        boolean anyColumnGate = false;
         StringBuilder filterMsg = new StringBuilder();
         for (String c : contexts) {
+            CpQueryColumnAllowlistGate.GateResult cg = columnAllowlistGate.check(c, subjectId);
+            if (cg.denied) {
+                throw new CommonException("运行时列权限未通过："
+                        + StrUtil.blankToDefault(cg.message, "列白名单校验失败"));
+            }
+            if (cg.applied) {
+                anyColumnGate = true;
+            }
             CpQueryRowFilterInjector.InjectResult rf = rowFilterInjector.inject(c, subjectId);
             if (rf.policyFailed
                     && (lhProperties.getQuery() == null || !lhProperties.getQuery().isAllowRowFilterDegraded())) {
@@ -717,6 +739,7 @@ public class DataapiServiceImpl implements DataapiService {
 
         Map<String, Object> out = enrichTrial(sqlrestClient.debug(req), contextList);
         out.put("runtimePath", "portal");
+        out.put("columnGateApplied", anyColumnGate);
         out.put("bindingId", binding.getId());
         out.put("publicPath", binding.getPublicPath());
         out.put("method", StrUtil.blankToDefault(binding.getMethod(), "GET"));

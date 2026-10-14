@@ -28,6 +28,7 @@ import vip.xiaonuo.lh.modular.query.param.CpQuerySavedSaveParam;
 import vip.xiaonuo.lh.modular.query.service.CpQueryService;
 import vip.xiaonuo.lh.modular.query.support.CpQueryAssetCatalog;
 import vip.xiaonuo.lh.modular.query.support.CpQueryCatalogGuard;
+import vip.xiaonuo.lh.modular.query.support.CpQueryColumnAllowlistGate;
 import vip.xiaonuo.lh.modular.query.support.CpQueryColumnMaskResolver;
 import vip.xiaonuo.lh.modular.query.support.CpQueryConcurrencyGuard;
 import vip.xiaonuo.lh.modular.query.support.CpQueryDatasetObjectKeys;
@@ -79,6 +80,8 @@ public class CpQueryServiceImpl implements CpQueryService {
     private CpQueryColumnMaskResolver columnMaskResolver;
     @Resource
     private CpQueryRowFilterInjector rowFilterInjector;
+    @Resource
+    private CpQueryColumnAllowlistGate columnAllowlistGate;
     @Resource
     private SecAuthGrantService secAuthGrantService;
     @Resource
@@ -215,9 +218,28 @@ public class CpQueryServiceImpl implements CpQueryService {
         long t0 = System.currentTimeMillis();
         CpQueryPrincipalMapper.Principal principal = resolvePrincipal(user);
         String subjectForPolicy = StrUtil.blankToDefault(user.id, principal.trinoUser);
+        String sqlOriginal = sql;
+        CpQueryColumnAllowlistGate.GateResult columnGate =
+                columnAllowlistGate.check(sql, subjectForPolicy);
+        if (columnGate.denied) {
+            row.setStatus("blocked");
+            row.setStatusLabel("⚠ 列权限");
+            row.setErrorMsg(StrUtil.maxLength(columnGate.message, 1000));
+            row.setUpdateTime(new Date());
+            execMapper.updateById(row);
+            Map<String, Object> blocked = CpQueryScanGuard.blockedPayload(
+                    StrUtil.blankToDefault(columnGate.message, "列白名单校验未通过"));
+            blocked.put("queryId", queryId);
+            blocked.put("id", row.getId());
+            blocked.put("errorCode", "COLUMN_ALLOWLIST_DENIED");
+            blocked.put("columnGateApplied", true);
+            blocked.put("columnGateDenied", true);
+            blocked.put("columnAllowlists", columnGate.allowlists);
+            blocked.put("applyPath", "/apply?type=perm&privilege=SELECT");
+            return blocked;
+        }
         CpQueryRowFilterInjector.InjectResult rowFilter =
                 rowFilterInjector.inject(sql, subjectForPolicy);
-        String sqlOriginal = sql;
         if (rowFilter.policyFailed
                 && (lhProperties.getQuery() == null || !lhProperties.getQuery().isAllowRowFilterDegraded())) {
             row.setStatus("blocked");
@@ -232,6 +254,7 @@ public class CpQueryServiceImpl implements CpQueryService {
             blocked.put("errorCode", "ROW_FILTER_POLICY_FAILED");
             blocked.put("rowFilterDegraded", true);
             blocked.put("rowFilterPolicyFailed", true);
+            blocked.put("columnGateApplied", columnGate.applied);
             return blocked;
         }
         if (rowFilter.applied && StrUtil.isNotBlank(rowFilter.sql) && !rowFilter.sql.equals(sql)) {
@@ -397,6 +420,8 @@ public class CpQueryServiceImpl implements CpQueryService {
         row.setScanBytes(scanBytes);
         row.setDurMs(dur);
         row.setMaskCols(maskCols.isEmpty() ? null : String.join(",", maskCols));
+        row.setMaskSource(StrUtil.blankToDefault(mask.maskSource, null));
+        row.setMaskDegraded(Boolean.TRUE.equals(mask.maskDegraded) ? 1 : 0);
         row.setUpdateTime(new Date());
         execMapper.updateById(row);
 
@@ -436,6 +461,12 @@ public class CpQueryServiceImpl implements CpQueryService {
         out.put("rowFilterPredicates", rowFilter.predicates);
         if (StrUtil.isNotBlank(rowFilter.message)) {
             out.put("rowFilterMessage", rowFilter.message);
+        }
+        out.put("columnGateApplied", columnGate.applied);
+        out.put("columnGateDenied", false);
+        out.put("columnAllowlists", columnGate.allowlists);
+        if (StrUtil.isNotBlank(columnGate.message)) {
+            out.put("columnGateMessage", columnGate.message);
         }
         if (rowFilter.applied) {
             out.put("sqlOriginal", sqlOriginal);

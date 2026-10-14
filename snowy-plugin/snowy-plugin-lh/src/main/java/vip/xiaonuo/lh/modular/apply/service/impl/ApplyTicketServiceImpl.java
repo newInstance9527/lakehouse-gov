@@ -475,16 +475,29 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         if (StrUtil.isBlank(param.getAssetId())) {
             throw new CommonException("表读权限申请须指定 assetId");
         }
+        String rowFilter = StrUtil.trim(param.getRowFilter());
+        if (StrUtil.isNotBlank(rowFilter)
+                && !vip.xiaonuo.lh.modular.query.support.CpQueryRowFilterInjector.isSafePredicate(rowFilter)) {
+            throw new CommonException("rowFilter 不安全，拒绝提交（禁止多语句/DDL/注释）");
+        }
+        String privilege = StrUtil.blankToDefault(param.getPrivilege(), "SELECT").trim();
+        String columns = vip.xiaonuo.lh.modular.sec.service.impl.SecAuthGrantServiceImpl
+                .normalizeAllowedColumns(param.getColumns());
+        if (("column".equalsIgnoreCase(privilege) || "plain".equalsIgnoreCase(privilege))
+                && StrUtil.isBlank(columns)) {
+            throw new CommonException("列级/明文权限申请须填写 columns");
+        }
         GovAsset asset = resolveAsset(param.getAssetId());
         ApplyTicket t = newTicketShell(userId, type, param, asset.getWs());
         t.setTicketNo("AT" + t.getId());
         JSONObject payload = new JSONObject();
         payload.set("assetId", asset.getId());
         payload.set("assetCode", asset.getAssetCode());
-        payload.set("privilege", StrUtil.blankToDefault(param.getPrivilege(), "SELECT"));
-        payload.set("rowFilter", param.getRowFilter());
+        // 引擎表级一律 SELECT；column/plain 仅门户列白名单语义
+        payload.set("privilege", privilege);
+        payload.set("rowFilter", StrUtil.blankToDefault(rowFilter, null));
         payload.set("expireLabel", param.getExpireLabel());
-        payload.set("columns", param.getColumns());
+        payload.set("columns", columns);
         ApplyApprovalChain.stampChainOnCreate(payload, asset.getSensitivity());
         t.setPayload(payload.toString());
         t.setExpiresAt(parseExpire(param.getExpireLabel()));
@@ -494,7 +507,7 @@ public class ApplyTicketServiceImpl implements ApplyTicketService {
         item.setAssetId(asset.getId());
         item.setGravAssetId(asset.getGravAssetId());
         item.setOmFqn(asset.getOmFqn());
-        item.setAction(StrUtil.blankToDefault(param.getPrivilege(), "SELECT"));
+        item.setAction("SELECT");
         item.setDetail(payload.toString());
         itemMapper.insert(item);
         return t;

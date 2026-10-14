@@ -28,7 +28,6 @@ import vip.xiaonuo.lh.modular.sec.service.SecAuthGrantService;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 @Slf4j
@@ -59,9 +58,14 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
         if (ticket == null || item == null) {
             throw new CommonException("表读申请不完整");
         }
-        String priv = StrUtil.blankToDefault(privilege, "SELECT").trim().toUpperCase(Locale.ROOT);
-        if (!"SELECT".equals(priv)) {
-            throw new CommonException("表数据权限只接受 SELECT，操作权请走 resource_manage");
+        // 前端 permMode 可能是 read/column/plain；引擎表级一律 SELECT
+        String mode = StrUtil.blankToDefault(privilege, "SELECT").trim();
+        String priv = "SELECT";
+        if (!"SELECT".equalsIgnoreCase(mode)
+                && !"READ".equalsIgnoreCase(mode)
+                && !"COLUMN".equalsIgnoreCase(mode)
+                && !"PLAIN".equalsIgnoreCase(mode)) {
+            throw new CommonException("表数据权限只接受 SELECT/column/plain，操作权请走 resource_manage");
         }
         LhTrinoPrincipal principal = principalService.requireByPortalUserId(ticket.getApplicant());
         GovAsset asset = assetMapper.selectById(StrUtil.blankToDefault(item.getAssetId(), ""));
@@ -73,6 +77,21 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
             throw new CommonException("资产未挂接 Gravitino，拒绝只写门户授权");
         }
         String condition = StrUtil.trim(rowFilter);
+        if (StrUtil.isNotBlank(condition)
+                && !vip.xiaonuo.lh.modular.query.support.CpQueryRowFilterInjector.isSafePredicate(condition)) {
+            throw new CommonException("rowFilter 不安全，拒绝授权（禁止多语句/DDL/注释）");
+        }
+        JSONObject ticketPayload = JSONUtil.parseObj(StrUtil.blankToDefault(ticket.getPayload(), "{}"));
+        String allowedColumns = SecAuthGrantServiceImpl.normalizeAllowedColumns(ticketPayload.getStr("columns"));
+        String privilegeMode = StrUtil.blankToDefault(ticketPayload.getStr("privilege"), mode).trim();
+        String columnMask = null;
+        // plain = 敏感列明文：列白名单 + column_mask.plain 豁免打标
+        if (StrUtil.isNotBlank(allowedColumns) && "plain".equalsIgnoreCase(privilegeMode)) {
+            JSONObject mask = new JSONObject();
+            mask.set("plain", List.of(allowedColumns.split(",")));
+            columnMask = mask.toString();
+        }
+        // Grav condition 仅为 ALLOW/DENY，不承载行过滤；传 null 避免误写引擎
         Map<String, Object> granted = gravitinoClient.grantTablePrivilege(
                 ref.getGravMetalake(),
                 ref.getGravCatalog(),
@@ -80,7 +99,7 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
                 ref.getGravTable(),
                 principal.getTrinoUser(),
                 priv,
-                condition);
+                null);
         boolean gravOk = Boolean.TRUE.equals(granted.get("ok"));
         if (!gravOk) {
             // 引擎失败不写门户 SELECT 投影，避免目录/元数据假授权
@@ -97,11 +116,13 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
                     ref.getId(),
                     ticket.getExpiresAt(),
                     condition,
+                    allowedColumns,
+                    columnMask,
                     policyId,
                     ticket.getWs(),
                     "SELECT projection; Grav ACL ok");
         }
-        JSONObject payload = JSONUtil.parseObj(StrUtil.blankToDefault(ticket.getPayload(), "{}"));
+        JSONObject payload = ticketPayload;
         JSONObject grav = new JSONObject();
         grav.set("principal", principal.getTrinoUser());
         grav.set("privilege", priv);
@@ -110,6 +131,7 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
         grav.set("policyId", granted.get("policyId"));
         grav.set("fullName", ref.getGravCatalog() + "." + ref.getGravSchema() + "." + ref.getGravTable());
         grav.set("rowFilter", StrUtil.blankToDefault(condition, ""));
+        grav.set("allowedColumns", StrUtil.blankToDefault(allowedColumns, ""));
         grav.set("expiresAt", ticket.getExpiresAt());
         grav.set("revoked", false);
         grav.set("projected", gravOk);
@@ -133,6 +155,7 @@ public class GravTableAccessServiceImpl implements GravTableAccessService {
             out.put("gravMessage", granted.get("message"));
         }
         out.put("rowFilter", StrUtil.blankToDefault(condition, null));
+        out.put("allowedColumns", allowedColumns);
         out.put("expiresAt", ticket.getExpiresAt());
         return out;
     }

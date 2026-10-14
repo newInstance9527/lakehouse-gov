@@ -21,6 +21,8 @@ import vip.xiaonuo.lh.modular.datasource.param.LhDatasourceIdParam;
 import vip.xiaonuo.lh.modular.datasource.service.LhDatasourceService;
 import vip.xiaonuo.lh.modular.export.entity.GovExportAudit;
 import vip.xiaonuo.lh.modular.export.mapper.GovExportAuditMapper;
+import vip.xiaonuo.lh.modular.query.entity.CpQueryExec;
+import vip.xiaonuo.lh.modular.query.mapper.CpQueryExecMapper;
 import vip.xiaonuo.lh.modular.sec.entity.SecAuthGrant;
 import vip.xiaonuo.lh.modular.sec.entity.SecJobSa;
 import vip.xiaonuo.lh.modular.sec.entity.SecMaskPolicyProj;
@@ -64,6 +66,8 @@ public class SecBoardServiceImpl implements SecBoardService {
     @Resource
     private GovExportAuditMapper exportAuditMapper;
     @Resource
+    private CpQueryExecMapper queryExecMapper;
+    @Resource
     private LhSecretStoreMapper secretStoreMapper;
     @Resource
     private LhDatasourceMapper datasourceMapper;
@@ -100,10 +104,23 @@ public class SecBoardServiceImpl implements SecBoardService {
                 .ne(GovAsset::getSensitivity, "公开")
                 .ne(GovAsset::getSensitivity, "PUBLIC"));
 
-        long audit24h = exportAuditMapper.selectCount(new QueryWrapper<GovExportAudit>().lambda()
+        long export24h = exportAuditMapper.selectCount(new QueryWrapper<GovExportAudit>().lambda()
                 .eq(GovExportAudit::getDeleteFlag, NOT_DELETE)
                 .eq(StrUtil.isNotBlank(workspace), GovExportAudit::getWs, workspace)
                 .ge(GovExportAudit::getEventTime, dayAgo));
+        long queryRisk24h = queryExecMapper.selectCount(new QueryWrapper<CpQueryExec>().lambda()
+                .eq(CpQueryExec::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), CpQueryExec::getWs, workspace)
+                .ge(CpQueryExec::getCreateTime, dayAgo)
+                .and(w -> w.in(CpQueryExec::getStatus, "blocked", "failed", "error")
+                        .or(x -> x.isNotNull(CpQueryExec::getMaskCols).ne(CpQueryExec::getMaskCols, ""))
+                        .or().eq(CpQueryExec::getMaskDegraded, 1)));
+        long grantTouch24h = grantMapper.selectCount(new QueryWrapper<SecAuthGrant>().lambda()
+                .eq(SecAuthGrant::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), SecAuthGrant::getWs, workspace)
+                .and(w -> w.ge(SecAuthGrant::getCreateTime, dayAgo)
+                        .or().ge(SecAuthGrant::getUpdateTime, dayAgo)));
+        long audit24h = export24h + queryRisk24h + grantTouch24h;
 
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("ws", workspace);
@@ -112,6 +129,9 @@ public class SecBoardServiceImpl implements SecBoardService {
         r.put("sensitiveColumns", sensitiveCols);
         r.put("sensitiveAssets", sensitiveAssets);
         r.put("auditLast24h", audit24h);
+        r.put("auditExport24h", export24h);
+        r.put("auditQueryRisk24h", queryRisk24h);
+        r.put("auditGrantTouch24h", grantTouch24h);
         r.put("source", "portal");
         return r;
     }
@@ -149,6 +169,7 @@ public class SecBoardServiceImpl implements SecBoardService {
             row.put("privilege", g.getPrivilege());
             row.put("columnMask", g.getColumnMask());
             row.put("rowFilter", g.getRowFilter());
+            row.put("allowedColumns", g.getAllowedColumns());
             row.put("ticketId", g.getTicketId());
             row.put("gravProjected", g.getGravProjected());
             row.put("expiresAt", g.getExpiresAt());
@@ -187,11 +208,39 @@ public class SecBoardServiceImpl implements SecBoardService {
             row.put("sensitivity", m.getSensitivity());
             row.put("maskAlgo", m.getMaskAlgo());
             row.put("omTagFqn", m.getOmTagFqn());
+            row.put("source", StrUtil.isNotBlank(m.getOmTagFqn()) ? "om_tag" : "policy_proj");
             row.put("gravPolicyId", m.getGravPolicyId());
             row.put("updateTime", m.getUpdateTime());
             records.add(row);
         }
-        return pageMap(records, page.getTotal(), cur, sz);
+        Map<String, Object> r = pageMap(records, page.getTotal(), cur, sz);
+        // 可观测摘要：策略条数 / 明文豁免 grant / 近 24h 脱敏执行
+        Date dayAgo = hoursAgo(24);
+        long plainGrants = grantMapper.selectCount(new QueryWrapper<SecAuthGrant>().lambda()
+                .eq(SecAuthGrant::getDeleteFlag, NOT_DELETE)
+                .eq(SecAuthGrant::getStatus, "active")
+                .eq(StrUtil.isNotBlank(workspace), SecAuthGrant::getWs, workspace)
+                .isNotNull(SecAuthGrant::getColumnMask)
+                .like(SecAuthGrant::getColumnMask, "\"plain\""));
+        long maskedExec24h = queryExecMapper.selectCount(new QueryWrapper<CpQueryExec>().lambda()
+                .eq(CpQueryExec::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), CpQueryExec::getWs, workspace)
+                .ge(CpQueryExec::getCreateTime, dayAgo)
+                .isNotNull(CpQueryExec::getMaskCols)
+                .ne(CpQueryExec::getMaskCols, ""));
+        long maskDegraded24h = queryExecMapper.selectCount(new QueryWrapper<CpQueryExec>().lambda()
+                .eq(CpQueryExec::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), CpQueryExec::getWs, workspace)
+                .ge(CpQueryExec::getCreateTime, dayAgo)
+                .eq(CpQueryExec::getMaskDegraded, 1));
+        Map<String, Object> obs = new LinkedHashMap<>();
+        obs.put("policyRows", page.getTotal());
+        obs.put("plainExemptGrants", plainGrants);
+        obs.put("maskedExec24h", maskedExec24h);
+        obs.put("maskDegraded24h", maskDegraded24h);
+        obs.put("hint", "脱敏 SoT=sec_mask_policy_proj；执行来源见 cp_query_exec.mask_source；plain 豁免见 grant.column_mask");
+        r.put("observability", obs);
+        return r;
     }
 
     @Override
@@ -231,24 +280,58 @@ public class SecBoardServiceImpl implements SecBoardService {
         String workspace = vip.xiaonuo.lh.core.ws.LhWsFilters.listWs(ws);
         long cur = Math.max(1, current);
         long sz = Math.min(100, Math.max(1, size));
+        String kw = StrUtil.trim(q);
+        // 各源拉取上限后内存合并排序分页（安全看板近窗，非全量日志仓）
+        final int perSource = 80;
+        List<Map<String, Object>> merged = new ArrayList<>();
+        merged.addAll(loadExportAuditRows(workspace, kw, perSource));
+        merged.addAll(loadQueryRiskAuditRows(workspace, kw, perSource));
+        merged.addAll(loadGrantAuditRows(workspace, kw, perSource));
+        merged.sort((a, b) -> {
+            Date ta = (Date) a.get("time");
+            Date tb = (Date) b.get("time");
+            if (ta == null && tb == null) {
+                return 0;
+            }
+            if (ta == null) {
+                return 1;
+            }
+            if (tb == null) {
+                return -1;
+            }
+            return tb.compareTo(ta);
+        });
+        long total = merged.size();
+        int from = (int) Math.min(total, (cur - 1) * sz);
+        int to = (int) Math.min(total, from + sz);
+        List<Map<String, Object>> pageRows = from >= to ? List.of() : merged.subList(from, to);
+        Map<String, Object> r = pageMap(new ArrayList<>(pageRows), total, cur, sz);
+        r.put("source", total == 0 ? "empty" : "export+adhoc+grant");
+        r.put("channels", List.of("export", "adhoc", "grant"));
+        r.put("hint", total == 0
+                ? "暂无审计片段（出湖 / 即席高风险 / 授权变更）"
+                : "已聚合出湖审计 + 即席高风险执行 + 授权变更（近窗合并分页）");
+        return r;
+    }
+
+    private List<Map<String, Object>> loadExportAuditRows(String workspace, String kw, int limit) {
         QueryWrapper<GovExportAudit> qw = new QueryWrapper<>();
         qw.lambda()
                 .eq(GovExportAudit::getDeleteFlag, NOT_DELETE)
                 .eq(StrUtil.isNotBlank(workspace), GovExportAudit::getWs, workspace)
-                .orderByDesc(GovExportAudit::getEventTime);
-        if (StrUtil.isNotBlank(q)) {
-            String kw = q.trim();
+                .orderByDesc(GovExportAudit::getEventTime)
+                .last("limit " + Math.max(1, limit));
+        if (StrUtil.isNotBlank(kw)) {
             qw.lambda().and(w -> w.like(GovExportAudit::getTicketNo, kw)
                     .or().like(GovExportAudit::getSrcTable, kw)
                     .or().like(GovExportAudit::getTarget, kw)
                     .or().like(GovExportAudit::getEventType, kw)
                     .or().like(GovExportAudit::getApprover, kw));
         }
-        Page<GovExportAudit> page = exportAuditMapper.selectPage(new Page<>(cur, sz), qw);
         List<Map<String, Object>> records = new ArrayList<>();
-        for (GovExportAudit a : page.getRecords()) {
+        for (GovExportAudit a : exportAuditMapper.selectList(qw)) {
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id", a.getId());
+            row.put("id", "export-" + a.getId());
             row.put("time", a.getEventTime());
             row.put("eventType", a.getEventType());
             row.put("ticketNo", a.getTicketNo());
@@ -260,12 +343,152 @@ public class SecBoardServiceImpl implements SecBoardService {
             row.put("risk", riskOf(a.getEventType()));
             records.add(row);
         }
-        Map<String, Object> r = pageMap(records, page.getTotal(), cur, sz);
-        r.put("source", records.isEmpty() ? "empty" : "gov_export_audit");
-        r.put("hint", records.isEmpty()
-                ? "暂无高风险审计片段（出湖审计空；即席审计待扩展）"
-                : "当前拼接出湖审计；即席查询审计可后续并入");
-        return r;
+        return records;
+    }
+
+    private List<Map<String, Object>> loadQueryRiskAuditRows(String workspace, String kw, int limit) {
+        QueryWrapper<CpQueryExec> qw = new QueryWrapper<>();
+        qw.lambda()
+                .eq(CpQueryExec::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), CpQueryExec::getWs, workspace)
+                .and(w -> w.in(CpQueryExec::getStatus, "blocked", "failed", "error")
+                        .or(x -> x.isNotNull(CpQueryExec::getMaskCols).ne(CpQueryExec::getMaskCols, ""))
+                        .or().eq(CpQueryExec::getMaskDegraded, 1))
+                .orderByDesc(CpQueryExec::getCreateTime)
+                .last("limit " + Math.max(1, limit));
+        if (StrUtil.isNotBlank(kw)) {
+            qw.lambda().and(w -> w.like(CpQueryExec::getQueryId, kw)
+                    .or().like(CpQueryExec::getUserId, kw)
+                    .or().like(CpQueryExec::getUserName, kw)
+                    .or().like(CpQueryExec::getSqlSummary, kw)
+                    .or().like(CpQueryExec::getStatus, kw)
+                    .or().like(CpQueryExec::getErrorMsg, kw)
+                    .or().like(CpQueryExec::getMaskSource, kw));
+        }
+        List<Map<String, Object>> records = new ArrayList<>();
+        for (CpQueryExec e : queryExecMapper.selectList(qw)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", "adhoc-" + e.getId());
+            row.put("time", e.getCreateTime() != null ? e.getCreateTime() : e.getUpdateTime());
+            row.put("eventType", adhocEventType(e));
+            row.put("ticketNo", e.getQueryId());
+            row.put("src", StrUtil.blankToDefault(e.getSqlSummary(), e.getCatalogName()));
+            row.put("target", e.getUserName() != null ? e.getUserName() : e.getUserId());
+            row.put("approver", null);
+            row.put("purpose", StrUtil.maxLength(e.getErrorMsg(), 200));
+            row.put("channel", "adhoc");
+            row.put("risk", adhocRisk(e));
+            row.put("maskSource", e.getMaskSource());
+            row.put("maskDegraded", e.getMaskDegraded());
+            row.put("maskCols", e.getMaskCols());
+            row.put("status", e.getStatus());
+            records.add(row);
+        }
+        return records;
+    }
+
+    private List<Map<String, Object>> loadGrantAuditRows(String workspace, String kw, int limit) {
+        QueryWrapper<SecAuthGrant> qw = new QueryWrapper<>();
+        qw.lambda()
+                .eq(SecAuthGrant::getDeleteFlag, NOT_DELETE)
+                .eq(StrUtil.isNotBlank(workspace), SecAuthGrant::getWs, workspace)
+                .and(w -> w.isNotNull(SecAuthGrant::getRowFilter).ne(SecAuthGrant::getRowFilter, "")
+                        .or(x -> x.isNotNull(SecAuthGrant::getAllowedColumns).ne(SecAuthGrant::getAllowedColumns, ""))
+                        .or().like(SecAuthGrant::getColumnMask, "\"plain\"")
+                        .or().in(SecAuthGrant::getStatus, "revoked", "expired"))
+                .orderByDesc(SecAuthGrant::getUpdateTime)
+                .orderByDesc(SecAuthGrant::getCreateTime)
+                .last("limit " + Math.max(1, limit));
+        if (StrUtil.isNotBlank(kw)) {
+            qw.lambda().and(w -> w.like(SecAuthGrant::getSubjectId, kw)
+                    .or().like(SecAuthGrant::getResourceId, kw)
+                    .or().like(SecAuthGrant::getAssetId, kw)
+                    .or().like(SecAuthGrant::getPrivilege, kw)
+                    .or().like(SecAuthGrant::getTicketId, kw)
+                    .or().like(SecAuthGrant::getStatus, kw));
+        }
+        List<Map<String, Object>> records = new ArrayList<>();
+        for (SecAuthGrant g : grantMapper.selectList(qw)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", "grant-" + g.getId());
+            Date t = g.getUpdateTime() != null ? g.getUpdateTime() : g.getCreateTime();
+            row.put("time", t);
+            row.put("eventType", "grant." + StrUtil.blankToDefault(g.getStatus(), "unknown"));
+            row.put("ticketNo", g.getTicketId());
+            row.put("src", firstNonBlank(g.getResourceId(), g.getAssetId()));
+            row.put("target", g.getSubjectId());
+            row.put("approver", g.getCreateUser());
+            StringBuilder purpose = new StringBuilder(StrUtil.blankToDefault(g.getPrivilege(), "SELECT"));
+            if (StrUtil.isNotBlank(g.getRowFilter())) {
+                purpose.append(" · row_filter");
+            }
+            if (StrUtil.isNotBlank(g.getAllowedColumns())) {
+                purpose.append(" · cols=").append(StrUtil.maxLength(g.getAllowedColumns(), 64));
+            }
+            row.put("purpose", purpose.toString());
+            row.put("channel", "grant");
+            row.put("risk", grantRisk(g));
+            row.put("rowFilter", g.getRowFilter());
+            row.put("allowedColumns", g.getAllowedColumns());
+            records.add(row);
+        }
+        return records;
+    }
+
+    private static String adhocEventType(CpQueryExec e) {
+        if (e == null) {
+            return "adhoc.query";
+        }
+        String err = StrUtil.blankToDefault(e.getErrorMsg(), "");
+        if (err.contains("COLUMN_ALLOWLIST") || StrUtil.containsIgnoreCase(e.getStatusLabel(), "列权限")) {
+            return "adhoc.column_denied";
+        }
+        if (err.contains("ROW_FILTER") || StrUtil.containsIgnoreCase(e.getStatusLabel(), "行级")) {
+            return "adhoc.row_filter";
+        }
+        if ("blocked".equalsIgnoreCase(e.getStatus())) {
+            return "adhoc.blocked";
+        }
+        if (StrUtil.isNotBlank(e.getMaskCols())) {
+            return "adhoc.masked";
+        }
+        if (Integer.valueOf(1).equals(e.getMaskDegraded())) {
+            return "adhoc.mask_degraded";
+        }
+        return "adhoc." + StrUtil.blankToDefault(e.getStatus(), "query");
+    }
+
+    private static String adhocRisk(CpQueryExec e) {
+        if (e == null) {
+            return "中";
+        }
+        if ("blocked".equalsIgnoreCase(e.getStatus()) || "failed".equalsIgnoreCase(e.getStatus())
+                || "error".equalsIgnoreCase(e.getStatus())) {
+            return "高";
+        }
+        if (Integer.valueOf(1).equals(e.getMaskDegraded())) {
+            return "中";
+        }
+        if (StrUtil.isNotBlank(e.getMaskCols())) {
+            return "低";
+        }
+        return "中";
+    }
+
+    private static String grantRisk(SecAuthGrant g) {
+        if (g == null) {
+            return "中";
+        }
+        if ("revoked".equalsIgnoreCase(g.getStatus()) || "expired".equalsIgnoreCase(g.getStatus())) {
+            return "中";
+        }
+        if (StrUtil.isNotBlank(g.getAllowedColumns()) || StrUtil.isNotBlank(g.getRowFilter())) {
+            return "低";
+        }
+        if (StrUtil.containsIgnoreCase(StrUtil.blankToDefault(g.getColumnMask(), ""), "plain")) {
+            return "高";
+        }
+        return "低";
     }
 
     @Override

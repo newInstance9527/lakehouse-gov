@@ -29,6 +29,8 @@ public class SecAuthGrant {
     private String gravAssetId;
     private String privilege;
     private String columnMask;
+    /** 逗号分隔列白名单；空=不限制列 */
+    private String allowedColumns;
     private String rowFilter;
     private String gravPolicyId;
     private Integer gravProjected;

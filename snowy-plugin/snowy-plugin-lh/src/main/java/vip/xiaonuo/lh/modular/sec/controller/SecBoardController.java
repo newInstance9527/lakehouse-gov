@@ -14,8 +14,10 @@ import vip.xiaonuo.common.annotation.CommonLog;
 import vip.xiaonuo.common.pojo.CommonResult;
 import vip.xiaonuo.lh.modular.sec.param.SecJobSaIdParam;
 import vip.xiaonuo.lh.modular.sec.param.SecJobSaRegisterParam;
+import vip.xiaonuo.lh.modular.sec.param.SecOmMaskSyncParam;
 import vip.xiaonuo.lh.modular.sec.param.SecVaultRotateParam;
 import vip.xiaonuo.lh.modular.sec.service.SecBoardService;
+import vip.xiaonuo.lh.modular.sec.service.SecOmMaskSyncService;
 
 import java.util.Map;
 
@@ -26,6 +28,8 @@ public class SecBoardController {
 
     @Resource
     private SecBoardService secBoardService;
+    @Resource
+    private SecOmMaskSyncService omMaskSyncService;
 
     @Operation(summary = "安全中心 KPI")
     @GetMapping("/lh/sec/overview")
@@ -51,6 +55,13 @@ public class SecBoardController {
             @RequestParam(required = false, defaultValue = "1") long current,
             @RequestParam(required = false, defaultValue = "20") long size) {
         return CommonResult.data(secBoardService.pageMasks(ws, q, current, size));
+    }
+
+    @Operation(summary = "从 OM 列敏感标签同步脱敏投影（sec_mask_policy_proj）")
+    @CommonLog("OM敏感标签同步mask")
+    @PostMapping("/lh/sec/masks/sync-from-om")
+    public CommonResult<Map<String, Object>> syncMasksFromOm(@RequestBody(required = false) SecOmMaskSyncParam param) {
+        return CommonResult.data(omMaskSyncService.syncFromOm(param == null ? new SecOmMaskSyncParam() : param));
     }
 
     @Operation(summary = "分级分类资产分布")
